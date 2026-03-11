@@ -1,7 +1,24 @@
 import api from './api';
 
-/** Cached Bluetooth printer device — dùng lại cho lần in sau, không cần chọn lại */
+const BLUETOOTH_PRINTER_NAME_KEY = 'laundry_bluetooth_printer_name';
+
+/** Cached Bluetooth printer device — dùng lại trong phiên hiện tại; đóng Chrome thì mất, dùng tên lưu để filter lần sau */
 let cachedBluetoothDevice = null;
+
+const getSavedPrinterName = () => {
+  try {
+    return localStorage.getItem(BLUETOOTH_PRINTER_NAME_KEY) || null;
+  } catch (_) {
+    return null;
+  }
+};
+
+const setSavedPrinterName = (name) => {
+  try {
+    if (name) localStorage.setItem(BLUETOOTH_PRINTER_NAME_KEY, name);
+    else localStorage.removeItem(BLUETOOTH_PRINTER_NAME_KEY);
+  } catch (_) {}
+};
 
 /**
  * Check if Web Bluetooth is supported
@@ -123,13 +140,29 @@ const printViaBluetooth = async (escPosDataBase64) => {
     }
   }
 
-  // Chưa có cache hoặc kết nối lỗi → hiện danh sách chọn máy in
+  // Chưa có cache hoặc kết nối lỗi → chọn máy in (ưu tiên filter theo tên đã lưu để sau khi đóng/mở lại Chrome chỉ cần chạm 1 lần)
+  const savedName = getSavedPrinterName();
   try {
-    const device = await navigator.bluetooth.requestDevice({
-      acceptAllDevices: true,
-      optionalServices: OPTIONAL_SERVICES,
-    });
+    let device = null;
+    if (savedName && savedName.trim()) {
+      try {
+        device = await navigator.bluetooth.requestDevice({
+          filters: [{ name: savedName.trim() }],
+          optionalServices: OPTIONAL_SERVICES,
+        });
+      } catch (filterErr) {
+        // Máy đổi tên / không thấy / user hủy → thử mở danh sách tất cả
+        device = null;
+      }
+    }
+    if (!device) {
+      device = await navigator.bluetooth.requestDevice({
+        acceptAllDevices: true,
+        optionalServices: OPTIONAL_SERVICES,
+      });
+    }
     cachedBluetoothDevice = device;
+    if (device.name) setSavedPrinterName(device.name);
     await connectAndSend(device, escPosDataBase64);
     return true;
   } catch (error) {
@@ -198,4 +231,5 @@ export const printBill = async (orderId) => {
  */
 export const resetBluetoothPrinter = () => {
   cachedBluetoothDevice = null;
+  setSavedPrinterName(null);
 };

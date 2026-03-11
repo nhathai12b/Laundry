@@ -502,7 +502,8 @@ function Settings() {
                 <li>Đảm bảo máy in hỗ trợ Bluetooth và đã được bật</li>
                 <li>Chỉ hoạt động trên trình duyệt Chrome trên Android</li>
                 <li>Khi in, trình duyệt sẽ yêu cầu chọn thiết bị Bluetooth</li>
-                <li>Chọn máy in Bluetooth của bạn từ danh sách</li>
+                <li>Chọn máy in Bluetooth của bạn từ danh sách — trang web sẽ nhớ tên máy in</li>
+                <li>Sau khi đóng Chrome rồi mở lại, lần in đầu chỉ cần chạm xác nhận máy in (thường chỉ hiện đúng 1 máy, không cần tìm lại)</li>
                 <li>Sau khi cấu hình, thử in bill từ một đơn hàng để kiểm tra</li>
               </ul>
             </div>

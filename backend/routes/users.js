@@ -595,6 +595,70 @@ router.post('/:id/revert-to-pending', authorize('admin'), auditLog('revert-to-pe
   }
 });
 
+// Extend subscription for admin (Root only) - gia hạn khi tài khoản hết hạn
+router.post('/:id/extend-subscription', authorize('admin'), async (req, res) => {
+  try {
+    if (req.user.role !== 'root') {
+      return res.status(403).json({ error: 'Chỉ root admin mới có thể gia hạn' });
+    }
+
+    const user = await queryOne('SELECT * FROM users WHERE id = ?', [req.params.id]);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    if (user.role !== 'admin') {
+      return res.status(400).json({ error: 'Chỉ có thể gia hạn cho admin' });
+    }
+
+    const validPackages = ['1month', '3months', '6months', '1year'];
+    const packageType = req.body.package && validPackages.includes(req.body.package) ? req.body.package : '1month';
+
+    const now = new Date();
+    let baseDate = now;
+    if (user.subscription_expires_at) {
+      const expires = new Date(user.subscription_expires_at);
+      if (expires > now) baseDate = expires; // gia hạn từ ngày hết hạn hiện tại nếu chưa hết
+    }
+
+    let expirationDate = new Date(baseDate);
+    switch (packageType) {
+      case '1month':
+        expirationDate.setMonth(baseDate.getMonth() + 1);
+        break;
+      case '3months':
+        expirationDate.setMonth(baseDate.getMonth() + 3);
+        break;
+      case '6months':
+        expirationDate.setMonth(baseDate.getMonth() + 6);
+        break;
+      case '1year':
+        expirationDate.setFullYear(baseDate.getFullYear() + 1);
+        break;
+      default:
+        expirationDate.setMonth(baseDate.getMonth() + 1);
+    }
+
+    const expirationDateStr = expirationDate.toISOString().slice(0, 19).replace('T', ' ');
+
+    await execute(
+      'UPDATE users SET subscription_package = ?, subscription_expires_at = ? WHERE id = ?',
+      [packageType, expirationDateStr, req.params.id]
+    );
+
+    const packageNames = { '1month': '1 tháng', '3months': '3 tháng', '6months': '6 tháng', '1year': '1 năm' };
+    res.json({
+      message: `Đã gia hạn thành công. Hết hạn mới: ${new Date(expirationDateStr).toLocaleDateString('vi-VN')}`,
+      subscription_expires_at: expirationDateStr,
+      subscription_package: packageType,
+      package_label: packageNames[packageType],
+    });
+  } catch (error) {
+    console.error('Extend subscription error:', error);
+    res.status(500).json({ error: 'Lỗi gia hạn. Vui lòng thử lại.' });
+  }
+});
+
 // Reject pending admin (Root only)
 router.post('/:id/reject', authorize('admin'), auditLog('reject', 'user'), async (req, res) => {
   try {

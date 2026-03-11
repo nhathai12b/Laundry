@@ -11,6 +11,9 @@ function AdminManagement() {
   const [showModal, setShowModal] = useState(false);
   const [showPackageModal, setShowPackageModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
+  const [showExtendModal, setShowExtendModal] = useState(false);
+  const [extendAdmin, setExtendAdmin] = useState(null);
+  const [extendPackage, setExtendPackage] = useState('1month');
   const [selectedAdminId, setSelectedAdminId] = useState(null);
   const [selectedAdmin, setSelectedAdmin] = useState(null);
   const [selectedPackage, setSelectedPackage] = useState('3months');
@@ -183,6 +186,28 @@ function AdminManagement() {
         : '',
     });
     setShowEditModal(true);
+  };
+
+  const handleExtendClick = (admin) => {
+    setExtendAdmin(admin);
+    setExtendPackage('1month');
+    setShowExtendModal(true);
+  };
+
+  const confirmExtendSubscription = async () => {
+    if (!extendAdmin) return;
+    try {
+      const response = await api.post(`/users/${extendAdmin.id}/extend-subscription`, {
+        package: extendPackage,
+      });
+      alert(response.data.message || 'Đã gia hạn thành công!');
+      setShowExtendModal(false);
+      setExtendAdmin(null);
+      loadAllAdmins();
+    } catch (error) {
+      const msg = error.response?.data?.error || error.message || 'Gia hạn thất bại';
+      alert(msg);
+    }
   };
 
   const handleUpdateAdmin = async (e) => {
@@ -465,6 +490,14 @@ function AdminManagement() {
                               >
                                 Sửa
                               </button>
+                              {admin.role !== 'root' && (
+                                <button
+                                  onClick={() => handleExtendClick(admin)}
+                                  className="bg-green-600 text-white px-3 py-1 rounded text-sm hover:bg-green-700"
+                                >
+                                  Gia hạn
+                                </button>
+                              )}
                               {admin.status === 'active' && (() => {
                                 const { user: currentUser } = getAuth();
                                 if (currentUser && currentUser.id === admin.id) return null;
@@ -828,6 +861,55 @@ function AdminManagement() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Gia hạn subscription Modal */}
+      {showExtendModal && extendAdmin && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-lg max-w-md w-full p-6">
+            <h2 className="text-xl font-bold mb-2">Gia hạn gói đăng ký</h2>
+            <p className="text-gray-600 mb-4">
+              Admin: <strong>{extendAdmin.name}</strong> ({extendAdmin.phone})
+            </p>
+            <p className="text-sm text-gray-600 mb-3">Chọn gói gia hạn (cộng thêm từ ngày hết hạn hiện tại hoặc từ hôm nay nếu đã hết hạn):</p>
+            <div className="space-y-2 mb-6">
+              {[
+                { value: '1month', label: '1 tháng' },
+                { value: '3months', label: '3 tháng' },
+                { value: '6months', label: '6 tháng' },
+                { value: '1year', label: '1 năm' },
+              ].map((pkg) => (
+                <label key={pkg.value} className="flex items-center p-3 border rounded-lg cursor-pointer hover:bg-gray-50">
+                  <input
+                    type="radio"
+                    name="extendPackage"
+                    value={pkg.value}
+                    checked={extendPackage === pkg.value}
+                    onChange={() => setExtendPackage(pkg.value)}
+                    className="mr-3"
+                  />
+                  <span className="font-medium">{pkg.label}</span>
+                </label>
+              ))}
+            </div>
+            <div className="flex gap-3">
+              <button
+                type="button"
+                onClick={confirmExtendSubscription}
+                className="flex-1 bg-green-600 text-white py-2.5 rounded-lg hover:bg-green-700 font-medium"
+              >
+                Xác nhận gia hạn
+              </button>
+              <button
+                type="button"
+                onClick={() => { setShowExtendModal(false); setExtendAdmin(null); }}
+                className="flex-1 bg-gray-200 text-gray-800 py-2.5 rounded-lg hover:bg-gray-300 font-medium"
+              >
+                Hủy
+              </button>
+            </div>
           </div>
         </div>
       )}
