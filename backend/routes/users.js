@@ -8,6 +8,24 @@ import { validatePasswordStrength, containsUserInfo } from '../utils/passwordVal
 
 const router = express.Router();
 
+/** Add months to a date without day overflow (e.g. Jan 31 + 1 month = Feb 28, not Mar 2) */
+function addMonths(date, months) {
+  const d = new Date(date);
+  const day = d.getDate();
+  d.setDate(1);
+  d.setMonth(d.getMonth() + months);
+  const lastDay = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+  d.setDate(Math.min(day, lastDay));
+  return d;
+}
+
+/** Add one year; day stays same (Feb 29 -> Feb 28 next year) */
+function addYears(date, years) {
+  const d = new Date(date);
+  d.setFullYear(d.getFullYear() + years);
+  return d;
+}
+
 // All routes require authentication
 router.use(authenticate);
 
@@ -342,28 +360,28 @@ router.patch('/:id', authorize('admin'), auditLog('update', 'user'), async (req,
         updates.push('subscription_expires_at = ?');
         values.push(subscription_expires_at);
       } else if (subscription_package) {
-        // Calculate expiration date based on package
+        // Calculate expiration date based on package (addMonths/addYears tránh lỗi ngày tháng, e.g. 31/1 + 1 tháng)
         const now = new Date();
-        let expirationDate = new Date();
-        
+        let expirationDate = null;
         switch (subscription_package) {
           case '1month':
-            expirationDate.setMonth(now.getMonth() + 1);
+            expirationDate = addMonths(now, 1);
             break;
           case '3months':
-            expirationDate.setMonth(now.getMonth() + 3);
+            expirationDate = addMonths(now, 3);
             break;
           case '6months':
-            expirationDate.setMonth(now.getMonth() + 6);
+            expirationDate = addMonths(now, 6);
             break;
           case '1year':
-            expirationDate.setFullYear(now.getFullYear() + 1);
+            expirationDate = addYears(now, 1);
             break;
           case '7days':
-            expirationDate.setDate(now.getDate() + 7);
+            expirationDate = new Date(now);
+            expirationDate.setDate(expirationDate.getDate() + 7);
             break;
           default:
-            expirationDate = null;
+            break;
         }
         
         if (expirationDate) {
@@ -484,26 +502,28 @@ router.post('/:id/approve', authorize('admin'), auditLog('approve', 'user'), asy
       return res.status(400).json({ error: 'Vui lòng chọn gói: 1 tháng, 3 tháng, 6 tháng, 1 năm hoặc 7 ngày dùng thử' });
     }
 
-    // Calculate expiration date based on package
+    // Calculate expiration date based on package (addMonths/addYears tránh lỗi ngày tháng)
     const now = new Date();
-    let expirationDate = new Date();
-    
+    let expirationDate;
     switch (packageType) {
       case '1month':
-        expirationDate.setMonth(now.getMonth() + 1);
+        expirationDate = addMonths(now, 1);
         break;
       case '3months':
-        expirationDate.setMonth(now.getMonth() + 3);
+        expirationDate = addMonths(now, 3);
         break;
       case '6months':
-        expirationDate.setMonth(now.getMonth() + 6);
+        expirationDate = addMonths(now, 6);
         break;
       case '1year':
-        expirationDate.setFullYear(now.getFullYear() + 1);
+        expirationDate = addYears(now, 1);
         break;
       case '7days':
-        expirationDate.setDate(now.getDate() + 7);
+        expirationDate = new Date(now);
+        expirationDate.setDate(expirationDate.getDate() + 7);
         break;
+      default:
+        expirationDate = addMonths(now, 1);
     }
 
     // Format expiration date for MySQL (YYYY-MM-DD HH:MM:SS)
@@ -621,29 +641,30 @@ router.post('/:id/extend-subscription', authorize('admin'), async (req, res) => 
       if (expires > now) baseDate = expires; // gia hạn từ ngày hết hạn hiện tại nếu chưa hết
     }
 
-    let expirationDate = new Date(baseDate);
+    let expirationDate;
     switch (packageType) {
       case '1month':
-        expirationDate.setMonth(baseDate.getMonth() + 1);
+        expirationDate = addMonths(baseDate, 1);
         break;
       case '3months':
-        expirationDate.setMonth(baseDate.getMonth() + 3);
+        expirationDate = addMonths(baseDate, 3);
         break;
       case '6months':
-        expirationDate.setMonth(baseDate.getMonth() + 6);
+        expirationDate = addMonths(baseDate, 6);
         break;
       case '1year':
-        expirationDate.setFullYear(baseDate.getFullYear() + 1);
+        expirationDate = addYears(baseDate, 1);
         break;
       default:
-        expirationDate.setMonth(baseDate.getMonth() + 1);
+        expirationDate = addMonths(baseDate, 1);
     }
 
     const expirationDateStr = expirationDate.toISOString().slice(0, 19).replace('T', ' ');
 
+    // Cập nhật subscription và đảm bảo status = 'active' (phòng trường hợp sau này có job đổi status khi hết hạn)
     await execute(
-      'UPDATE users SET subscription_package = ?, subscription_expires_at = ? WHERE id = ?',
-      [packageType, expirationDateStr, req.params.id]
+      'UPDATE users SET subscription_package = ?, subscription_expires_at = ?, status = ? WHERE id = ?',
+      [packageType, expirationDateStr, 'active', req.params.id]
     );
 
     const packageNames = { '1month': '1 tháng', '3months': '3 tháng', '6months': '6 tháng', '1year': '1 năm' };

@@ -338,7 +338,9 @@ router.post('/login', loginRateLimiter(), async (req, res) => {
           name: user.name,
           phone: user.phone,
           role: user.role,
-          status: user.status
+          status: user.status,
+          subscription_expires_at: user.subscription_expires_at || null,
+          subscription_package: user.subscription_package || null
         }
       });
       return;
@@ -415,7 +417,7 @@ router.post('/register', async (req, res) => {
 // Get current user
 router.get('/me', authenticate, async (req, res) => {
   try {
-    const user = await queryOne('SELECT id, name, phone, role, status, started_at, hourly_rate, shift_rate FROM users WHERE id = ?', [req.user.id]);
+    const user = await queryOne('SELECT id, name, phone, role, status, started_at, hourly_rate, shift_rate, subscription_expires_at, subscription_package FROM users WHERE id = ?', [req.user.id]);
     
     if (!user) {
       return res.status(404).json({ error: 'User not found' });

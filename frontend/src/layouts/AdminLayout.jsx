@@ -1,10 +1,30 @@
+import { useState, useEffect } from 'react';
 import { Outlet, Link, useNavigate, useLocation } from 'react-router-dom';
 import { clearAuth, getAuth, isRoot } from '../utils/auth';
+import api from '../utils/api';
+
+const DAYS_WARNING = 14; // Cảnh báo khi còn <= 14 ngày
 
 function AdminLayout() {
   const navigate = useNavigate();
   const location = useLocation();
   const { user } = getAuth();
+  const [subscriptionExpiresAt, setSubscriptionExpiresAt] = useState(user?.subscription_expires_at || null);
+
+  // Admin thường: lấy subscription mới nhất (từ user khi login hoặc từ /me)
+  useEffect(() => {
+    if (isRoot() || user?.role !== 'admin') return;
+    if (user?.subscription_expires_at) {
+      setSubscriptionExpiresAt(user.subscription_expires_at);
+      return;
+    }
+    api.get('/auth/me')
+      .then((res) => {
+        const exp = res.data?.user?.subscription_expires_at;
+        if (exp) setSubscriptionExpiresAt(exp);
+      })
+      .catch(() => {});
+  }, [user?.role, user?.subscription_expires_at]);
 
   const handleLogout = () => {
     clearAuth();
@@ -110,6 +130,25 @@ function AdminLayout() {
 
         {/* Main Content */}
         <main className="flex-1 lg:ml-0 lg:pb-0">
+          {/* Banner cảnh báo gói sắp hết hạn / đã hết hạn (chỉ admin thường) */}
+          {!isRoot() && user?.role === 'admin' && subscriptionExpiresAt && (() => {
+            const expires = new Date(subscriptionExpiresAt);
+            const now = new Date();
+            const isExpired = expires < now;
+            const msLeft = expires - now;
+            const daysLeft = Math.ceil(msLeft / (24 * 60 * 60 * 1000));
+            const soon = !isExpired && daysLeft <= DAYS_WARNING;
+            if (!isExpired && !soon) return null;
+            const label = isExpired
+              ? `Gói đăng ký đã hết hạn từ ${expires.toLocaleDateString('vi-VN')}. Vui lòng liên hệ root admin để gia hạn.`
+              : `Gói đăng ký sắp hết hạn (còn ${daysLeft} ngày, hết hạn ${expires.toLocaleDateString('vi-VN')}). Vui lòng liên hệ root admin để gia hạn.`;
+            return (
+              <div className="mx-4 mt-4 lg:mx-8 lg:mt-8 px-4 py-3 rounded-lg border-2 border-red-400 bg-red-50 text-red-800 flex items-center gap-3">
+                <span className="text-xl" aria-hidden>⚠️</span>
+                <p className="font-semibold text-sm lg:text-base flex-1">{label}</p>
+              </div>
+            );
+          })()}
           <div className="p-4 lg:p-8">
             <Outlet />
           </div>
