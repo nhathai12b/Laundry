@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import api from '../utils/api';
-import { setAuth, isAdmin, isRoot, isMobileScreen } from '../utils/auth';
+import { setAuth, isAdmin, isRoot } from '../utils/auth';
 
 function Login() {
   const [phone, setPhone] = useState('');
@@ -23,14 +23,7 @@ function Login() {
     try {
       const response = await api.post('/auth/login', { phone, password });
       
-      // Check if store selection is required (for admin) - chặn admin thường đăng nhập từ điện thoại (root được dùng điện thoại)
       if (response.data.requiresStoreSelection) {
-        const user = response.data.user;
-        if (user && user.role === 'admin' && isMobileScreen()) {
-          setError('Tài khoản admin chỉ được đăng nhập từ máy tính. Vui lòng truy cập từ máy tính hoặc tablet màn hình lớn.');
-          setLoading(false);
-          return;
-        }
         setStores(response.data.stores || []);
         setTempUser(response.data.user);
         setIsStoreSelection(true);
@@ -57,13 +50,6 @@ function Login() {
         return;
       }
 
-      // Admin thường chỉ được đăng nhập từ máy tính (root có thể dùng điện thoại)
-      if (user.role === 'admin' && isMobileScreen()) {
-        setError('Tài khoản admin chỉ được đăng nhập từ máy tính. Vui lòng truy cập từ máy tính hoặc tablet màn hình lớn.');
-        setLoading(false);
-        return;
-      }
-      
       setAuth(token, user);
 
       // Root admin chỉ có thể truy cập Dashboard và Admin Management
@@ -112,13 +98,6 @@ function Login() {
         return;
       }
 
-      // Admin thường chỉ được đăng nhập từ máy tính (root có thể dùng điện thoại)
-      if (user.role === 'admin' && isMobileScreen()) {
-        setError('Tài khoản admin chỉ được đăng nhập từ máy tính. Vui lòng truy cập từ máy tính hoặc tablet màn hình lớn.');
-        setLoading(false);
-        return;
-      }
-      
       setAuth(token, user);
 
       // Root admin chỉ có thể truy cập Dashboard và Admin Management

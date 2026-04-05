@@ -1,6 +1,6 @@
 import express from 'express';
 import { query, queryOne, execute } from '../database/db.js';
-import { calculateHours } from '../utils/helpers.js';
+import { calculateHours, formatDateTimeGMT7, parseTimesheetDateTimeMs } from '../utils/helpers.js';
 import { authenticate } from '../middleware/auth.js';
 import { authorize } from '../middleware/auth.js';
 import { OVERTIME_MULTIPLIER } from '../utils/constants.js';
@@ -100,6 +100,42 @@ router.get('/store-employees', async (req, res) => {
   }
 });
 
+/** Ca đang mở (check_out IS NULL) của user — dùng để cảnh báo checkout bù và đồng bộ UI */
+router.get('/open-shifts', async (req, res) => {
+  try {
+    if (req.user.role === 'admin') {
+      return res.json({ data: [] });
+    }
+    const shifts = await query(`
+      SELECT t.*,
+        COALESCE(e.name, u.name) as employee_name
+      FROM timesheets t
+      JOIN users u ON t.user_id = u.id
+      LEFT JOIN employees e ON t.employee_id = e.id
+      WHERE t.user_id = ? AND t.check_out IS NULL
+      ORDER BY t.check_in ASC
+    `, [req.user.id]);
+    res.json({ data: shifts || [] });
+  } catch (error) {
+    console.error('Get open shifts error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+function normalizeCheckoutAtTime(input) {
+  if (input === undefined || input === null || input === '') {
+    return { ok: true, mysql: null };
+  }
+  let s = String(input).trim().replace('T', ' ');
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(s)) {
+    s += ':00';
+  }
+  if (!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(s)) {
+    return { ok: false, error: 'Định dạng giờ ra không hợp lệ (YYYY-MM-DD HH:mm, giờ Việt Nam GMT+7).' };
+  }
+  return { ok: true, mysql: s };
+}
+
 // Check in
 router.post('/check-in', async (req, res) => {
   try {
@@ -133,27 +169,31 @@ router.post('/check-in', async (req, res) => {
       }
     }
 
-    // Convert to MySQL datetime format (YYYY-MM-DD HH:MM:SS)
-    const now = new Date();
-    const checkIn = now.toISOString().slice(0, 19).replace('T', ' ');
+    // Lưu giờ vào theo GMT+7 (Việt Nam) — đúng chấm công / xuất Excel
+    const checkIn = formatDateTimeGMT7(new Date());
 
-    // Check if already checked in today for this store and employee
-    const today = now.toISOString().split('T')[0];
-    let existing;
+    // A: Chặn mở ca mới nếu cùng cửa hàng + cùng slot nhân viên vẫn còn ca chưa checkout (mọi ngày)
+    let openSameSlot;
     if (employeeId) {
-      existing = await queryOne(`
-        SELECT * FROM timesheets
-        WHERE store_id = ? AND employee_id = ? AND DATE(check_in) = ? AND check_out IS NULL
-      `, [storeId, employeeId, today]);
+      openSameSlot = await queryOne(`
+        SELECT id, check_in FROM timesheets
+        WHERE store_id = ? AND employee_id = ? AND check_out IS NULL
+        LIMIT 1
+      `, [storeId, employeeId]);
     } else {
-      existing = await queryOne(`
-        SELECT * FROM timesheets
-        WHERE store_id = ? AND employee_id IS NULL AND DATE(check_in) = ? AND check_out IS NULL
-      `, [storeId, today]);
+      openSameSlot = await queryOne(`
+        SELECT id, check_in FROM timesheets
+        WHERE store_id = ? AND employee_id IS NULL AND check_out IS NULL
+        LIMIT 1
+      `, [storeId]);
     }
-
-    if (existing) {
-      return res.status(400).json({ error: 'Already checked in today for this employee' });
+    if (openSameSlot) {
+      const d = String(openSameSlot.check_in || '').slice(0, 10);
+      return res.status(400).json({
+        error: `Còn ca chưa checkout (check-in ${d}). Vui lòng check-out ca này trước khi mở ca mới.`,
+        code: 'OPEN_SHIFT_EXISTS',
+        open_shift: { id: openSameSlot.id, check_in: openSameSlot.check_in },
+      });
     }
 
     const result = await execute(`
@@ -181,15 +221,27 @@ router.post('/check-in', async (req, res) => {
 // Get expected revenue for current shift (tổng số tiền từ các đơn đã hoàn thành trong ca)
 router.get('/expected-revenue', async (req, res) => {
   try {
-    const today = new Date().toISOString().split('T')[0];
-    
-    // Find today's check-in (query by user_id first, store_id might be different)
-    let timesheet = await queryOne(`
-      SELECT * FROM timesheets
-      WHERE user_id = ? AND DATE(check_in) = ? AND check_out IS NULL
-      ORDER BY check_in DESC
-      LIMIT 1
-    `, [req.user.id, today]);
+    if (req.user.role === 'admin') {
+      return res.json({ data: { expected_revenue: 0, order_count: 0, total_withdrawn: 0 } });
+    }
+
+    const timesheetIdParam = req.query.timesheet_id ? parseInt(req.query.timesheet_id, 10) : null;
+
+    let timesheet;
+    if (timesheetIdParam && !Number.isNaN(timesheetIdParam)) {
+      timesheet = await queryOne(`
+        SELECT * FROM timesheets
+        WHERE id = ? AND user_id = ? AND check_out IS NULL
+      `, [timesheetIdParam, req.user.id]);
+    }
+    if (!timesheet) {
+      timesheet = await queryOne(`
+        SELECT * FROM timesheets
+        WHERE user_id = ? AND check_out IS NULL
+        ORDER BY check_in ASC
+        LIMIT 1
+      `, [req.user.id]);
+    }
 
     if (!timesheet) {
       return res.json({ data: { expected_revenue: 0, order_count: 0 } });
@@ -246,13 +298,8 @@ router.post('/check-out', async (req, res) => {
       return res.status(403).json({ error: 'Admin không thể check-out. Vui lòng sử dụng tài khoản nhân viên.' });
     }
 
-    const { note, revenue_amount, expected_revenue, withdrawn_amount: checkoutWithdrawn } = req.body;
+    const { note, revenue_amount, expected_revenue, withdrawn_amount: checkoutWithdrawn, timesheet_id, check_out_at } = req.body;
     const userId = req.user.id;
-    // Convert to MySQL datetime format (YYYY-MM-DD HH:MM:SS)
-    const now = new Date();
-    const checkOut = now.toISOString().slice(0, 19).replace('T', ' ');
-
-    // Debug log removed for security
 
     // Validate revenue_amount - allow any numeric value
     if (revenue_amount === undefined || revenue_amount === null || revenue_amount === '') {
@@ -265,33 +312,48 @@ router.post('/check-out', async (req, res) => {
       return res.status(400).json({ error: 'Số tiền thực tế phải là số hợp lệ' });
     }
 
-    // Find today's check-in (query by user_id, store_id should already be set correctly from check-in)
-    const today = new Date().toISOString().split('T')[0];
-    
-    // Debug log removed for security
-    
-    // Find the most recent check-in for today
-    let timesheet = await queryOne(`
-      SELECT * FROM timesheets
-      WHERE user_id = ? AND DATE(check_in) = ? AND check_out IS NULL
-      ORDER BY check_in DESC
-      LIMIT 1
-    `, [userId, today]);
+    const tsId = timesheet_id !== undefined && timesheet_id !== null && timesheet_id !== ''
+      ? parseInt(timesheet_id, 10)
+      : null;
 
-    // Debug log removed for security
+    let timesheet;
+    if (tsId && !Number.isNaN(tsId)) {
+      timesheet = await queryOne(`
+        SELECT * FROM timesheets
+        WHERE id = ? AND user_id = ? AND check_out IS NULL
+      `, [tsId, userId]);
+    }
+    if (!timesheet) {
+      timesheet = await queryOne(`
+        SELECT * FROM timesheets
+        WHERE user_id = ? AND check_out IS NULL
+        ORDER BY check_in ASC
+        LIMIT 1
+      `, [userId]);
+    }
 
     if (!timesheet) {
-      // Debug: Check what timesheets exist
-      const allToday = await query(`
-        SELECT id, user_id, store_id, check_in, check_out, employee_id
-        FROM timesheets
-        WHERE user_id = ? AND DATE(check_in) = ?
-      `, [userId, today]);
-      // Debug log removed for security
-      
-      return res.status(400).json({ 
-        error: 'Không tìm thấy ca làm việc hôm nay. Vui lòng kiểm tra lại hoặc liên hệ quản trị viên.' 
+      return res.status(400).json({
+        error: 'Không tìm thấy ca làm việc đang mở. Vui lòng check-in hoặc liên hệ quản trị viên.',
       });
+    }
+
+    const normOut = normalizeCheckoutAtTime(check_out_at);
+    if (!normOut.ok) {
+      return res.status(400).json({ error: normOut.error });
+    }
+    let checkOut = normOut.mysql;
+    if (!checkOut) {
+      checkOut = formatDateTimeGMT7(new Date());
+    }
+
+    const checkInMs = parseTimesheetDateTimeMs(timesheet.check_in);
+    const checkOutMs = parseTimesheetDateTimeMs(checkOut);
+    if (Number.isNaN(checkOutMs) || Number.isNaN(checkInMs) || checkOutMs < checkInMs) {
+      return res.status(400).json({ error: 'Giờ ra phải sau giờ vào ca.' });
+    }
+    if (checkOutMs > Date.now()) {
+      return res.status(400).json({ error: 'Giờ ra không được sau thời điểm hiện tại.' });
     }
 
     // Calculate hours

@@ -3,8 +3,8 @@ import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from 'r
 import { isAuthenticated, isAdmin, isRoot, isMobileScreen } from './utils/auth';
 import Login from './pages/Login';
 import Register from './pages/Register';
-import DesktopOnlyScreen from './components/DesktopOnlyScreen';
 import AdminLayout from './layouts/AdminLayout';
+import AdminMobileOverview from './pages/admin/AdminMobileOverview';
 import EmployerLayout from './layouts/EmployerLayout';
 import Dashboard from './pages/Dashboard';
 import Home from './pages/Home';
@@ -76,33 +76,44 @@ const EmployerOnlyRoute = ({ children }) => {
   return children;
 };
 
-// Admin thường trên điện thoại: hiển thị "Chỉ hỗ trợ máy tính". Root được dùng điện thoại.
-function AdminDesktopOnlyGuard({ children }) {
-  const [mobile, setMobile] = useState(() => isMobileScreen());
+/** Admin thường + màn nhỏ → chỉ trang tổng quan điện thoại */
+function AdminMobileRedirect() {
+  const loc = useLocation();
+  const [narrow, setNarrow] = useState(() => isMobileScreen());
   useEffect(() => {
-    const check = () => setMobile(isMobileScreen());
+    const check = () => setNarrow(isMobileScreen());
     window.addEventListener('resize', check);
     return () => window.removeEventListener('resize', check);
   }, []);
-  if (isAuthenticated() && isAdmin() && !isRoot() && mobile) {
-    return <DesktopOnlyScreen />;
+  if (isAuthenticated() && isAdmin() && !isRoot() && narrow) {
+    if (loc.pathname !== '/admin/mobile') {
+      return <Navigate to="/admin/mobile" replace />;
+    }
   }
-  return children;
+  return <AdminLayout />;
 }
 
 function App() {
   return (
     <Router>
-      <AdminDesktopOnlyGuard>
       <Routes>
         <Route path="/login" element={<Login />} />
         <Route path="/register" element={<Register />} />
-        
+
+        <Route
+          path="/admin/mobile"
+          element={
+            <PrivateRoute adminOnly={true}>
+              <AdminMobileEntry />
+            </PrivateRoute>
+          }
+        />
+
         <Route
           path="/admin/*"
           element={
             <PrivateRoute adminOnly={true}>
-              <AdminLayout />
+              <AdminMobileRedirect />
             </PrivateRoute>
           }
         >
@@ -137,9 +148,25 @@ function App() {
           <Route path="employees" element={<Employees />} />
         </Route>
       </Routes>
-      </AdminDesktopOnlyGuard>
     </Router>
   );
+}
+
+/** Chỉ admin thường trên điện thoại; root / desktop dùng /admin đầy đủ */
+function AdminMobileEntry() {
+  if (!isAuthenticated()) {
+    return <Navigate to="/login" replace />;
+  }
+  if (!isAdmin()) {
+    return <Navigate to="/" replace />;
+  }
+  if (isRoot()) {
+    return <Navigate to="/admin" replace />;
+  }
+  if (!isMobileScreen()) {
+    return <Navigate to="/admin" replace />;
+  }
+  return <AdminMobileOverview />;
 }
 
 export default App;

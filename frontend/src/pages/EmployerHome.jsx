@@ -4,6 +4,7 @@ import { getAuth } from '../utils/auth';
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDaysInMonth } from 'date-fns';
 import { vi } from 'date-fns/locale';
 import { printBill } from '../utils/printBill';
+import { bestApplicablePromotionId } from '../utils/promotions';
 
 function EmployerHome() {
   const [stats, setStats] = useState({
@@ -157,6 +158,7 @@ function EmployerHome() {
   const handleRemoveItem = (index) => {
     const newItems = formData.items.filter((_, i) => i !== index);
     setFormData({ ...formData, items: newItems });
+    calculateTotalAndLoadPromotions(newItems);
   };
 
   const handleItemChange = (index, field, value) => {
@@ -209,14 +211,10 @@ function EmployerHome() {
     setShowCustomerSuggestions(false);
     setCustomerSuggestions([]);
     
-    // Load promotions for selected customer
-    if (customer.phone) {
-      calculateTotalAndLoadPromotions(formData.items, customer.phone);
-    }
+    calculateTotalAndLoadPromotions(formData.items, customer.phone);
   };
 
   const calculateTotalAndLoadPromotions = async (items, customerPhone = null) => {
-    // Calculate total
     let total = 0;
     for (const item of items) {
       if (item.product_id && item.quantity) {
@@ -227,31 +225,37 @@ function EmployerHome() {
       }
     }
 
-    // Load applicable promotions if total > 0
+    const phoneToUse =
+      customerPhone !== undefined && customerPhone !== null
+        ? customerPhone
+        : formData.customer_phone;
+    const phoneParam =
+      phoneToUse && String(phoneToUse).trim() && String(phoneToUse).trim() !== '0'
+        ? String(phoneToUse).trim()
+        : null;
+
     if (total > 0) {
       try {
-        // Get store_id for employer
         const { user } = getAuth();
         const storeId = user?.store_id || null;
-        
-        const phoneToUse = customerPhone || formData.customer_phone || '';
+
         const customerResponse = await api.post('/promotions/applicable', {
-          customer_phone: phoneToUse || null,
+          customer_phone: phoneParam,
           bill_amount: total,
-          store_id: storeId
+          store_id: storeId,
         });
         const promotions = customerResponse.data.data || [];
         setApplicablePromotions(promotions);
-        // Tự động áp dụng khuyến mãi đầu tiên vào đơn (nhân viên không cần chọn)
-        if (promotions.length > 0) {
-          setFormData((prev) => ({ ...prev, promotion_id: String(promotions[0].id) }));
-        }
+        const bestId = bestApplicablePromotionId(promotions, total);
+        setFormData((prev) => ({ ...prev, promotion_id: bestId }));
       } catch (error) {
         console.error('Error loading promotions:', error);
         setApplicablePromotions([]);
+        setFormData((prev) => ({ ...prev, promotion_id: '' }));
       }
     } else {
       setApplicablePromotions([]);
+      setFormData((prev) => ({ ...prev, promotion_id: '' }));
     }
   };
 

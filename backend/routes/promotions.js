@@ -3,6 +3,7 @@ import { query, queryOne, execute } from '../database/db.js';
 import { authenticate, authorize } from '../middleware/auth.js';
 import { auditLog } from '../middleware/audit.js';
 import { validatePositiveNumber, validatePositiveInteger, validateEnum, validateDateRange, sanitizeString, validateRequiredString } from '../utils/validators.js';
+import { normalizeCustomerPhoneForIdentity } from '../utils/helpers.js';
 
 const router = express.Router();
 
@@ -487,9 +488,12 @@ router.post('/applicable', async (req, res) => {
     if (customer_id) {
       customer = await queryOne('SELECT total_orders FROM customers WHERE id = ?', [customer_id]);
       orderCount = customer?.total_orders || 0;
-    } else if (customer_phone) {
-      customer = await queryOne('SELECT total_orders FROM customers WHERE phone = ?', [customer_phone]);
-      orderCount = customer?.total_orders || 0;
+    } else {
+      const ph = normalizeCustomerPhoneForIdentity(customer_phone);
+      if (ph) {
+        customer = await queryOne('SELECT total_orders FROM customers WHERE phone = ?', [ph]);
+        orderCount = customer?.total_orders || 0;
+      }
     }
     // If no customer info provided, orderCount remains 0
     // Use DATE format for comparison (YYYY-MM-DD) since start_date and end_date are DATE columns

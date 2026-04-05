@@ -16,7 +16,6 @@ function Stores() {
     address: '',
     phone: '',
     status: 'active',
-    account_name: '',
     account_phone: '',
     account_password: '',
   });
@@ -269,7 +268,7 @@ function Stores() {
     try {
       if (editingStore) {
         // When editing, only update store info (not account)
-        const { account_name, account_phone, account_password, use_shared_account, ...storeData } = formData;
+        const { account_phone, account_password, use_shared_account, ...storeData } = formData;
         if (!storeData.shared_account_id) {
           storeData.shared_account_id = null;
         }
@@ -278,8 +277,8 @@ function Stores() {
       } else {
         // When creating, always create new account
         // Sử dụng số điện thoại cửa hàng cho tài khoản
-        if (!formData.account_name.trim() || !formData.phone.trim() || !formData.account_password.trim()) {
-          alert('Vui lòng nhập đầy đủ thông tin (Tên cửa hàng, SĐT, Tên tài khoản, Mật khẩu)');
+        if (!formData.phone.trim() || !formData.account_password.trim()) {
+          alert('Vui lòng nhập đầy đủ thông tin (Tên cửa hàng, SĐT, Mật khẩu)');
           return;
         }
         // Copy số điện thoại cửa hàng sang account_phone
@@ -318,7 +317,6 @@ function Stores() {
       address: store.address || '',
       phone: store.phone || '',
       status: store.status || 'active',
-      account_name: '',
       account_phone: '',
       account_password: '',
     });
@@ -348,7 +346,6 @@ function Stores() {
       address: '',
       phone: '',
       status: 'active',
-      account_name: '',
       account_phone: '',
       account_password: '',
       shared_account_id: '',
@@ -718,19 +715,6 @@ function Stores() {
                     <h3 className="text-lg font-semibold text-gray-800 mb-3">Thông tin tài khoản</h3>
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-1">
-                        Tên tài khoản *
-                      </label>
-                      <input
-                        type="text"
-                        value={formData.account_name}
-                        onChange={(e) => setFormData({ ...formData, account_name: e.target.value })}
-                        className="w-full px-3 py-2.5 border rounded-lg text-base"
-                        required
-                        placeholder="Nhập tên tài khoản"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">
                         Mật khẩu *
                       </label>
                       <input
@@ -745,7 +729,7 @@ function Stores() {
                     </div>
                     <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-sm text-blue-800">
                       <p className="font-medium">Lưu ý:</p>
-                      <p>Số điện thoại tài khoản sẽ tự động sử dụng số điện thoại cửa hàng ở trên</p>
+                      <p>Đăng nhập bằng số điện thoại cửa hàng và mật khẩu. Tên hiển thị tài khoản trùng với tên cửa hàng.</p>
                     </div>
                   </div>
                 </>

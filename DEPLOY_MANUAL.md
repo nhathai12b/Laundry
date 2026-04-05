@@ -315,7 +315,7 @@ Mở terminal/PowerShell trên máy tính của bạn (không phải VPS).
 ### Bước 2: Di chuyển vào thư mục project
 
 ```bash
-cd /path/to/Laundry
+cd /path/to/cd
 # Hoặc trên Windows:
 # cd C:\Users\phamh\Documents\GitHub\Laundry
 ```
@@ -424,7 +424,7 @@ server {
     listen 80;
     server_name quanlycuahangabc.id.vn www.quanlycuahangabc.id.vn;
     # Hoặc nếu chưa có domain, dùng IP:
-    # server_name 103.130.212.155;
+    # server_name 160.250.4.31;
 
     root /var/www/laundry-frontend;
     index index.html;

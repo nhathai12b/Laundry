@@ -4,6 +4,7 @@ import api from '../utils/api';
 import { getAuth, isAdmin, isEmployer, getEmployeeId } from '../utils/auth';
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDaysInMonth } from 'date-fns';
 import { printBill } from '../utils/printBill';
+import { bestApplicablePromotionId, promotionDiscountAmount } from '../utils/promotions';
 
 function Home() {
   const [orders, setOrders] = useState([]);
@@ -43,10 +44,14 @@ function Home() {
   const [debtOrders, setDebtOrders] = useState([]);
   const [debtOrdersLoading, setDebtOrdersLoading] = useState(false);
   const [debtSearchQuery, setDebtSearchQuery] = useState('');
+  const [showDebtPayModal, setShowDebtPayModal] = useState(false);
+  const [orderForDebtPay, setOrderForDebtPay] = useState(null);
+  const [debtPayPaymentMethod, setDebtPayPaymentMethod] = useState('cash');
+  const [debtPaySubmitting, setDebtPaySubmitting] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
   const [orderToEdit, setOrderToEdit] = useState(null);
   const [savingEdit, setSavingEdit] = useState(false);
-  // Check-in: chỉ áp dụng cho nhân viên (employer). Chưa check-in thì không mở form tạo đơn, hiện popup nhắc check-in.
+  // Check-in: chỉ employer. Chưa có ca mở (open-shifts) thì không mở form tạo đơn — ca mở có thể từ ngày trước nếu chưa checkout.
   const [todayCheckIn, setTodayCheckIn] = useState(null);
   const [showCheckInPrompt, setShowCheckInPrompt] = useState(false);
   const [checkInEmployees, setCheckInEmployees] = useState([]);
@@ -74,15 +79,13 @@ function Home() {
     }
   }, [viewTab]);
 
-  // Nhân viên: kiểm tra đã check-in hôm nay chưa (để chặn tạo đơn khi chưa check-in)
+  // Nhân viên: có ca đang mở (kể cả ngày trước chưa checkout) thì được tạo đơn; không có ca mở thì chặn
   const checkTodayStatus = async () => {
     if (isAdmin()) return;
     try {
-      const today = format(new Date(), 'yyyy-MM-dd');
-      const response = await api.get(`/timesheets?date=${today}`);
-      const todayRecords = response.data.data || [];
-      const active = todayRecords.find((t) => !t.check_out);
-      setTodayCheckIn(active || null);
+      const response = await api.get('/timesheets/open-shifts');
+      const shifts = response.data.data || [];
+      setTodayCheckIn(shifts[0] || null);
     } catch (error) {
       console.error('Error checking today status:', error);
       setTodayCheckIn(null);
@@ -243,14 +246,35 @@ function Home() {
     }
   };
 
-  const handleMarkDebtPaid = async (order) => {
-    if (!confirm(`Xác nhận đã thanh toán đơn ${order.code}? Doanh thu sẽ được ghi nhận hôm nay.`)) return;
+  const openDebtPayModal = (order) => {
+    setOrderForDebtPay(order);
+    setDebtPayPaymentMethod('cash');
+    setShowDebtPayModal(true);
+  };
+
+  const closeDebtPayModal = () => {
+    if (debtPaySubmitting) return;
+    setShowDebtPayModal(false);
+    setOrderForDebtPay(null);
+    setDebtPayPaymentMethod('cash');
+  };
+
+  const handleConfirmDebtPaid = async () => {
+    if (!orderForDebtPay) return;
     try {
-      await api.patch(`/orders/${order.id}/debt/paid`);
+      setDebtPaySubmitting(true);
+      await api.patch(`/orders/${orderForDebtPay.id}/debt/paid`, {
+        payment_method: debtPayPaymentMethod,
+      });
+      setShowDebtPayModal(false);
+      setOrderForDebtPay(null);
+      setDebtPayPaymentMethod('cash');
       loadDebtOrders();
       loadStats();
     } catch (error) {
       alert(error.response?.data?.error || 'Thao tác thất bại');
+    } finally {
+      setDebtPaySubmitting(false);
     }
   };
 
@@ -374,6 +398,7 @@ function Home() {
   const handleRemoveItem = (index) => {
     const newItems = formData.items.filter((_, i) => i !== index);
     setFormData({ ...formData, items: newItems });
+    calculateTotalAndLoadPromotions(newItems);
   };
 
   const handleItemChange = (index, field, value) => {
@@ -426,14 +451,10 @@ function Home() {
     setShowCustomerSuggestions(false);
     setCustomerSuggestions([]);
     
-    // Load promotions for selected customer
-    if (customer.phone) {
-      calculateTotalAndLoadPromotions(formData.items, customer.phone);
-    }
+    calculateTotalAndLoadPromotions(formData.items, customer.phone);
   };
 
   const calculateTotalAndLoadPromotions = async (items, customerPhone = null) => {
-    // Calculate total
     let total = 0;
     for (const item of items) {
       if (item.product_id && item.quantity) {
@@ -446,43 +467,48 @@ function Home() {
 
     setOrderTotal(total);
 
-    // Calculate discount if promotion is selected
-    calculateDiscount(total, formData.promotion_id);
-
-    // Load applicable promotions if total > 0
     if (total > 0) {
       setLoadingPromotions(true);
       try {
-        // Get store_id for employer
         const { user } = getAuth();
         const storeId = user?.store_id || null;
-        
-        const phoneToUse = customerPhone || formData.customer_phone || '';
+
+        const phoneToUse =
+          customerPhone !== undefined && customerPhone !== null
+            ? customerPhone
+            : formData.customer_phone;
+        const phoneParam =
+          phoneToUse && String(phoneToUse).trim() && String(phoneToUse).trim() !== '0'
+            ? String(phoneToUse).trim()
+            : null;
+
         const requestData = {
-          customer_phone: phoneToUse || null,
+          customer_phone: phoneParam,
           bill_amount: total,
-          store_id: storeId
+          store_id: storeId,
         };
-        
+
         const customerResponse = await api.post('/promotions/applicable', requestData);
         const promotions = customerResponse.data.data || [];
         setApplicablePromotions(promotions);
-        // Tự động áp dụng khuyến mãi đầu tiên vào đơn (nhân viên không cần chọn)
-        if (promotions.length > 0) {
-          const promo = promotions[0];
-          let discount = 0;
-          if (promo.discount_type === 'percentage') {
-            discount = (total * promo.discount_value) / 100;
-            if (promo.max_discount_amount && discount > promo.max_discount_amount) discount = promo.max_discount_amount;
-          } else {
-            discount = promo.discount_value;
-          }
+
+        const bestId = bestApplicablePromotionId(promotions, total);
+        if (bestId) {
+          const promo = promotions.find((p) => String(p.id) === bestId);
+          const discount = promotionDiscountAmount(promo, total);
           setOrderDiscount(discount);
-          setOrderFinal(total - discount);
-          setFormData((prev) => ({ ...prev, promotion_id: String(promo.id) }));
+          setOrderFinal(Math.max(0, total - discount));
+          setFormData((prev) => ({ ...prev, promotion_id: bestId }));
+        } else {
+          setOrderDiscount(0);
+          setOrderFinal(total);
+          setFormData((prev) => ({ ...prev, promotion_id: '' }));
         }
       } catch (error) {
         setApplicablePromotions([]);
+        setOrderDiscount(0);
+        setOrderFinal(total);
+        setFormData((prev) => ({ ...prev, promotion_id: '' }));
       } finally {
         setLoadingPromotions(false);
       }
@@ -491,6 +517,7 @@ function Home() {
       setLoadingPromotions(false);
       setOrderDiscount(0);
       setOrderFinal(0);
+      setFormData((prev) => ({ ...prev, promotion_id: '' }));
     }
   };
 
@@ -685,6 +712,24 @@ function Home() {
         </div>
       </div>
 
+      {isEmployer() &&
+        todayCheckIn &&
+        format(new Date(todayCheckIn.check_in), 'yyyy-MM-dd') !== format(new Date(), 'yyyy-MM-dd') && (
+          <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2.5 text-sm text-amber-900 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+            <span>
+              Bạn còn ca <strong>chưa checkout</strong> từ ngày{' '}
+              <strong>{format(new Date(todayCheckIn.check_in), 'dd/MM/yyyy')}</strong>. Vào Chấm công để check-out bù (có thể nhập giờ ra) — sau đó mới mở ca mới được.
+            </span>
+            <button
+              type="button"
+              onClick={() => navigate('/timesheets')}
+              className="shrink-0 px-3 py-1.5 rounded-lg bg-amber-700 text-white text-sm font-medium hover:bg-amber-800"
+            >
+              Mở Chấm công
+            </button>
+          </div>
+        )}
+
       {/* Date Selector - All in Combobox */}
       <div className="bg-white rounded-lg shadow p-3 sm:p-2">
         <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2">
@@ -790,7 +835,7 @@ function Home() {
           }).map((order) => (
             <div key={order.id} className="relative bg-white rounded-lg shadow-sm border border-gray-100 p-2 sm:p-2.5 hover:shadow-md transition-shadow">
               {order.status !== 'completed' && order.status !== 'cancelled' && (
-                <div className="absolute top-1.5 right-1.5 flex items-center gap-1">
+                <div className="absolute top-1.5 right-1.5 z-10 flex items-center gap-1">
                   {order.status === 'created' && (
                     <button
                       type="button"
@@ -974,7 +1019,7 @@ function Home() {
                 )}
                 <div className="flex flex-wrap gap-2 mt-3 pt-3 border-t">
                   <button
-                    onClick={() => handleMarkDebtPaid(order)}
+                    onClick={() => openDebtPayModal(order)}
                     className="flex-1 min-w-0 px-3 py-2 bg-green-600 text-white rounded-lg text-sm font-medium hover:bg-green-700"
                   >
                     Đã Thanh Toán
@@ -1014,6 +1059,101 @@ function Home() {
           );
         })()}
       </div>
+      )}
+
+      {/* Modal thanh toán ghi nợ — chọn hình thức để báo cáo doanh thu theo PM */}
+      {showDebtPayModal && orderForDebtPay && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-2 sm:p-3 z-50 overflow-y-auto overflow-x-hidden">
+          <div className="bg-white rounded-lg max-w-sm w-full max-h-[90vh] flex flex-col my-auto shadow-2xl">
+            <div className="flex items-center justify-between p-4 sm:p-5 pb-3 border-b border-gray-200 flex-shrink-0">
+              <h2 className="text-base sm:text-lg font-bold text-gray-900 truncate pr-2">Xác nhận thanh toán ghi nợ</h2>
+              <button
+                type="button"
+                onClick={closeDebtPayModal}
+                disabled={debtPaySubmitting}
+                className="text-gray-500 hover:text-gray-700 text-xl w-7 h-7 flex-shrink-0 flex items-center justify-center rounded-full hover:bg-gray-100 active:bg-gray-200 touch-manipulation disabled:opacity-50"
+                aria-label="Đóng"
+              >
+                ×
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto overflow-x-hidden px-4 sm:px-5">
+              <p className="text-sm text-gray-600 py-2">
+                Doanh thu sẽ ghi nhận theo ngày thanh toán và theo hình thức bạn chọn bên dưới.
+              </p>
+              <div className="bg-gradient-to-r from-amber-50 to-amber-100 rounded-xl border border-amber-200 p-3 overflow-hidden mb-3">
+                <div className="text-xs sm:text-sm text-gray-600 mb-1 font-medium">Đơn: #{orderForDebtPay.code}</div>
+                <div className="text-xl sm:text-2xl font-bold text-amber-800 break-words">
+                  {parseFloat(orderForDebtPay.final_amount || orderForDebtPay.total_amount || 0).toLocaleString('vi-VN')} đ
+                </div>
+                {orderForDebtPay.customer_name && (
+                  <div className="text-xs text-gray-600 mt-2">👤 {orderForDebtPay.customer_name}</div>
+                )}
+              </div>
+              <div className="min-w-0 pb-2">
+                <label className="block text-sm sm:text-base font-semibold text-gray-700 mb-2.5">
+                  Phương thức thanh toán
+                </label>
+                <div className="grid grid-cols-2 gap-2.5 min-w-0">
+                  <label
+                    className={`flex flex-col items-center justify-center p-3.5 rounded-xl border-2 cursor-pointer touch-manipulation transition-all min-w-0 ${
+                      debtPayPaymentMethod === 'cash'
+                        ? 'border-green-500 bg-green-50 shadow-md'
+                        : 'border-gray-200 bg-gray-50 active:bg-gray-100'
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="debt_pay_payment_method"
+                      value="cash"
+                      checked={debtPayPaymentMethod === 'cash'}
+                      onChange={(e) => setDebtPayPaymentMethod(e.target.value)}
+                      className="sr-only"
+                    />
+                    <span className="text-2xl mb-1">💰</span>
+                    <span className="text-sm font-semibold text-center break-words">Tiền mặt</span>
+                  </label>
+                  <label
+                    className={`flex flex-col items-center justify-center p-3.5 rounded-xl border-2 cursor-pointer touch-manipulation transition-all min-w-0 ${
+                      debtPayPaymentMethod === 'transfer'
+                        ? 'border-blue-500 bg-blue-50 shadow-md'
+                        : 'border-gray-200 bg-gray-50 active:bg-gray-100'
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="debt_pay_payment_method"
+                      value="transfer"
+                      checked={debtPayPaymentMethod === 'transfer'}
+                      onChange={(e) => setDebtPayPaymentMethod(e.target.value)}
+                      className="sr-only"
+                    />
+                    <span className="text-2xl mb-1">🏦</span>
+                    <span className="text-sm font-semibold text-center break-words">Chuyển khoản</span>
+                  </label>
+                </div>
+              </div>
+            </div>
+            <div className="flex flex-row gap-2.5 px-4 sm:px-5 pb-4 pt-2 border-t border-gray-200 flex-shrink-0">
+              <button
+                type="button"
+                onClick={handleConfirmDebtPaid}
+                disabled={debtPaySubmitting}
+                className="flex-1 min-w-0 bg-gradient-to-r from-green-500 to-green-600 text-white py-3 rounded-xl active:from-green-600 active:to-green-700 transition-all disabled:opacity-50 disabled:cursor-not-allowed touch-manipulation font-semibold text-base shadow-lg"
+              >
+                {debtPaySubmitting ? '⏳ Đang xử lý...' : '✓ Xác nhận đã thanh toán'}
+              </button>
+              <button
+                type="button"
+                onClick={closeDebtPayModal}
+                disabled={debtPaySubmitting}
+                className="flex-1 min-w-0 bg-gray-200 text-gray-800 py-3 rounded-xl active:bg-gray-300 transition-colors touch-manipulation text-base font-medium"
+              >
+                Hủy
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Popup nhắc check-in khi nhân viên chưa check-in mà bấm Tạo đơn */}

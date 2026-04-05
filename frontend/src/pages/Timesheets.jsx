@@ -10,6 +10,7 @@ function Timesheets() {
   const [stores, setStores] = useState([]);
   const [selectedStoreId, setSelectedStoreId] = useState(savedFilters.selectedStoreId);
   const [loading, setLoading] = useState(true);
+  const [openShifts, setOpenShifts] = useState([]);
   const [todayCheckIn, setTodayCheckIn] = useState(null);
   const [selectedDate, setSelectedDate] = useState(format(new Date(), 'yyyy-MM-dd'));
   const [selectedMonth, setSelectedMonth] = useState(savedFilters.selectedMonth);
@@ -30,6 +31,8 @@ function Timesheets() {
   const [employees, setEmployees] = useState([]);
   const [selectedEmployee, setSelectedEmployee] = useState('');
   const [checkinNote, setCheckinNote] = useState('');
+  const [checkoutOutAt, setCheckoutOutAt] = useState('');
+  const [closingTimesheetId, setClosingTimesheetId] = useState(null);
   const [payroll, setPayroll] = useState([]);
   const [payrollLoading, setPayrollLoading] = useState(false);
   const [payrollPeriod, setPayrollPeriod] = useState('month');
@@ -125,13 +128,14 @@ function Timesheets() {
 
   const checkTodayStatus = async () => {
     try {
-      const today = format(new Date(), 'yyyy-MM-dd');
-      const response = await api.get(`/timesheets?date=${today}`);
-      const todayRecords = response.data.data || [];
-      const active = todayRecords.find((t) => !t.check_out);
-      setTodayCheckIn(active || null);
+      const response = await api.get('/timesheets/open-shifts');
+      const shifts = response.data.data || [];
+      setOpenShifts(shifts);
+      setTodayCheckIn(shifts[0] || null);
     } catch (error) {
       console.error('Error checking today status:', error);
+      setOpenShifts([]);
+      setTodayCheckIn(null);
     }
   };
 
@@ -174,13 +178,19 @@ function Timesheets() {
   };
 
   const handleCheckOutClick = async () => {
+    const ts = todayCheckIn;
+    if (!ts?.id) {
+      alert('Không tìm thấy ca đang mở.');
+      return;
+    }
+    setClosingTimesheetId(ts.id);
+    setCheckoutOutAt('');
     try {
-      // Get expected revenue and total withdrawn from completed orders in this shift
-      const response = await api.get('/timesheets/expected-revenue');
+      const response = await api.get(`/timesheets/expected-revenue?timesheet_id=${ts.id}`);
       setExpectedRevenue(response.data.data.expected_revenue || 0);
       setExpectedOrderCount(response.data.data.order_count || 0);
       setTotalWithdrawn(response.data.data.total_withdrawn || 0);
-      setRevenueAmount(response.data.data.expected_revenue || '');
+      setRevenueAmount(String(response.data.data.expected_revenue ?? ''));
       setShowCheckoutModal(true);
     } catch (error) {
       console.error('Error loading expected revenue:', error);
@@ -208,8 +218,18 @@ function Timesheets() {
 
     // Debug log removed for security
 
+    let checkOutAtPayload = null;
+    if (checkoutOutAt && checkoutOutAt.trim()) {
+      checkOutAtPayload = checkoutOutAt.trim().replace('T', ' ');
+      if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(checkOutAtPayload)) {
+        checkOutAtPayload += ':00';
+      }
+    }
+
     try {
       const response = await api.post('/timesheets/check-out', {
+        timesheet_id: closingTimesheetId || todayCheckIn?.id,
+        check_out_at: checkOutAtPayload,
         revenue_amount: revenueValue,
         expected_revenue: expectedRevenue || 0,
         withdrawn_amount: checkoutWithdrawnAmount !== '' && checkoutWithdrawnAmount != null
@@ -224,6 +244,8 @@ function Timesheets() {
       setRevenueAmount('');
       setCheckoutNote('');
       setCheckoutWithdrawnAmount('');
+      setCheckoutOutAt('');
+      setClosingTimesheetId(null);
       setExpectedRevenue(0);
       setExpectedOrderCount(0);
       setTotalWithdrawn(0);
@@ -430,12 +452,30 @@ function Timesheets() {
       {/* Check In/Out */}
       {!isAdmin() && (
         <div className="bg-gradient-to-br from-white to-gray-50 rounded-xl shadow-lg border border-gray-200 p-4 sm:p-8">
+          {openShifts.length > 1 && (
+            <div className="mb-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+              Bạn có <strong>{openShifts.length}</strong> ca chưa checkout. Hệ thống sẽ đóng <strong>từ ca cũ nhất</strong> mỗi lần bạn check-out.
+            </div>
+          )}
+          {todayCheckIn &&
+            format(new Date(todayCheckIn.check_in), 'yyyy-MM-dd') !== format(new Date(), 'yyyy-MM-dd') && (
+              <div className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-900">
+                Bạn có ca <strong>chưa đóng</strong> từ ngày{' '}
+                <strong>{format(new Date(todayCheckIn.check_in), 'dd/MM/yyyy')}</strong>. Vui lòng check-out (có thể nhập <strong>giờ ra thực tế</strong> trong
+                form) trước khi mở ca mới.
+              </div>
+            )}
           <div className="text-center mb-4">
             <div className="text-xs sm:text-sm text-gray-600 mb-3 sm:mb-2">Hôm nay</div>
             {todayCheckIn ? (
               <div>
                 <div className="text-base sm:text-lg font-medium text-green-600 mb-3 sm:mb-2">
-                  Đã check-in: {new Date(todayCheckIn.check_in).toLocaleTimeString('vi-VN')}
+                  Ca đang mở — vào:{' '}
+                  {format(new Date(todayCheckIn.check_in), 'dd/MM/yyyy')}{' '}
+                  {new Date(todayCheckIn.check_in).toLocaleTimeString('vi-VN')}
+                  {todayCheckIn.employee_name && (
+                    <span className="block text-sm font-normal text-gray-600 mt-1">NV: {todayCheckIn.employee_name}</span>
+                  )}
                 </div>
                 <button
                   onClick={handleCheckOutClick}
@@ -1098,9 +1138,26 @@ function Timesheets() {
           <div className="bg-white rounded-t-xl sm:rounded-xl max-w-md w-full max-h-[85vh] flex flex-col shadow-2xl">
             <div className="flex-shrink-0 p-3 sm:p-4 border-b border-gray-200">
               <h2 className="text-base sm:text-lg font-bold text-gray-900">Kết thúc ca làm việc</h2>
+              {todayCheckIn && (
+                <p className="text-xs text-gray-600 mt-1">
+                  Ca check-in {format(new Date(todayCheckIn.check_in), 'dd/MM/yyyy HH:mm')}
+                  {todayCheckIn.employee_name ? ` — ${todayCheckIn.employee_name}` : ''}
+                </p>
+              )}
             </div>
             <form onSubmit={(e) => { e.preventDefault(); handleCheckOut(); }} className="flex-1 flex flex-col min-h-0 overflow-hidden">
               <div className="flex-1 overflow-y-auto min-h-0 px-3 sm:px-4 py-2 sm:py-3 space-y-2 sm:space-y-3">
+                <div>
+                  <label className="block text-xs sm:text-sm font-medium text-gray-700 mb-1">
+                    Giờ ra <span className="text-gray-500 font-normal">(để trống = thời điểm hiện tại; dùng khi bù ca hôm trước)</span>
+                  </label>
+                  <input
+                    type="datetime-local"
+                    value={checkoutOutAt}
+                    onChange={(e) => setCheckoutOutAt(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base focus:border-blue-500 focus:ring-1 focus:ring-blue-200 touch-manipulation"
+                  />
+                </div>
                 {/* Expected Revenue - Always show */}
                 <div className="bg-blue-50 border border-blue-200 rounded-lg p-2.5 sm:p-3">
                   <div className="text-xs text-blue-700 mb-1">
@@ -1184,6 +1241,8 @@ function Timesheets() {
                     setRevenueAmount('');
                     setCheckoutNote('');
                     setCheckoutWithdrawnAmount('');
+                    setCheckoutOutAt('');
+                    setClosingTimesheetId(null);
                     setExpectedRevenue(0);
                     setExpectedOrderCount(0);
                     setTotalWithdrawn(0);

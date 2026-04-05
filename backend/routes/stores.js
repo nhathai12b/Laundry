@@ -142,10 +142,10 @@ router.post('/', authorize('admin'), async (req, res) => {
       return res.status(400).json({ error: 'Tên cửa hàng là bắt buộc' });
     }
 
-    // If shared_account_id is provided, use it. Otherwise, create new account
+    // If shared_account_id is provided, use it. Otherwise, create new account (đăng nhập bằng SĐT + mật khẩu; tên hiển thị = tên cửa hàng)
     if (!shared_account_id) {
-      if (!account_name || !account_phone || !account_password) {
-        return res.status(400).json({ error: 'Vui lòng nhập đầy đủ thông tin tài khoản (Tên, SĐT, Mật khẩu) hoặc chọn tài khoản chung' });
+      if (!account_phone || !account_password) {
+        return res.status(400).json({ error: 'Vui lòng nhập đầy đủ thông tin tài khoản (SĐT đăng nhập, Mật khẩu) hoặc chọn tài khoản chung' });
       }
     } else {
       // Verify shared account exists and is an employer
@@ -223,11 +223,13 @@ router.post('/', authorize('admin'), async (req, res) => {
         // Password validation removed - no requirements
 
         const password_hash = await hashPassword(account_password);
-        
+        const employerDisplayName =
+          (account_name && String(account_name).trim()) || name.trim() || 'Chủ cửa hàng';
+
         await execute(`
           INSERT INTO users (name, phone, password_hash, role, store_id, status)
           VALUES (?, ?, ?, 'employer', ?, 'active')
-        `, [account_name.trim(), trimmedPhone, password_hash, storeId]);
+        `, [employerDisplayName, trimmedPhone, password_hash, storeId]);
         
         // Debug log removed for security
       } catch (error) {

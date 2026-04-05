@@ -46,7 +46,7 @@ export const getEmployeeId = () => {
   return user?.employee_id || null;
 };
 
-/** Màn hình nhỏ (điện thoại): admin chỉ được dùng máy tính */
+/** Màn hình nhỏ (điện thoại), breakpoint giống Tailwind md */
 export const isMobileScreen = () => {
   if (typeof window === 'undefined') return false;
   return window.innerWidth < 768;

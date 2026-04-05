@@ -2,7 +2,7 @@ import express from 'express';
 import { query, queryOne, execute } from '../database/db.js';
 import { authenticate, authorize } from '../middleware/auth.js';
 import { auditLog } from '../middleware/audit.js';
-import { validatePositiveNumber, validatePositiveInteger, sanitizeString, validateRequiredString, validateEnum } from '../utils/validators.js';
+import { validatePositiveNumber, validateRequiredString, validateEnum } from '../utils/validators.js';
 
 const router = express.Router();
 
@@ -10,7 +10,7 @@ const router = express.Router();
 router.use(authenticate);
 
 // Get all products
-router.get('/', async (req, res) => {
+router.get('/', async (req, res) => { 
   try {
     const { status } = req.query;
     let querySql = `
@@ -120,7 +120,7 @@ router.post('/', authorize('admin'), auditLog('create', 'product'), async (req, 
       return res.status(401).json({ error: 'Tài khoản không tồn tại. Vui lòng đăng xuất và đăng nhập lại.' });
     }
 
-    const { name, unit, price, eta_minutes, status, store_id } = req.body;
+    const { name, unit, price, status, store_id } = req.body;
 
     // Validate name
     const nameValidation = validateRequiredString(name, 'Tên sản phẩm');
@@ -140,14 +140,6 @@ router.post('/', authorize('admin'), auditLog('create', 'product'), async (req, 
       return res.status(400).json({ error: `Giá sản phẩm: ${priceValidation.error}` });
     }
 
-    // Validate eta_minutes if provided
-    if (eta_minutes !== undefined && eta_minutes !== null && eta_minutes !== '') {
-      const etaValidation = validatePositiveInteger(eta_minutes, true);
-      if (!etaValidation.valid) {
-        return res.status(400).json({ error: `Thời gian dự kiến: ${etaValidation.error}` });
-      }
-    }
-
     // Determine store_id: use provided store_id or default to user's store_id
     let finalStoreId = store_id || currentUser.store_id || null;
 
@@ -162,18 +154,31 @@ router.post('/', authorize('admin'), auditLog('create', 'product'), async (req, 
       }
     }
 
+    const nameKey = nameValidation.value.trim();
+    const dupCreate = await queryOne(
+      `SELECT id FROM products
+       WHERE store_id <=> ?
+         AND status = 'active'
+         AND LOWER(TRIM(name)) = LOWER(?)`,
+      [finalStoreId, nameKey],
+    );
+    if (dupCreate) {
+      return res.status(400).json({
+        error: 'Tên sản phẩm đã tồn tại trong cửa hàng này (sản phẩm đang bán). Vui lòng đặt tên khác.',
+      });
+    }
+
     const result = await execute(`
       INSERT INTO products (name, unit, price, eta_minutes, status, created_by, updated_by, store_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, NULL, ?, ?, ?, ?)
     `, [
       nameValidation.value,
       unitValidation.value,
       priceValidation.value,
-      eta_minutes !== undefined && eta_minutes !== null && eta_minutes !== '' ? parseInt(eta_minutes) : null,
       status || 'active',
       currentUser.id,
       currentUser.id,
-      finalStoreId
+      finalStoreId,
     ]);
 
     const newProduct = await queryOne('SELECT * FROM products WHERE id = ?', [result.insertId]);
@@ -187,7 +192,7 @@ router.post('/', authorize('admin'), auditLog('create', 'product'), async (req, 
 // Update product (Admin only)
 router.patch('/:id', authorize('admin'), auditLog('update', 'product'), async (req, res) => {
   try {
-    const { name, unit, price, eta_minutes, status } = req.body;
+    const { name, unit, price, status } = req.body;
 
     const oldProduct = await queryOne(`
       SELECT p.*, s.admin_id as store_admin_id
@@ -213,6 +218,20 @@ router.patch('/:id', authorize('admin'), auditLog('update', 'product'), async (r
       if (!nameValidation.valid) {
         return res.status(400).json({ error: nameValidation.error });
       }
+      const nameKey = nameValidation.value.trim();
+      const dupUpdate = await queryOne(
+        `SELECT id FROM products
+         WHERE store_id <=> ?
+           AND status = 'active'
+           AND LOWER(TRIM(name)) = LOWER(?)
+           AND id != ?`,
+        [oldProduct.store_id, nameKey, req.params.id],
+      );
+      if (dupUpdate) {
+        return res.status(400).json({
+          error: 'Tên sản phẩm đã tồn tại trong cửa hàng này (sản phẩm đang bán). Vui lòng đặt tên khác.',
+        });
+      }
       updates.push('name = ?');
       values.push(nameValidation.value);
     }
@@ -233,20 +252,6 @@ router.patch('/:id', authorize('admin'), auditLog('update', 'product'), async (r
       }
       updates.push('price = ?');
       values.push(priceValidation.value);
-    }
-    
-    if (eta_minutes !== undefined) {
-      if (eta_minutes === '' || eta_minutes === null) {
-        updates.push('eta_minutes = ?');
-        values.push(null);
-      } else {
-        const etaValidation = validatePositiveInteger(eta_minutes, true);
-        if (!etaValidation.valid) {
-          return res.status(400).json({ error: `Thời gian dự kiến: ${etaValidation.error}` });
-        }
-        updates.push('eta_minutes = ?');
-        values.push(etaValidation.value);
-      }
     }
     
     if (status !== undefined) {

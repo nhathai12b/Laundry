@@ -1,6 +1,6 @@
 import express from 'express';
 import { query, queryOne, execute, transaction } from '../database/db.js';
-import { generateOrderCode } from '../utils/helpers.js';
+import { generateOrderCode, normalizeCustomerPhoneForIdentity } from '../utils/helpers.js';
 import { authenticate } from '../middleware/auth.js';
 import { authorize } from '../middleware/auth.js';
 import { auditLog } from '../middleware/audit.js';
@@ -235,19 +235,21 @@ router.post('/', auditLog('create', 'order'), async (req, res) => {
       return res.status(400).json({ error: 'Items are required' });
     }
 
+    const identityPhone = normalizeCustomerPhoneForIdentity(customer_phone);
+
     // Use transaction for atomicity
     const result = await transaction(async (db) => {
       // Get or create customer
       let customer = null;
       
-      if (customer_phone) {
-        customer = await db.queryOne('SELECT * FROM customers WHERE phone = ?', [customer_phone]);
+      if (identityPhone) {
+        customer = await db.queryOne('SELECT * FROM customers WHERE phone = ?', [identityPhone]);
         
         if (!customer) {
           const customerResult = await db.execute(`
             INSERT INTO customers (name, phone)
             VALUES (?, ?)
-          `, [customer_name || '', customer_phone]);
+          `, [customer_name || '', identityPhone]);
           customer = await db.queryOne('SELECT * FROM customers WHERE id = ?', [customerResult.insertId]);
         } else if (customer_name && customer.name !== customer_name) {
           await db.execute('UPDATE customers SET name = ? WHERE id = ?', [customer_name, customer.id]);
@@ -516,6 +518,10 @@ router.patch('/:id/debt', async (req, res) => {
 // Mark debt as paid (đã thanh toán) - phải khai báo trước PATCH /:id để path /:id/debt/paid khớp
 router.patch('/:id/debt/paid', async (req, res) => {
   try {
+    const { payment_method } = req.body;
+    if (!payment_method || !['cash', 'transfer'].includes(payment_method)) {
+      return res.status(400).json({ error: 'Vui lòng chọn phương thức thanh toán (tiền mặt hoặc chuyển khoản).' });
+    }
     const order = await queryOne('SELECT id, status, is_debt, store_id, assigned_to, created_by FROM orders WHERE id = ?', [req.params.id]);
     if (!order) {
       return res.status(404).json({ error: 'Order not found' });
@@ -531,7 +537,10 @@ router.patch('/:id/debt/paid', async (req, res) => {
         return res.status(403).json({ error: 'Bạn không có quyền thao tác đơn hàng này' });
       }
     }
-    await execute('UPDATE orders SET is_debt = 0, debt_paid_at = NOW() WHERE id = ?', [req.params.id]);
+    await execute(
+      'UPDATE orders SET is_debt = 0, debt_paid_at = NOW(), payment_method = ?, updated_by = ? WHERE id = ?',
+      [payment_method, req.user.id, req.params.id]
+    );
     const updated = await queryOne('SELECT * FROM orders WHERE id = ?', [req.params.id]);
     res.json({ data: updated });
   } catch (error) {

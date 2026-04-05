@@ -24,7 +24,6 @@ function Products() {
     name: '',
     unit: 'kg',
     price: '',
-    eta_minutes: '',
     status: 'active',
     store_id: '',
   });
@@ -77,7 +76,6 @@ function Products() {
         name: formData.name,
         unit: formData.unit,
         price: formData.price,
-        eta_minutes: formData.eta_minutes || null,
         status: formData.status,
       };
       
@@ -104,7 +102,6 @@ function Products() {
       name: product.name,
       unit: product.unit,
       price: product.price,
-      eta_minutes: product.eta_minutes || '',
       status: product.status,
       store_id: product.store_id || '',
     });
@@ -131,7 +128,6 @@ function Products() {
       name: '',
       unit: 'kg',
       price: '',
-      eta_minutes: '',
       status: 'active',
       store_id: selectedStoreId && selectedStoreId !== 'all' ? selectedStoreId : (stores[0]?.id ? String(stores[0].id) : ''),
     });
@@ -210,11 +206,6 @@ function Products() {
                     <span className="font-medium">Giá:</span>{' '}
                     {new Intl.NumberFormat('vi-VN').format(product.price)} đ
                   </p>
-                  {product.eta_minutes && (
-                    <p>
-                      <span className="font-medium">Thời gian:</span> {product.eta_minutes} phút
-                    </p>
-                  )}
                 </div>
               </div>
               <span
@@ -304,17 +295,6 @@ function Products() {
                   onChange={(e) => setFormData({ ...formData, price: e.target.value })}
                   className="w-full px-3 py-2 border rounded-lg"
                   required
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Thời gian xử lý (phút)
-                </label>
-                <input
-                  type="number"
-                  value={formData.eta_minutes}
-                  onChange={(e) => setFormData({ ...formData, eta_minutes: e.target.value })}
-                  className="w-full px-3 py-2 border rounded-lg"
                 />
               </div>
               <div>

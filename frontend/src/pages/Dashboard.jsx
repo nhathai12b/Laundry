@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import api from '../utils/api';
-import { isAdmin, isRoot } from '../utils/auth';
+import { isAdmin, isRoot, isMobileScreen } from '../utils/auth';
 import { format, startOfMonth, endOfMonth, startOfYear, endOfYear } from 'date-fns';
 import { getSavedFilters, saveFilters } from '../utils/filterStorage';
 
@@ -460,8 +460,8 @@ function Dashboard() {
         </div>
       </div>
 
-      {/* Quick Actions */}
-      {isAdmin() && (
+      {/* Quick Actions — ẩn trên điện thoại (admin xem trang tổng quan riêng, không dẫn sang module khác) */}
+      {isAdmin() && (isRoot() || !isMobileScreen()) && (
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
           <Link
             to="/admin/orders"

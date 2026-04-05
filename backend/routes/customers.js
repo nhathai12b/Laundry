@@ -2,6 +2,7 @@ import express from 'express';
 import { query, queryOne, execute } from '../database/db.js';
 import { authenticate } from '../middleware/auth.js';
 import { sanitizeString, validateRequiredString } from '../utils/validators.js';
+import { normalizeCustomerPhoneForIdentity } from '../utils/helpers.js';
 
 const router = express.Router();
 
@@ -106,7 +107,12 @@ router.get('/by-phone/:phone', async (req, res) => {
       return res.status(400).json({ error: 'Phone number is required' });
     }
 
-    const customer = await queryOne('SELECT id, name, phone, total_orders, total_spent FROM customers WHERE phone = ?', [phone]);
+    const identityPhone = normalizeCustomerPhoneForIdentity(phone);
+    if (!identityPhone) {
+      return res.json({ data: null });
+    }
+
+    const customer = await queryOne('SELECT id, name, phone, total_orders, total_spent FROM customers WHERE phone = ?', [identityPhone]);
 
     if (!customer) {
       return res.json({ data: null });
