@@ -26,8 +26,10 @@ function PendingOrders() {
       const response = await api.get(`/orders?${params.toString()}`);
       const allOrders = response.data.data || [];
       
-      // Filter chỉ lấy đơn hàng chưa hoàn thành (status !== 'completed')
-      const pendingOrders = allOrders.filter(order => order.status !== 'completed');
+      // Đơn đang xử lý: không hoàn thành và không hủy (đơn ghi nợ đã completed nên không nằm đây)
+      const pendingOrders = allOrders.filter(
+        (order) => order.status !== 'completed' && order.status !== 'cancelled'
+      );
       
       // Sắp xếp theo ngày tạo mới nhất
       pendingOrders.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
@@ -85,10 +87,11 @@ function PendingOrders() {
   const handleCompleteAsDebt = async (order) => {
     if (!confirm(`Chuyển đơn ${order.code} sang ghi nợ? Đơn sẽ không tính doanh thu cho đến khi nhân viên bấm "Đã thanh toán" trong menu Ghi nợ.`)) return;
     try {
-      await api.post(`/orders/${order.id}/status`, { status: 'completed' });
+      if (order.status !== 'completed') {
+        await api.post(`/orders/${order.id}/status`, { status: 'completed' });
+      }
       await api.patch(`/orders/${order.id}/debt`);
       loadPendingOrders();
-
     } catch (error) {
       alert(error.response?.data?.error || 'Thao tác thất bại');
     }
@@ -238,19 +241,26 @@ function PendingOrders() {
                 {order.status !== 'completed' && order.status !== 'cancelled' && (
                   <>
                     <button
+                      type="button"
                       onClick={() => handleCompleteClick(order)}
                       className="flex-1 bg-gradient-to-r from-green-500 to-green-600 text-white px-3 py-1.5 rounded-lg active:bg-green-700 hover:from-green-600 hover:to-green-700 transition-all text-xs sm:text-sm font-medium touch-manipulation shadow-sm"
                     >
                       ✓ Hoàn thành
                     </button>
                     <button
+                      type="button"
                       onClick={() => handleCompleteAsDebt(order)}
                       className="px-3 py-1.5 bg-amber-500 text-white rounded-lg active:bg-amber-600 hover:bg-amber-600 transition-colors text-xs sm:text-sm font-medium touch-manipulation shadow-sm"
                     >
                       Ghi nợ
                     </button>
                     <button
-                      onClick={() => handleStatusChange(order.id, 'cancelled')}
+                      type="button"
+                      onClick={() => {
+                        if (confirm(`Hủy đơn ${order.code}?`)) {
+                          handleStatusChange(order.id, 'cancelled');
+                        }
+                      }}
                       className="px-2.5 py-1.5 bg-red-500 text-white rounded-lg active:bg-red-600 hover:bg-red-600 transition-colors text-xs touch-manipulation"
                       title="Hủy đơn"
                     >

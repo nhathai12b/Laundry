@@ -134,6 +134,19 @@ router.get('/by-phone/:phone', async (req, res) => {
       if (!hasOrderInChain) {
         return res.json({ data: null });
       }
+    } else if (req.user.role === 'employer') {
+      const hasAccess = req.user.store_id
+        ? await queryOne(
+            `SELECT 1 FROM orders o WHERE o.customer_id = ? AND o.store_id = ? LIMIT 1`,
+            [customer.id, req.user.store_id]
+          )
+        : await queryOne(
+            `SELECT 1 FROM orders o WHERE o.customer_id = ? AND (o.assigned_to = ? OR o.created_by = ?) LIMIT 1`,
+            [customer.id, req.user.id, req.user.id]
+          );
+      if (!hasAccess) {
+        return res.json({ data: null });
+      }
     }
 
     res.json({ data: customer });
@@ -170,6 +183,19 @@ router.get('/:id', async (req, res) => {
       }
     } else if (req.user.role === 'root') {
       return res.status(404).json({ error: 'Customer not found' });
+    } else if (req.user.role === 'employer') {
+      const hasAccess = req.user.store_id
+        ? await queryOne(
+            `SELECT 1 FROM orders o WHERE o.customer_id = ? AND o.store_id = ? LIMIT 1`,
+            [customer.id, req.user.store_id]
+          )
+        : await queryOne(
+            `SELECT 1 FROM orders o WHERE o.customer_id = ? AND (o.assigned_to = ? OR o.created_by = ?) LIMIT 1`,
+            [customer.id, req.user.id, req.user.id]
+          );
+      if (!hasAccess) {
+        return res.status(404).json({ error: 'Customer not found' });
+      }
     }
 
     res.json({ data: customer });

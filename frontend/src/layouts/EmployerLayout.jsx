@@ -80,7 +80,7 @@ function EmployerLayout() {
             <Link
               key={item.path + (item.label || '')}
               to={item.path}
-              className={`flex flex-col items-center py-2 px-3 flex-1 min-w-0 rounded-xl mx-1 transition-all active:scale-95 ${
+              className={`relative flex flex-col items-center py-2 px-3 flex-1 min-w-0 rounded-xl mx-1 transition-all active:scale-95 ${
                 isActive(item)
                   ? 'text-blue-600 bg-blue-50 transform scale-105' 
                   : 'text-gray-600 hover:text-blue-600 active:bg-gray-50'

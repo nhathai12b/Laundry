@@ -683,7 +683,8 @@ function Home() {
     cancelled: 'Đã hủy',
   };
 
-  if (loading && orders.length === 0) {
+  // Chỉ chặn toàn trang khi đang ở tab Trang chủ; tab Ghi nợ tải riêng (loadDebtOrders)
+  if (viewTab === 'home' && loading && orders.length === 0) {
     return <div className="text-center py-8">Đang tải...</div>;
   }
 
