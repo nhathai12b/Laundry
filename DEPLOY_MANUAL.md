@@ -287,7 +287,7 @@ pm2 startup
 ### Bước 11: Kiểm tra Backend
 
 ```bash
-# Xem trạng thái
+# Xem trạng tháiz
 pm2 status
 
 # Xem logs

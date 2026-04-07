@@ -10,6 +10,54 @@ const router = express.Router();
 // All routes require authentication
 router.use(authenticate);
 
+/**
+ * Employer cũ vẫn giữ SĐT trong DB sau khi cửa hàng chỉ bị inactive → tạo cửa mới cùng SĐT bị trùng.
+ * Nếu SĐT thuộc employer gắn đúng một cửa hàng inactive (cùng admin), không phải tài khoản chung:
+ * đổi SĐT user đó sang mã nội bộ + inactive (KHÔNG xóa user) để giữ FK đơn hàng / báo cáo.
+ */
+async function releaseEmployerPhoneIfStale(accountPhoneTrimmed, adminId) {
+  const row = await queryOne(
+    `SELECT u.id, u.role, u.store_id FROM users u WHERE u.phone = ?`,
+    [accountPhoneTrimmed]
+  );
+  if (!row) return { ok: true };
+
+  if (row.role !== 'employer') {
+    return { ok: false };
+  }
+
+  const sharedRef = await queryOne(
+    `SELECT id FROM stores WHERE shared_account_id = ? LIMIT 1`,
+    [row.id]
+  );
+  if (sharedRef) {
+    return {
+      ok: false,
+      error:
+        `Số "${accountPhoneTrimmed}" đang là tài khoản đăng nhập chung cho ít nhất một cửa hàng. Hãy bỏ gán tài khoản chung hoặc dùng số đăng nhập khác.`,
+    };
+  }
+
+  if (!row.store_id) {
+    return { ok: false };
+  }
+
+  const st = await queryOne(
+    `SELECT id, admin_id, status FROM stores WHERE id = ?`,
+    [row.store_id]
+  );
+  if (!st || st.admin_id !== adminId || st.status !== 'inactive') {
+    return { ok: false };
+  }
+
+  const newPhone = `__released_${row.id}_${Date.now()}`;
+  await execute(`UPDATE users SET phone = ?, status = 'inactive' WHERE id = ?`, [
+    newPhone,
+    row.id,
+  ]);
+  return { ok: true };
+}
+
 // Get all stores
 router.get('/', async (req, res) => {
   try {
@@ -138,18 +186,30 @@ router.post('/', authorize('admin'), async (req, res) => {
 
     const { name, address, phone, account_name, account_phone, account_password, shared_account_id } = req.body;
 
-    if (!name) {
+    const nameTrimmed = name != null ? String(name).trim() : '';
+    if (!nameTrimmed) {
       return res.status(400).json({ error: 'Tên cửa hàng là bắt buộc' });
     }
 
+    let sharedId = null;
+    if (shared_account_id != null && shared_account_id !== '') {
+      const n = parseInt(String(shared_account_id), 10);
+      if (!Number.isNaN(n) && n > 0) {
+        sharedId = n;
+      }
+    }
+
+    const accountPhoneTrimmed = account_phone != null ? String(account_phone).trim() : '';
+    const accountPasswordTrimmed = account_password != null ? String(account_password).trim() : '';
+
     // If shared_account_id is provided, use it. Otherwise, create new account (đăng nhập bằng SĐT + mật khẩu; tên hiển thị = tên cửa hàng)
-    if (!shared_account_id) {
-      if (!account_phone || !account_password) {
+    if (!sharedId) {
+      if (!accountPhoneTrimmed || !accountPasswordTrimmed) {
         return res.status(400).json({ error: 'Vui lòng nhập đầy đủ thông tin tài khoản (SĐT đăng nhập, Mật khẩu) hoặc chọn tài khoản chung' });
       }
     } else {
       // Verify shared account exists and is an employer
-      const sharedAccount = await queryOne('SELECT id, role FROM users WHERE id = ?', [shared_account_id]);
+      const sharedAccount = await queryOne('SELECT id, role FROM users WHERE id = ?', [sharedId]);
       if (!sharedAccount) {
         return res.status(400).json({ error: 'Tài khoản chung không tồn tại' });
       }
@@ -161,13 +221,18 @@ router.post('/', authorize('admin'), async (req, res) => {
     // Admin can only create stores for their chain
     let adminId = req.user.id;
 
-    // Check if phone exists
-    const trimmedPhone = account_phone.trim();
-    const existing = await queryOne('SELECT id FROM users WHERE phone = ?', [trimmedPhone]);
-    if (existing) {
-      return res.status(400).json({ 
-        error: `Số điện thoại "${trimmedPhone}" đã được sử dụng` 
-      });
+    // Chỉ kiểm tra trùng SĐT khi tạo tài khoản employer mới (không dùng tài khoản chung)
+    if (!sharedId) {
+      const release = await releaseEmployerPhoneIfStale(accountPhoneTrimmed, adminId);
+      if (release.error) {
+        return res.status(400).json({ error: release.error });
+      }
+      const existing = await queryOne('SELECT id FROM users WHERE phone = ?', [accountPhoneTrimmed]);
+      if (existing) {
+        return res.status(400).json({
+          error: `Số điện thoại "${accountPhoneTrimmed}" đã được sử dụng (cửa hàng còn hoạt động hoặc tài khoản khác). Ngừng hoạt động cửa hàng cũ trước, hoặc dùng số khác.`,
+        });
+      }
     }
 
     // Create store first
@@ -177,7 +242,7 @@ router.post('/', authorize('admin'), async (req, res) => {
       const result = await execute(`
         INSERT INTO stores (name, address, phone, admin_id, shared_account_id, status)
         VALUES (?, ?, ?, ?, ?, 'active')
-      `, [name.trim(), address?.trim() || null, phone?.trim() || null, adminId, shared_account_id || null]);
+      `, [nameTrimmed, address?.trim() || null, phone?.trim() || null, adminId, sharedId]);
       storeId = result.insertId;
       // Debug log removed for security
     } catch (error) {
@@ -189,7 +254,7 @@ router.post('/', authorize('admin'), async (req, res) => {
           const result = await execute(`
             INSERT INTO stores (name, address, phone, admin_id, status)
             VALUES (?, ?, ?, ?, 'active')
-          `, [name.trim(), address?.trim() || null, phone?.trim() || null, adminId]);
+          `, [nameTrimmed, address?.trim() || null, phone?.trim() || null, adminId]);
           storeId = result.insertId;
           // Debug log removed for security
         } catch (error2) {
@@ -198,7 +263,7 @@ router.post('/', authorize('admin'), async (req, res) => {
             const result = await execute(`
               INSERT INTO stores (name, address, phone, status)
               VALUES (?, ?, ?, 'active')
-            `, [name.trim(), address?.trim() || null, phone?.trim() || null]);
+            `, [nameTrimmed, address?.trim() || null, phone?.trim() || null]);
             storeId = result.insertId;
             // Debug log removed for security
             // Try to update admin_id if column exists
@@ -218,18 +283,18 @@ router.post('/', authorize('admin'), async (req, res) => {
     }
 
     // Create user account for the store only if not using shared account
-    if (!shared_account_id) {
+    if (!sharedId) {
       try {
         // Password validation removed - no requirements
 
-        const password_hash = await hashPassword(account_password);
+        const password_hash = await hashPassword(accountPasswordTrimmed);
         const employerDisplayName =
-          (account_name && String(account_name).trim()) || name.trim() || 'Chủ cửa hàng';
+          (account_name && String(account_name).trim()) || nameTrimmed || 'Chủ cửa hàng';
 
         await execute(`
           INSERT INTO users (name, phone, password_hash, role, store_id, status)
           VALUES (?, ?, ?, 'employer', ?, 'active')
-        `, [employerDisplayName, trimmedPhone, password_hash, storeId]);
+        `, [employerDisplayName, accountPhoneTrimmed, password_hash, storeId]);
         
         // Debug log removed for security
       } catch (error) {
@@ -384,9 +449,13 @@ router.delete('/:id', authorize('admin'), async (req, res) => {
       }
     }
 
-    // Soft delete: set status inactive (preserves orders, products, history)
+    // Soft delete: giữ dòng stores + store_id trên orders → báo cáo theo cửa hàng vẫn khớp lịch sử
     await execute('UPDATE stores SET status = ? WHERE id = ?', ['inactive', req.params.id]);
-    res.json({ message: 'Đã ngừng hoạt động cửa hàng', action: 'deactivated' });
+    res.json({
+      message:
+        'Đã ngừng hoạt động cửa hàng. Đơn hàng và báo cáo cũ vẫn gắn cửa hàng này. Khi tạo cửa hàng mới, có thể dùng lại cùng SĐT đăng nhập nếu cửa hàng cũ đã ngừng hoạt động.',
+      action: 'deactivated',
+    });
   } catch (error) {
     console.error('Delete store error:', error);
     res.status(500).json({ error: 'Lỗi máy chủ. Vui lòng thử lại.' });

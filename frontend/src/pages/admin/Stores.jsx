@@ -275,22 +275,23 @@ function Stores() {
         await api.patch(`/stores/${editingStore.id}`, storeData);
         alert('Cập nhật cửa hàng thành công!');
       } else {
-        // When creating, always create new account
-        // Sử dụng số điện thoại cửa hàng cho tài khoản
-        if (!formData.phone.trim() || !formData.account_password.trim()) {
+        // Khi tạo mới: SĐT đăng nhập = SĐT cửa hàng (gộp rõ ràng để tránh lệch state / autofill)
+        const phoneTrim = (formData.phone || formData.account_phone || '').trim();
+        const passTrim = (formData.account_password || '').trim();
+        if (!formData.name.trim() || !phoneTrim || !passTrim) {
           alert('Vui lòng nhập đầy đủ thông tin (Tên cửa hàng, SĐT, Mật khẩu)');
           return;
         }
-        // Copy số điện thoại cửa hàng sang account_phone
-        formData.account_phone = formData.phone;
-        
-        const submitData = { ...formData };
-        // Remove fields not needed for backend
-        delete submitData.shared_account_id;
-        delete submitData.use_shared_account;
-        
-        const response = await api.post('/stores', submitData);
-        // Debug log removed for security
+        const submitData = {
+          name: formData.name.trim(),
+          address: (formData.address || '').trim(),
+          phone: phoneTrim,
+          status: formData.status || 'active',
+          account_phone: phoneTrim,
+          account_password: passTrim,
+        };
+
+        await api.post('/stores', submitData);
         alert('Tạo cửa hàng thành công!');
       }
       setShowModal(false);
