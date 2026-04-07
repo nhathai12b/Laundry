@@ -164,7 +164,7 @@ GRANT ALL PRIVILEGES ON laundry66.* TO 'laundry_user'@'localhost';
 FLUSH PRIVILEGES;
 
 -- Thoát
-EXIT;
+    EXIT;
 ```
 
 **Cập nhật mật khẩu trong .env:**
@@ -279,7 +279,6 @@ pm2 start server.js --name laundry-backend
 pm2 save
 
 # Thiết lập tự động khởi động khi server reboot
-pm2 startup
 ```
 
 **Chạy lệnh được PM2 cung cấp** (thường là: `sudo env PATH=...`)

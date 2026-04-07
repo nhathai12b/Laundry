@@ -6,6 +6,15 @@ import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDaysInMonth } f
 import { printBill } from '../utils/printBill';
 import { bestApplicablePromotionId, promotionDiscountAmount } from '../utils/promotions';
 
+function calendarDayFromDbDateTime(value) {
+  if (value == null || value === '') return '';
+  const s = String(value);
+  const m = s.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (m) return m[1];
+  const d = new Date(s);
+  return Number.isNaN(d.getTime()) ? '' : format(d, 'yyyy-MM-dd');
+}
+
 function Home() {
   const [orders, setOrders] = useState([]);
   const [products, setProducts] = useState([]);
@@ -88,7 +97,7 @@ function Home() {
       setTodayCheckIn(shifts[0] || null);
     } catch (error) {
       console.error('Error checking today status:', error);
-      setTodayCheckIn(null);
+      // Giữ state cũ — tránh mất ca mở sau lỗi mạng / tạm thời.
     }
   };
 
@@ -286,10 +295,14 @@ function Home() {
     }
     try {
       setCheckInLoading(true);
-      await api.post('/timesheets/check-in', {
+      const res = await api.post('/timesheets/check-in', {
         employee_id: employeeIdToSend,
         note: checkInNote,
       });
+      const created = res.data?.data;
+      if (created) {
+        setTodayCheckIn(created);
+      }
       setShowCheckInPrompt(false);
       setCheckInEmployeeId('');
       setCheckInNote('');
@@ -715,7 +728,7 @@ function Home() {
 
       {isEmployer() &&
         todayCheckIn &&
-        format(new Date(todayCheckIn.check_in), 'yyyy-MM-dd') !== format(new Date(), 'yyyy-MM-dd') && (
+        calendarDayFromDbDateTime(todayCheckIn.check_in) !== format(new Date(), 'yyyy-MM-dd') && (
           <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2.5 text-sm text-amber-900 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
             <span>
               Bạn còn ca <strong>chưa checkout</strong> từ ngày{' '}

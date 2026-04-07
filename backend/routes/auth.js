@@ -2,6 +2,7 @@ import express from 'express';
 import jwt from 'jsonwebtoken';
 import { query, queryOne, execute } from '../database/db.js';
 import { comparePassword, hashPassword } from '../utils/helpers.js';
+import { resolveStoresIdForEmployerUser } from '../utils/employerStore.js';
 import { authenticate } from '../middleware/auth.js';
 import { loginRateLimiter, resetLoginRateLimit } from '../middleware/rateLimiter.js';
 import { MAX_LOGIN_ATTEMPTS, ACCOUNT_LOCKOUT_MINUTES, TIMING_ATTACK_DELAY_MS } from '../utils/constants.js';
@@ -204,10 +205,10 @@ router.post('/login', loginRateLimiter(), async (req, res) => {
 
     // For employer, return employees list for selection
     if (user.role === 'employer') {
+      const effectiveStoreId = await resolveStoresIdForEmployerUser(user.id);
       // employees.store_id references users.id, so always use user.id for employees query
-      // But user.store_id from database is stores.id, which we need for promotions filtering
+      // effectiveStoreId = stores.id (từ user.store_id hoặc shared_account_id)
       const storeId = user.id; // Always use user.id for employees query
-      // Keep user.store_id from database (stores.id) for promotions and other store-related queries
 
       // Query employees - employees.store_id references users.id
       // So we query WHERE store_id = user.id
@@ -234,7 +235,7 @@ router.post('/login', loginRateLimiter(), async (req, res) => {
             id: user.id, 
             role: user.role, 
             name: user.name, 
-            store_id: user.store_id // Use actual stores.id from database
+            store_id: effectiveStoreId
           },
           process.env.JWT_SECRET,
           { expiresIn: process.env.JWT_EXPIRE || '7d' }
@@ -258,7 +259,7 @@ router.post('/login', loginRateLimiter(), async (req, res) => {
             phone: user.phone,
             role: user.role,
             status: user.status,
-            store_id: user.store_id // Use actual stores.id from database
+            store_id: effectiveStoreId
           }
         });
         return;
@@ -271,7 +272,7 @@ router.post('/login', loginRateLimiter(), async (req, res) => {
           id: user.id, 
           role: user.role, 
           name: user.name, 
-          store_id: user.store_id // Use actual stores.id from database
+          store_id: effectiveStoreId
         },
         process.env.JWT_SECRET,
         { expiresIn: process.env.JWT_EXPIRE || '7d' }
@@ -295,7 +296,7 @@ router.post('/login', loginRateLimiter(), async (req, res) => {
           phone: user.phone,
           role: user.role,
           status: user.status,
-          store_id: user.store_id // Use actual stores.id from database
+          store_id: effectiveStoreId
         }
       });
       return;
@@ -528,13 +529,15 @@ router.post('/select-employee', async (req, res) => {
       }
     }
 
+    const effectiveStoreId = await resolveStoresIdForEmployerUser(user.id);
+
     // Generate token with store_id (stores.id) and employee_id
     const token = jwt.sign(
       { 
         id: user.id, 
         role: user.role, 
         name: user.name, 
-        store_id: user.store_id, // Use actual stores.id from database
+        store_id: effectiveStoreId,
         employee_id: employeeId || null
       },
       process.env.JWT_SECRET,
@@ -559,7 +562,7 @@ router.post('/select-employee', async (req, res) => {
         phone: user.phone,
         role: user.role,
         status: user.status,
-        store_id: user.store_id // Use actual stores.id from database
+        store_id: effectiveStoreId
       },
       employee: selectedEmployee ? {
         id: selectedEmployee.id,

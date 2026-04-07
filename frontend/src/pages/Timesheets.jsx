@@ -4,6 +4,16 @@ import { isAdmin, getEmployeeId, getAuth } from '../utils/auth';
 import { format, getDaysInMonth } from 'date-fns';
 import { getSavedFilters, saveFilters } from '../utils/filterStorage';
 
+/** So sánh "hôm nay" với check_in lưu dạng YYYY-MM-DD HH:mm:ss (GMT+7) — tránh lệch ngày do parse Date. */
+function calendarDayFromDbDateTime(value) {
+  if (value == null || value === '') return '';
+  const s = String(value);
+  const m = s.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (m) return m[1];
+  const d = new Date(s);
+  return Number.isNaN(d.getTime()) ? '' : format(d, 'yyyy-MM-dd');
+}
+
 function Timesheets() {
   const savedFilters = getSavedFilters();
   const [timesheets, setTimesheets] = useState([]);
@@ -134,8 +144,7 @@ function Timesheets() {
       setTodayCheckIn(shifts[0] || null);
     } catch (error) {
       console.error('Error checking today status:', error);
-      setOpenShifts([]);
-      setTodayCheckIn(null);
+      // Giữ state cũ — lỗi mạng không được làm mất ca mở (sẽ không check-out được).
     }
   };
 
@@ -163,15 +172,26 @@ function Timesheets() {
       const employeeIdFromToken = getEmployeeId();
       const employeeIdToSend = employeeIdFromToken || selectedEmployee || undefined;
       
-      await api.post('/timesheets/check-in', {
+      const res = await api.post('/timesheets/check-in', {
         employee_id: employeeIdToSend,
         note: checkinNote,
       });
+      const created = res.data?.data;
+      if (created) {
+        setTodayCheckIn(created);
+        setOpenShifts((prev) => {
+          const rest = prev.filter((s) => s.id !== created.id);
+          const merged = [...rest, created].sort(
+            (a, b) => new Date(a.check_in) - new Date(b.check_in)
+          );
+          return merged;
+        });
+      }
       setShowCheckinModal(false);
       setSelectedEmployee('');
       setCheckinNote('');
-      checkTodayStatus();
-      loadTimesheets();
+      await checkTodayStatus();
+      await loadTimesheets();
     } catch (error) {
       alert(error.response?.data?.error || 'Check-in thất bại');
     }
@@ -249,8 +269,8 @@ function Timesheets() {
       setExpectedRevenue(0);
       setExpectedOrderCount(0);
       setTotalWithdrawn(0);
-      checkTodayStatus();
-      loadTimesheets();
+      await checkTodayStatus();
+      await loadTimesheets();
       if (isAdmin() && viewMode === 'daily') {
         loadDailyHours();
       }
@@ -458,7 +478,7 @@ function Timesheets() {
             </div>
           )}
           {todayCheckIn &&
-            format(new Date(todayCheckIn.check_in), 'yyyy-MM-dd') !== format(new Date(), 'yyyy-MM-dd') && (
+            calendarDayFromDbDateTime(todayCheckIn.check_in) !== format(new Date(), 'yyyy-MM-dd') && (
               <div className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-900">
                 Bạn có ca <strong>chưa đóng</strong> từ ngày{' '}
                 <strong>{format(new Date(todayCheckIn.check_in), 'dd/MM/yyyy')}</strong>. Vui lòng check-out (có thể nhập <strong>giờ ra thực tế</strong> trong
