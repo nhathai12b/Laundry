@@ -10,6 +10,65 @@ const router = express.Router();
 // All routes require authentication
 router.use(authenticate);
 
+function httpError(status, message) {
+  const error = new Error(message);
+  error.status = status;
+  return error;
+}
+
+function getOrderAccessFilter(user, alias = 'o') {
+  if (user.role === 'root') {
+    return { deny: true, sql: ' AND 1 = 0', params: [] };
+  }
+
+  if (user.role === 'admin') {
+    return {
+      sql: ` AND (
+        (${alias}.store_id IS NOT NULL AND ${alias}.store_id IN (SELECT id FROM stores WHERE admin_id = ?))
+        OR (
+          ${alias}.store_id IS NULL AND (
+            ${alias}.assigned_to IN (SELECT id FROM users WHERE store_id IN (SELECT id FROM stores WHERE admin_id = ?))
+            OR ${alias}.created_by IN (SELECT id FROM users WHERE store_id IN (SELECT id FROM stores WHERE admin_id = ?))
+          )
+        )
+      )`,
+      params: [user.id, user.id, user.id],
+    };
+  }
+
+  if (user.role === 'employer') {
+    if (user.store_id) {
+      return {
+        sql: ` AND (
+          ${alias}.store_id = ?
+          OR (${alias}.store_id IS NULL AND (${alias}.assigned_to = ? OR ${alias}.created_by = ?))
+        )`,
+        params: [user.store_id, user.id, user.id],
+      };
+    }
+    return {
+      sql: ` AND (${alias}.assigned_to = ? OR ${alias}.created_by = ?)`,
+      params: [user.id, user.id],
+    };
+  }
+
+  return { deny: true, sql: ' AND 1 = 0', params: [] };
+}
+
+async function getAccessibleOrder(req, orderId) {
+  const access = getOrderAccessFilter(req.user, 'o');
+  if (access.deny) return null;
+  return queryOne(
+    `
+      SELECT o.*
+      FROM orders o
+      WHERE o.id = ?
+      ${access.sql}
+    `,
+    [orderId, ...access.params]
+  );
+}
+
 // Get all orders
 router.get('/', async (req, res) => {
   try {
@@ -19,21 +78,22 @@ router.get('/', async (req, res) => {
         c.name as customer_name, 
         c.phone as customer_phone,
         u.name as assigned_to_name,
-        creator.name as created_by_name
+        creator.name as created_by_name,
+        s.name as store_name
       FROM orders o
       LEFT JOIN customers c ON o.customer_id = c.id
       LEFT JOIN users u ON o.assigned_to = u.id
       LEFT JOIN users creator ON o.created_by = creator.id
+      LEFT JOIN stores s ON o.store_id = s.id
       WHERE 1=1
     `;
     const params = [];
 
     // For employer, filter by store_id (their own store)
     if (req.user.role === 'employer') {
-      // Use store_id from user (stores.id) to filter orders
       if (req.user.store_id) {
-        querySql += ' AND o.store_id = ?';
-        params.push(req.user.store_id);
+        querySql += ' AND (o.store_id = ? OR (o.store_id IS NULL AND (o.assigned_to = ? OR o.created_by = ?)))';
+        params.push(req.user.store_id, req.user.id, req.user.id);
       } else {
         // Fallback: filter by user id if no store_id
         querySql += ' AND (o.assigned_to = ? OR o.created_by = ?)';
@@ -166,37 +226,29 @@ router.get('/', async (req, res) => {
 // Get single order
 router.get('/:id', async (req, res) => {
   try {
+    const access = getOrderAccessFilter(req.user, 'o');
+    if (access.deny) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+
     let querySql = `
       SELECT o.*, 
         c.name as customer_name, 
         c.phone as customer_phone,
         u.name as assigned_to_name,
-        creator.name as created_by_name
+        creator.name as created_by_name,
+        s.name as store_name
       FROM orders o
       LEFT JOIN customers c ON o.customer_id = c.id
       LEFT JOIN users u ON o.assigned_to = u.id
       LEFT JOIN users creator ON o.created_by = creator.id
+      LEFT JOIN stores s ON o.store_id = s.id
       WHERE o.id = ?
     `;
     const params = [req.params.id];
 
-    // For admin, verify order belongs to selected store
-    if (req.user.role === 'admin' && req.user.role !== 'root') {
-      // Prefer o.store_id (stores.id). Fallback to legacy matching if o.store_id is NULL.
-      querySql += ` AND (
-        (o.store_id IS NOT NULL AND o.store_id IN (SELECT id FROM stores WHERE admin_id = ?))
-        OR (
-          o.store_id IS NULL AND (
-            o.assigned_to IN (SELECT id FROM users WHERE store_id IN (SELECT id FROM stores WHERE admin_id = ?))
-            OR o.created_by IN (SELECT id FROM users WHERE store_id IN (SELECT id FROM stores WHERE admin_id = ?))
-          )
-        )
-      )`;
-      params.push(req.user.id, req.user.id, req.user.id);
-    } else if (req.user.role === 'root') {
-      // Root admin is software vendor, not store operator - return 404
-      return res.status(404).json({ error: 'Order not found' });
-    }
+    querySql += access.sql;
+    params.push(...access.params);
 
     const order = await queryOne(querySql, params);
 
@@ -229,13 +281,21 @@ router.get('/:id', async (req, res) => {
 // Create order
 router.post('/', auditLog('create', 'order'), async (req, res) => {
   try {
-    const { customer_name, customer_phone, items, note, assigned_to, promotion_id } = req.body;
+    const { customer_name, customer_phone, items, note, assigned_to, promotion_id, store_id } = req.body;
 
     if (!items || items.length === 0) {
       return res.status(400).json({ error: 'Items are required' });
     }
 
     const identityPhone = normalizeCustomerPhoneForIdentity(customer_phone);
+    const requestedStoreId =
+      store_id !== undefined && store_id !== null && store_id !== ''
+        ? parseInt(store_id, 10)
+        : null;
+
+    if (store_id !== undefined && store_id !== null && store_id !== '' && Number.isNaN(requestedStoreId)) {
+      return res.status(400).json({ error: 'Store ID không hợp lệ' });
+    }
 
     // Use transaction for atomicity
     const result = await transaction(async (db) => {
@@ -353,24 +413,39 @@ router.post('/', auditLog('create', 'order'), async (req, res) => {
       // For admin, verify assigned_to belongs to their store chain
       let finalAssignedTo = assigned_to;
       if (req.user.role === 'admin' && req.user.role !== 'root') {
+        if (requestedStoreId) {
+          const requestedStore = await db.queryOne(
+            'SELECT id FROM stores WHERE id = ? AND admin_id = ?',
+            [requestedStoreId, req.user.id]
+          );
+          if (!requestedStore) {
+            throw httpError(403, 'Bạn chỉ có thể tạo đơn cho cửa hàng trong chuỗi của mình');
+          }
+        }
+
         // If assigned_to is provided, verify it belongs to admin's store chain
         if (assigned_to) {
           const assignedUser = await db.queryOne(`
-            SELECT u.id 
+            SELECT u.id, u.store_id
             FROM users u
             INNER JOIN stores s ON u.store_id = s.id
             WHERE u.id = ? AND s.admin_id = ?
           `, [assigned_to, req.user.id]);
           
           if (!assignedUser) {
-            return res.status(403).json({ error: 'Bạn chỉ có thể gán đơn hàng cho nhân viên trong chuỗi cửa hàng của mình' });
+            throw httpError(403, 'Bạn chỉ có thể gán đơn hàng cho nhân viên trong chuỗi cửa hàng của mình');
+          }
+
+          if (requestedStoreId && assignedUser.store_id !== requestedStoreId) {
+            throw httpError(400, 'Nhân viên được gán không thuộc cửa hàng đã chọn');
           }
         }
-        // If no assigned_to, find an employer user from the store
-        if (!finalAssignedTo && req.user.store_id) {
+
+        const fallbackStoreId = requestedStoreId || req.user.store_id || null;
+        if (!finalAssignedTo && fallbackStoreId) {
           const employerUser = await db.queryOne(
             'SELECT id FROM users WHERE store_id = ? AND role = ? LIMIT 1',
-            [req.user.store_id, 'employer']
+            [fallbackStoreId, 'employer']
           );
           if (employerUser) {
             finalAssignedTo = employerUser.id;
@@ -381,7 +456,7 @@ router.post('/', auditLog('create', 'order'), async (req, res) => {
       }
 
       // Get store_id for the order
-      let orderStoreId = null;
+      let orderStoreId = requestedStoreId || null;
       if (finalAssignedTo) {
         const assignedUser = await db.queryOne('SELECT store_id FROM users WHERE id = ?', [finalAssignedTo]);
         if (assignedUser && assignedUser.store_id) {
@@ -390,6 +465,10 @@ router.post('/', auditLog('create', 'order'), async (req, res) => {
       }
       if (!orderStoreId && req.user.store_id) {
         orderStoreId = req.user.store_id;
+      }
+
+      if (req.user.role === 'admin' && req.user.role !== 'root' && !orderStoreId) {
+        throw httpError(400, 'Vui lòng chọn cửa hàng hoặc gán đơn cho nhân viên thuộc cửa hàng đó');
       }
 
       // Validate promotion belongs to the store (after store_id is determined)
@@ -463,10 +542,12 @@ router.post('/', auditLog('create', 'order'), async (req, res) => {
       SELECT o.*, 
         c.name as customer_name, 
         c.phone as customer_phone,
-        u.name as assigned_to_name
+        u.name as assigned_to_name,
+        s.name as store_name
       FROM orders o
       LEFT JOIN customers c ON o.customer_id = c.id
       LEFT JOIN users u ON o.assigned_to = u.id
+      LEFT JOIN stores s ON o.store_id = s.id
       WHERE o.id = ?
     `, [result]);
 
@@ -481,14 +562,14 @@ router.post('/', auditLog('create', 'order'), async (req, res) => {
   } catch (error) {
     console.error('Create order error:', error);
     const errorMessage = error.message || 'Server error';
-    res.status(500).json({ error: errorMessage });
+    res.status(error.status || 500).json({ error: errorMessage });
   }
 });
 
 // Mark order as debt (ghi nợ) - phải khai báo trước PATCH /:id để path /:id/debt khớp
 router.patch('/:id/debt', async (req, res) => {
   try {
-    const order = await queryOne('SELECT id, status, is_debt, store_id, assigned_to, created_by FROM orders WHERE id = ?', [req.params.id]);
+    const order = await getAccessibleOrder(req, req.params.id);
     if (!order) {
       return res.status(404).json({ error: 'Order not found' });
     }
@@ -497,14 +578,6 @@ router.patch('/:id/debt', async (req, res) => {
     }
     if (order.is_debt === 1) {
       return res.status(400).json({ error: 'Đơn hàng đã ở trạng thái ghi nợ' });
-    }
-    if (req.user.role === 'employer') {
-      if (req.user.store_id && order.store_id !== req.user.store_id) {
-        return res.status(403).json({ error: 'Bạn không có quyền ghi nợ đơn hàng này' });
-      }
-      if (!req.user.store_id && order.assigned_to !== req.user.id && order.created_by !== req.user.id) {
-        return res.status(403).json({ error: 'Bạn không có quyền ghi nợ đơn hàng này' });
-      }
     }
     await execute('UPDATE orders SET is_debt = 1, debt_paid_at = NULL WHERE id = ?', [req.params.id]);
     const updated = await queryOne('SELECT * FROM orders WHERE id = ?', [req.params.id]);
@@ -522,20 +595,12 @@ router.patch('/:id/debt/paid', async (req, res) => {
     if (!payment_method || !['cash', 'transfer'].includes(payment_method)) {
       return res.status(400).json({ error: 'Vui lòng chọn phương thức thanh toán (tiền mặt hoặc chuyển khoản).' });
     }
-    const order = await queryOne('SELECT id, status, is_debt, store_id, assigned_to, created_by FROM orders WHERE id = ?', [req.params.id]);
+    const order = await getAccessibleOrder(req, req.params.id);
     if (!order) {
       return res.status(404).json({ error: 'Order not found' });
     }
     if (order.is_debt !== 1) {
       return res.status(400).json({ error: 'Đơn hàng không ở trạng thái ghi nợ' });
-    }
-    if (req.user.role === 'employer') {
-      if (req.user.store_id && order.store_id !== req.user.store_id) {
-        return res.status(403).json({ error: 'Bạn không có quyền thao tác đơn hàng này' });
-      }
-      if (!req.user.store_id && order.assigned_to !== req.user.id && order.created_by !== req.user.id) {
-        return res.status(403).json({ error: 'Bạn không có quyền thao tác đơn hàng này' });
-      }
     }
     await execute(
       'UPDATE orders SET is_debt = 0, debt_paid_at = NOW(), payment_method = ?, updated_by = ? WHERE id = ?',
@@ -554,7 +619,7 @@ router.patch('/:id', auditLog('update', 'order'), async (req, res) => {
   try {
     const { status, assigned_to, note, items, customer_name, customer_phone } = req.body;
 
-    const order = await queryOne('SELECT * FROM orders WHERE id = ?', [req.params.id]);
+    const order = await getAccessibleOrder(req, req.params.id);
     if (!order) {
       return res.status(404).json({ error: 'Order not found' });
     }
@@ -576,6 +641,17 @@ router.patch('/:id', auditLog('update', 'order'), async (req, res) => {
       }
 
       if (assigned_to !== undefined) {
+        if (assigned_to && req.user.role === 'admin' && req.user.role !== 'root') {
+          const assignedUser = await db.queryOne(`
+            SELECT u.id
+            FROM users u
+            INNER JOIN stores s ON u.store_id = s.id
+            WHERE u.id = ? AND s.admin_id = ?
+          `, [assigned_to, req.user.id]);
+          if (!assignedUser) {
+            throw httpError(403, 'Bạn chỉ có thể gán đơn hàng cho nhân viên trong chuỗi cửa hàng của mình');
+          }
+        }
         updates.push('assigned_to = ?');
         values.push(assigned_to);
       }
@@ -664,10 +740,12 @@ router.patch('/:id', auditLog('update', 'order'), async (req, res) => {
       SELECT o.*, 
         c.name as customer_name, 
         c.phone as customer_phone,
-        u.name as assigned_to_name
+        u.name as assigned_to_name,
+        s.name as store_name
       FROM orders o
       LEFT JOIN customers c ON o.customer_id = c.id
       LEFT JOIN users u ON o.assigned_to = u.id
+      LEFT JOIN stores s ON o.store_id = s.id
       WHERE o.id = ?
     `, [req.params.id]);
 
@@ -681,7 +759,7 @@ router.patch('/:id', auditLog('update', 'order'), async (req, res) => {
     res.json({ data: { ...updatedOrder, items: orderItems } });
   } catch (error) {
     console.error('Update order error:', error);
-    res.status(500).json({ error: 'Server error' });
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Server error' });
   }
 });
 
@@ -699,7 +777,7 @@ router.post('/:id/status', async (req, res) => {
       return res.status(400).json({ error: 'Invalid status. Allowed: created, washing, drying, waiting_pickup, completed, cancelled.' });
     }
 
-    const order = await queryOne('SELECT * FROM orders WHERE id = ?', [req.params.id]);
+    const order = await getAccessibleOrder(req, req.params.id);
     if (!order) {
       return res.status(404).json({ error: 'Order not found' });
     }
@@ -743,10 +821,12 @@ router.post('/:id/status', async (req, res) => {
       SELECT o.*, 
         c.name as customer_name, 
         c.phone as customer_phone,
-        u.name as assigned_to_name
+        u.name as assigned_to_name,
+        s.name as store_name
       FROM orders o
       LEFT JOIN customers c ON o.customer_id = c.id
       LEFT JOIN users u ON o.assigned_to = u.id
+      LEFT JOIN stores s ON o.store_id = s.id
       WHERE o.id = ?
     `, [req.params.id]);
 
@@ -772,7 +852,7 @@ router.delete('/:id', authorize('admin'), auditLog('delete', 'order'), async (re
       return res.status(403).json({ error: 'Root admin không thể xóa đơn hàng' });
     }
 
-    const order = await queryOne('SELECT id FROM orders WHERE id = ?', [req.params.id]);
+    const order = await getAccessibleOrder(req, req.params.id);
     
     if (!order) {
       return res.status(404).json({ error: 'Order not found' });

@@ -248,8 +248,8 @@ function Reports() {
             <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase">Nhân viên</th>
             <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase">Giờ vào</th>
             <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase">Giờ ra</th>
-            <th className="px-4 py-3 text-right text-xs font-medium text-gray-700 uppercase">Đầu ca</th>
-            <th className="px-4 py-3 text-right text-xs font-medium text-gray-700 uppercase">Kết ca</th>
+            <th className="px-4 py-3 text-right text-xs font-medium text-gray-700 uppercase">Doanh thu dự kiến</th>
+            <th className="px-4 py-3 text-right text-xs font-medium text-gray-700 uppercase">Doanh thu thực tế</th>
             <th className="px-4 py-3 text-right text-xs font-medium text-gray-700 uppercase">Số tiền mặt thực tế</th>
             <th className="px-4 py-3 text-right text-xs font-medium text-gray-700 uppercase">Tiền đã rút</th>
             <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase">Ghi chú</th>
@@ -335,7 +335,9 @@ function Reports() {
               {new Intl.NumberFormat('vi-VN').format(parseFloat(item.end_revenue) || 0)} đ
             </td>
             <td className="px-4 py-3 text-sm font-bold text-green-700 text-right">
-              {new Intl.NumberFormat('vi-VN').format(parseFloat(item.end_revenue) || 0)} đ
+              {new Intl.NumberFormat('vi-VN').format(
+                Math.max(0, (parseFloat(item.end_revenue) || 0) - (parseFloat(item.withdrawn_amount) || 0))
+              )} đ
             </td>
             <td className="px-4 py-3 text-sm font-bold text-amber-600 text-right">
               {new Intl.NumberFormat('vi-VN').format(parseFloat(item.withdrawn_amount) || 0)} đ

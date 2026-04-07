@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import api from '../utils/api';
-import { isAdmin, isEmployer, getAuth, isRoot } from '../utils/auth';
+import { isAdmin, isEmployer, getAuth } from '../utils/auth';
 import { format, getDaysInMonth } from 'date-fns';
 import { getSavedFilters, saveFilters } from '../utils/filterStorage';
 import { printBill } from '../utils/printBill';
@@ -374,6 +374,16 @@ function Orders() {
   const handleSubmitOrder = async (e) => {
     e.preventDefault();
     try {
+      const selectedStoreValue =
+        isAdmin() && selectedStoreId && selectedStoreId !== 'all'
+          ? parseInt(selectedStoreId, 10)
+          : null;
+
+      if (isAdmin() && !selectedStoreValue && !formData.assigned_to) {
+        alert('Vui lòng chọn cửa hàng hoặc gán đơn cho nhân viên thuộc cửa hàng đó');
+        return;
+      }
+
       const orderData = {
         customer_name: formData.customer_name,
         customer_phone: formData.customer_phone || null,
@@ -386,6 +396,7 @@ function Orders() {
         note: formData.note,
         assigned_to: formData.assigned_to || null,
         promotion_id: formData.promotion_id || null,
+        store_id: selectedStoreValue,
       };
 
       if (orderData.items.length === 0) {
@@ -584,6 +595,21 @@ function Orders() {
               </select>
             </div>
           )}
+
+          {viewMode === 'year' && (
+            <div className="flex items-center gap-2">
+              <select
+                value={selectedYear}
+                onChange={(e) => setSelectedYear(parseInt(e.target.value, 10))}
+                className="px-2 py-1.5 border rounded text-xs"
+              >
+                {Array.from({ length: 7 }, (_, i) => {
+                  const year = new Date().getFullYear() - 3 + i;
+                  return <option key={year} value={year}>{year}</option>;
+                })}
+              </select>
+            </div>
+          )}
         </div>
       )}
 
@@ -650,7 +676,7 @@ function Orders() {
                   <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase">Trạng thái</th>
                   <th className="px-4 py-3 text-right text-xs font-medium text-gray-700 uppercase">Số SP</th>
                   <th className="px-4 py-3 text-right text-xs font-medium text-gray-700 uppercase">Tổng tiền</th>
-                  {isRoot() && (
+                  {isAdmin() && (
                     <th className="px-4 py-3 text-center text-xs font-medium text-gray-700 uppercase">Thao tác</th>
                   )}
                 </tr>
@@ -658,7 +684,7 @@ function Orders() {
               <tbody className="divide-y">
                 {orders.length === 0 ? (
                   <tr>
-                    <td colSpan={isRoot() ? 9 : 8} className="px-4 py-8 text-center text-gray-500">
+                    <td colSpan={isAdmin() ? 9 : 8} className="px-4 py-8 text-center text-gray-500">
                       Chưa có đơn hàng
                     </td>
                   </tr>
@@ -670,7 +696,7 @@ function Orders() {
                       <td className="px-4 py-3 text-gray-600">
                         {order.customer_phone && !order.customer_phone.startsWith('temp_') ? order.customer_phone : '-'}
                       </td>
-                      <td className="px-4 py-3 text-gray-600">{order.assigned_to_name || '-'}</td>
+                      <td className="px-4 py-3 text-gray-600">{order.store_name || '-'}</td>
                       <td className="px-4 py-3 text-gray-600">
                         {new Date(order.created_at).toLocaleDateString('vi-VN')} {new Date(order.created_at).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })}
                       </td>
@@ -685,7 +711,7 @@ function Orders() {
                       <td className="px-4 py-3 text-right font-bold text-gray-800">
                         {new Intl.NumberFormat('vi-VN').format(parseFloat(order.total_amount) || 0)} đ
                       </td>
-                      {isRoot() && (
+                      {isAdmin() && (
                         <td className="px-4 py-3 text-center">
                           {order.status === 'created' && (
                           <div className="flex gap-1.5 sm:gap-2 flex-nowrap justify-center overflow-x-auto">
@@ -737,7 +763,7 @@ function Orders() {
                     <td className="px-4 py-3 text-right text-green-600">
                       {new Intl.NumberFormat('vi-VN').format(orders.reduce((sum, o) => sum + (parseFloat(o.total_amount) || 0), 0))} đ
                     </td>
-                    {isRoot() && <td className="px-4 py-3"></td>}
+                    {isAdmin() && <td className="px-4 py-3"></td>}
                   </tr>
                 </tfoot>
               )}

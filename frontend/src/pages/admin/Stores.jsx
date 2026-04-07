@@ -341,6 +341,28 @@ function Stores() {
     }
   };
 
+  const handleStorePermanentDelete = async (store) => {
+    const lines = [
+      `Bạn sắp XÓA VĨNH VIỄN cửa hàng "${store.name}" khỏi hệ thống (không chỉ vô hiệu hóa).`,
+      '',
+      '• Bản ghi cửa hàng bị xóa; đơn hàng cũ vẫn còn nhưng trường cửa hàng để trống.',
+      '• Sản phẩm gắn cửa này không bị xóa nhưng không còn thuộc cửa hàng đã xóa.',
+      '• Khuyến mãi và cài đặt riêng của cửa này sẽ bị xóa.',
+      '• Nhân viên (bản ghi nhân viên) của tài khoản cửa bị xóa; tài khoản employer bị khóa để giữ lịch sử.',
+      '',
+      'Thao tác này không thể hoàn tác. Tiếp tục?',
+    ];
+    if (!confirm(lines.join('\n'))) return;
+
+    try {
+      await api.post(`/stores/${store.id}/delete-permanent`);
+      loadStores();
+    } catch (error) {
+      console.error('Error permanently deleting store:', error);
+      alert(error.response?.data?.error || 'Có lỗi xảy ra');
+    }
+  };
+
   const resetForm = () => {
     setFormData({
       name: '',
@@ -497,16 +519,26 @@ function Stores() {
                                   )}
                                 </div>
                                 <div className="text-xs text-gray-500">{accountToShow.phone}</div>
-                                <div className="mt-1 flex items-center gap-2">
+                                <div className="mt-1 flex flex-wrap items-center gap-2 relative z-10">
                                   <button
+                                    type="button"
                                     onClick={() => handleUserEdit(accountToShow)}
-                                    className="text-blue-600 hover:text-blue-700 text-xs"
+                                    className="text-blue-600 hover:text-blue-700 text-xs py-2 px-1 min-h-[40px] inline-flex items-center rounded"
                                   >
                                     Sửa tài khoản
                                   </button>
                                   <button
-                                    onClick={() => handleUserDelete(accountToShow.id, accountToShow.name, store.name)}
-                                    className="text-red-600 hover:text-red-700 text-xs"
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.preventDefault();
+                                      e.stopPropagation();
+                                      if (accountToShow?.id == null) {
+                                        alert('Không xác định được tài khoản để xóa.');
+                                        return;
+                                      }
+                                      handleUserDelete(accountToShow.id, accountToShow.name, store.name);
+                                    }}
+                                    className="text-red-600 hover:text-red-700 text-xs py-2 px-1 min-h-[40px] inline-flex items-center rounded"
                                   >
                                     Xóa tài khoản
                                   </button>
@@ -517,13 +549,14 @@ function Stores() {
                                 <span className="text-gray-400 text-xs">Chưa có tài khoản</span>
                                 <div className="mt-1">
                                   <button
+                                    type="button"
                                     onClick={() => {
                                       setEditingUser(null);
                                       resetUserForm();
                                       setUserFormData(prev => ({ ...prev, store_id: store.id }));
                                       setShowUserModal(true);
                                     }}
-                                    className="text-blue-600 hover:text-blue-700 text-xs"
+                                    className="text-blue-600 hover:text-blue-700 text-xs py-2 px-1 min-h-[40px] inline-flex items-center rounded"
                                   >
                                     + Tạo tài khoản
                                   </button>
@@ -542,23 +575,40 @@ function Stores() {
                               {store.status === 'active' ? 'Hoạt động' : 'Ngừng hoạt động'}
                             </span>
                           </td>
-                          <td className="px-4 py-3 text-sm">
-                            <div className="flex items-center gap-2">
+                          <td className="px-4 py-3 text-sm align-top">
+                            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 relative z-10 max-w-[220px]">
                               <button
+                                type="button"
                                 onClick={() => handleEdit(store)}
-                                className="text-blue-600 hover:text-blue-700 font-medium text-sm"
+                                className="text-blue-600 hover:text-blue-700 font-medium text-sm py-2 px-1 min-h-[40px] inline-flex items-center rounded"
                               >
                                 Sửa
                               </button>
                               <button
+                                type="button"
                                 onClick={() => handleToggleStatus(store)}
-                                className={`font-medium text-sm ${
+                                className={`font-medium text-sm py-2 px-1 min-h-[40px] inline-flex items-center rounded ${
                                   store.status === 'active'
                                     ? 'text-orange-600 hover:text-orange-700'
                                     : 'text-green-600 hover:text-green-700'
                                 }`}
                               >
                                 {store.status === 'active' ? 'Vô hiệu hóa' : 'Kích hoạt'}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  if (store?.id == null) {
+                                    alert('Không xác định được cửa hàng.');
+                                    return;
+                                  }
+                                  handleStorePermanentDelete(store);
+                                }}
+                                className="text-red-600 hover:text-red-800 font-medium text-sm py-2 px-1 min-h-[40px] inline-flex items-center rounded"
+                              >
+                                Xóa vĩnh viễn
                               </button>
                             </div>
                           </td>

@@ -86,8 +86,8 @@ router.get('/:id', authorize('admin'), async (req, res) => {
 
     // Filter by admin: only show promotions from stores owned by this admin
     if (req.user.role === 'admin' && req.user.role !== 'root') {
-      querySql += ' AND s.admin_id = ?';
-      params.push(req.user.id);
+      querySql += ' AND (s.admin_id = ? OR (p.store_id IS NULL AND p.created_by = ?))';
+      params.push(req.user.id, req.user.id);
     } else if (req.user.role === 'root') {
       // Root admin is software vendor, not store operator - return 404
       return res.status(404).json({ error: 'Promotion not found' });
@@ -271,7 +271,11 @@ router.patch('/:id', authorize('admin'), auditLog('update', 'promotion'), async 
     }
 
     // For admin (not root), verify promotion belongs to their store chain
-    if (req.user.role === 'admin' && promotion.store_admin_id !== req.user.id) {
+    if (
+      req.user.role === 'admin' &&
+      promotion.store_admin_id !== req.user.id &&
+      !(promotion.store_id == null && promotion.created_by === req.user.id)
+    ) {
       return res.status(403).json({ error: 'Bạn chỉ có thể sửa khuyến mãi trong chuỗi cửa hàng của mình' });
     }
 

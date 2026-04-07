@@ -76,7 +76,7 @@ const EmployerOnlyRoute = ({ children }) => {
   return children;
 };
 
-/** Admin thường + màn nhỏ → chỉ trang tổng quan điện thoại */
+/** Admin thường + màn nhỏ → vào /admin chỉ thấy tổng quan; các trang con (/admin/stores, …) vẫn mở được để thao tác. */
 function AdminMobileRedirect() {
   const loc = useLocation();
   const [narrow, setNarrow] = useState(() => isMobileScreen());
@@ -86,7 +86,9 @@ function AdminMobileRedirect() {
     return () => window.removeEventListener('resize', check);
   }, []);
   if (isAuthenticated() && isAdmin() && !isRoot() && narrow) {
-    if (loc.pathname !== '/admin/mobile') {
+    const path = loc.pathname;
+    const isBareAdminHome = path === '/admin' || path === '/admin/';
+    if (isBareAdminHome) {
       return <Navigate to="/admin/mobile" replace />;
     }
   }

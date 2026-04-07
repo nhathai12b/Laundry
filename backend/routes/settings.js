@@ -10,6 +10,16 @@ const router = express.Router();
 // All routes require authentication
 router.use(authenticate);
 
+async function resolveAdminStoreId(adminId, preferredStoreId) {
+  if (preferredStoreId) {
+    const store = await queryOne('SELECT id FROM stores WHERE id = ? AND admin_id = ?', [preferredStoreId, adminId]);
+    return store ? store.id : null;
+  }
+
+  const firstStore = await queryOne('SELECT id FROM stores WHERE admin_id = ? ORDER BY id ASC LIMIT 1', [adminId]);
+  return firstStore ? firstStore.id : null;
+}
+
 // Get settings (Admin or Employer)
 router.get('/', async (req, res) => {
   try {
@@ -25,11 +35,9 @@ router.get('/', async (req, res) => {
     } else if (req.user.role === 'admin' && req.user.role !== 'root') {
       // For admin, chỉ được xem settings cửa hàng trong chuỗi của mình
       const rawStoreId = req.query.store_id || req.user.store_id || null;
-      if (rawStoreId) {
-        const store = await queryOne('SELECT id FROM stores WHERE id = ? AND admin_id = ?', [rawStoreId, req.user.id]);
-        storeId = store ? rawStoreId : null;
-      } else {
-        storeId = null;
+      storeId = await resolveAdminStoreId(req.user.id, rawStoreId);
+      if (!storeId) {
+        return res.status(400).json({ error: 'Admin account chưa có cửa hàng nào trong chuỗi để cấu hình settings' });
       }
     } else if (req.user.role === 'root') {
       // Root can specify store_id in query
@@ -117,11 +125,12 @@ router.put('/', async (req, res) => {
         return res.status(400).json({ error: 'Employer account không có cửa hàng được gán' });
       }
     } else if (req.user.role === 'admin' && req.user.role !== 'root') {
-      // For admin, use store_id from body or token
-      targetStoreId = store_id || req.user.store_id || null;
-      // Verify store belongs to admin
-      if (targetStoreId) {
-        const store = await queryOne('SELECT id FROM stores WHERE id = ? AND admin_id = ?', [targetStoreId, req.user.id]);
+      targetStoreId = await resolveAdminStoreId(req.user.id, store_id || req.user.store_id || null);
+      if (!targetStoreId) {
+        return res.status(400).json({ error: 'Admin account chưa có cửa hàng nào trong chuỗi để lưu settings' });
+      }
+      if (store_id) {
+        const store = await queryOne('SELECT id FROM stores WHERE id = ? AND admin_id = ?', [store_id, req.user.id]);
         if (!store) {
           return res.status(403).json({ error: 'Bạn không có quyền cập nhật settings cho cửa hàng này' });
         }

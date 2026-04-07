@@ -1,11 +1,16 @@
 import express from 'express';
-import { query, queryOne, execute } from '../database/db.js';
+import { query, queryOne, execute, transaction } from '../database/db.js';
 import { authenticate } from '../middleware/auth.js';
 import { authorize } from '../middleware/auth.js';
 import { hashPassword } from '../utils/helpers.js';
 import { validatePasswordStrength, containsUserInfo } from '../utils/passwordValidator.js';
 
 const router = express.Router();
+
+/** Tránh 403 sai do JWT id (number) so với MySQL BIGINT (string) hoặc ngược lại. */
+function sameChainAdmin(storeAdminId, userId) {
+  return storeAdminId != null && Number(storeAdminId) === Number(userId);
+}
 
 // All routes require authentication
 router.use(authenticate);
@@ -46,7 +51,7 @@ async function releaseEmployerPhoneIfStale(accountPhoneTrimmed, adminId) {
     `SELECT id, admin_id, status FROM stores WHERE id = ?`,
     [row.store_id]
   );
-  if (!st || st.admin_id !== adminId || st.status !== 'inactive') {
+  if (!st || !sameChainAdmin(st.admin_id, adminId) || st.status !== 'inactive') {
     return { ok: false };
   }
 
@@ -81,8 +86,8 @@ router.get('/', async (req, res) => {
           FROM stores s
           LEFT JOIN users u_shared ON s.shared_account_id = u_shared.id
           LEFT JOIN users u_own ON s.id = u_own.store_id AND u_own.role = 'employer'
-          WHERE s.admin_id = ? AND s.status = 'active'
-          ORDER BY s.name
+          WHERE s.admin_id = ?
+          ORDER BY (CASE WHEN s.status = 'active' THEN 0 ELSE 1 END), s.name
         `, [req.user.id]);
       } catch (error) {
         // If shared_account_id or admin_id column doesn't exist, try simpler query
@@ -97,23 +102,13 @@ router.get('/', async (req, res) => {
                      u_own.phone as own_account_phone
               FROM stores s
               LEFT JOIN users u_own ON s.id = u_own.store_id AND u_own.role = 'employer'
-              WHERE s.admin_id = ? AND s.status = 'active'
-              ORDER BY s.name
+              WHERE s.admin_id = ?
+              ORDER BY (CASE WHEN s.status = 'active' THEN 0 ELSE 1 END), s.name
             `, [req.user.id]);
           } catch (error2) {
-            // If admin_id also doesn't exist, get all stores
+          // If admin_id also doesn't exist, fail closed instead of exposing all stores
             if (error2.code === 'ER_BAD_FIELD_ERROR' && error2.message.includes('admin_id')) {
-              // Warning log removed for security
-              stores = await query(`
-                SELECT s.*, 
-                       u_own.id as own_account_user_id,
-                       u_own.name as own_account_name,
-                       u_own.phone as own_account_phone
-                FROM stores s
-                LEFT JOIN users u_own ON s.id = u_own.store_id AND u_own.role = 'employer'
-                WHERE s.status = 'active'
-                ORDER BY s.name
-              `);
+            stores = [];
             } else {
               throw error2;
             }
@@ -160,6 +155,9 @@ router.get('/:id', async (req, res) => {
     if (req.user.role === 'admin') {
       querySql += ' AND admin_id = ?';
       params.push(req.user.id);
+    } else if (req.user.role === 'employer') {
+      querySql += ' AND id = ?';
+      params.push(req.user.store_id || 0);
     }
 
     const store = await queryOne(querySql, params);
@@ -364,15 +362,21 @@ router.patch('/:id', authorize('admin'), async (req, res) => {
 
     const { name, address, phone, status, shared_account_id } = req.body;
 
-    const store = await queryOne('SELECT * FROM stores WHERE id = ?', [req.params.id]);
+    let store = await queryOne('SELECT * FROM stores WHERE id = ?', [req.params.id]);
     if (!store) {
       return res.status(404).json({ error: 'Store not found' });
     }
 
     // Admin can only update stores from their chain
     if (req.user.role === 'admin') {
-      // Check if store belongs to admin's chain
-      if (!store.admin_id || store.admin_id !== req.user.id) {
+      if (store.admin_id == null) {
+        await execute(
+          'UPDATE stores SET admin_id = ? WHERE id = ? AND admin_id IS NULL',
+          [req.user.id, req.params.id]
+        );
+        store = await queryOne('SELECT * FROM stores WHERE id = ?', [req.params.id]);
+      }
+      if (!sameChainAdmin(store.admin_id, req.user.id)) {
         return res.status(403).json({ error: 'Bạn chỉ có thể sửa cửa hàng trong chuỗi của mình' });
       }
     }
@@ -393,8 +397,12 @@ router.patch('/:id', authorize('admin'), async (req, res) => {
       values.push(phone);
     }
     if (status !== undefined) {
+      const s = String(status);
+      if (s !== 'active' && s !== 'inactive') {
+        return res.status(400).json({ error: 'Trạng thái phải là active hoặc inactive' });
+      }
       updates.push('status = ?');
-      values.push(status);
+      values.push(s);
     }
     if (shared_account_id !== undefined) {
       // Verify shared account exists if provided
@@ -428,38 +436,141 @@ router.patch('/:id', authorize('admin'), async (req, res) => {
   }
 });
 
-// Delete store (Admin only)
-router.delete('/:id', authorize('admin'), async (req, res) => {
+/**
+ * Ngừng hoạt động (permanent=false) hoặc xóa hẳn bản ghi cửa hàng (permanent=true).
+ * Xóa vĩnh viễn: gỡ store_id / xóa con phụ thuộc trước để tương thích DB cũ (FK RESTRICT / thiếu ON DELETE).
+ */
+async function handleStoreRemoval(req, res, permanent) {
   try {
-    // Root admin is software vendor, not store operator - cannot delete stores
     if (req.user.role === 'root') {
       return res.status(403).json({ error: 'Root admin không thể xóa cửa hàng' });
     }
 
-    const store = await queryOne('SELECT * FROM stores WHERE id = ?', [req.params.id]);
+    const storeId = parseInt(String(req.params.id), 10);
+    if (Number.isNaN(storeId) || storeId < 1) {
+      return res.status(400).json({ error: 'ID cửa hàng không hợp lệ' });
+    }
+
+    let store = await queryOne('SELECT * FROM stores WHERE id = ?', [storeId]);
     if (!store) {
       return res.status(404).json({ error: 'Store not found' });
     }
 
-    // Admin can only delete stores from their chain
     if (req.user.role === 'admin') {
-      // Check if store belongs to admin's chain
-      if (!store.admin_id || store.admin_id !== req.user.id) {
+      if (store.admin_id == null) {
+        await execute(
+          'UPDATE stores SET admin_id = ? WHERE id = ? AND admin_id IS NULL',
+          [req.user.id, storeId]
+        );
+        store = await queryOne('SELECT * FROM stores WHERE id = ?', [storeId]);
+      }
+      if (!sameChainAdmin(store.admin_id, req.user.id)) {
         return res.status(403).json({ error: 'Bạn chỉ có thể xóa cửa hàng trong chuỗi của mình' });
       }
     }
 
-    // Soft delete: giữ dòng stores + store_id trên orders → báo cáo theo cửa hàng vẫn khớp lịch sử
-    await execute('UPDATE stores SET status = ? WHERE id = ?', ['inactive', req.params.id]);
-    res.json({
+    await transaction(async (db) => {
+      const ownEmployerUsers = await db.query(
+        `SELECT id
+         FROM users
+         WHERE store_id = ? AND role = 'employer'`,
+        [storeId]
+      );
+
+      const ownEmployerUserIds = ownEmployerUsers.map((u) => u.id);
+
+      if (ownEmployerUserIds.length > 0) {
+        const placeholders = ownEmployerUserIds.map(() => '?').join(',');
+
+        await db.execute(
+          `DELETE FROM employees WHERE store_id IN (${placeholders})`,
+          ownEmployerUserIds
+        );
+
+        await db.execute(
+          `UPDATE users SET status = 'inactive' WHERE id IN (${placeholders})`,
+          ownEmployerUserIds
+        );
+      }
+
+      if (permanent) {
+        await db.execute('UPDATE users SET store_id = NULL WHERE store_id = ?', [storeId]);
+        await db.execute('UPDATE orders SET store_id = NULL WHERE store_id = ?', [storeId]);
+        await db.execute('UPDATE products SET store_id = NULL WHERE store_id = ?', [storeId]);
+        await db.execute('UPDATE timesheets SET store_id = NULL WHERE store_id = ?', [storeId]);
+        try {
+          await db.execute('DELETE FROM promotions WHERE store_id = ?', [storeId]);
+        } catch (e) {
+          if (e.code !== 'ER_NO_SUCH_TABLE') throw e;
+        }
+        try {
+          await db.execute('DELETE FROM settings WHERE store_id = ?', [storeId]);
+        } catch (e) {
+          if (e.code !== 'ER_NO_SUCH_TABLE') throw e;
+        }
+        await db.execute('DELETE FROM stores WHERE id = ?', [storeId]);
+      } else {
+        await db.execute(
+          `UPDATE products
+           SET status = 'inactive', updated_by = ?
+           WHERE store_id = ?`,
+          [req.user.id, storeId]
+        );
+
+        await db.execute(
+          `UPDATE promotions
+           SET status = 'inactive'
+           WHERE store_id = ?`,
+          [storeId]
+        );
+
+        await db.execute(
+          `UPDATE stores
+           SET status = 'inactive'
+           WHERE id = ?`,
+          [storeId]
+        );
+      }
+    });
+
+    if (permanent) {
+      return res.json({
+        message:
+          'Đã xóa vĩnh viễn cửa hàng khỏi hệ thống. Đơn hàng và sản phẩm cũ vẫn còn nhưng không còn gắn cửa hàng; khuyến mãi/cài đặt riêng của cửa đã được gỡ.',
+        action: 'deleted',
+      });
+    }
+
+    return res.json({
       message:
-        'Đã ngừng hoạt động cửa hàng. Đơn hàng và báo cáo cũ vẫn gắn cửa hàng này. Khi tạo cửa hàng mới, có thể dùng lại cùng SĐT đăng nhập nếu cửa hàng cũ đã ngừng hoạt động.',
+        'Đã ngừng hoạt động cửa hàng. Nhân viên thuộc account riêng của cửa hàng đã bị xóa; sản phẩm, khuyến mãi và tài khoản cửa hàng riêng đã bị ẩn/khóa để không còn xuất hiện ở các flow mới. Đơn hàng và báo cáo cũ vẫn được giữ.',
       action: 'deactivated',
     });
   } catch (error) {
     console.error('Delete store error:', error);
-    res.status(500).json({ error: 'Lỗi máy chủ. Vui lòng thử lại.' });
+    if (error.code === 'ER_ROW_IS_REFERENCED_2' || error.errno === 1451) {
+      return res.status(409).json({
+        error:
+          'Không thể xóa cửa hàng vì database còn ràng buộc tới bảng khác. Hãy cập nhật schema FK (ON DELETE SET NULL/CASCADE) hoặc gỡ dữ liệu liên quan. Chi tiết: ' +
+          (error.sqlMessage || error.message),
+      });
+    }
+    return res.status(500).json({ error: 'Lỗi máy chủ. Vui lòng thử lại.' });
   }
+}
+
+// Xóa vĩnh viễn qua POST (tránh proxy/client bỏ query string trên DELETE).
+router.post('/:id/delete-permanent', authorize('admin'), async (req, res) => {
+  return handleStoreRemoval(req, res, true);
+});
+
+// Delete store (Admin only). Mặc định: ngừng hoạt động. ?permanent=1: xóa hẳn (tương thích API cũ).
+router.delete('/:id', authorize('admin'), async (req, res) => {
+  const permanent =
+    req.query.permanent === 'true' ||
+    req.query.permanent === '1' ||
+    req.query.permanent === true;
+  return handleStoreRemoval(req, res, permanent);
 });
 
 export default router;

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { clearAuth, getAuth, isMobileScreen } from '../../utils/auth';
 import api from '../../utils/api';
 import Dashboard from '../Dashboard';
@@ -62,9 +62,18 @@ function AdminMobileOverview() {
           </button>
         </div>
         <p className="text-center text-[11px] text-blue-100 px-3 pb-2 max-w-lg mx-auto">
-          Chỉ xem nhanh số liệu. Quản lý đầy đủ vui lòng dùng máy tính.
+          Chỉ xem nhanh số liệu. Cần sửa cửa hàng / tài khoản thì mở liên kết bên dưới.
         </p>
       </header>
+
+      <div className="max-w-lg mx-auto px-3 -mt-1 pb-2">
+        <Link
+          to="/admin/stores"
+          className="block text-center text-sm font-medium py-3 px-4 rounded-xl bg-white/15 text-white hover:bg-white/25 active:bg-white/20 border border-white/30"
+        >
+          Cửa hàng & tài khoản →
+        </Link>
+      </div>
 
       <div className="max-w-lg mx-auto px-3 pt-3">
         {subscriptionExpiresAt &&
