@@ -134,6 +134,19 @@ router.get('/by-phone/:phone', async (req, res) => {
       if (!hasOrderInChain) {
         return res.json({ data: null });
       }
+    } else if (req.user.role === 'employer') {
+      const hasAccess = req.user.store_id
+        ? await queryOne(
+            `SELECT 1 FROM orders o WHERE o.customer_id = ? AND o.store_id = ? LIMIT 1`,
+            [customer.id, req.user.store_id]
+          )
+        : await queryOne(
+            `SELECT 1 FROM orders o WHERE o.customer_id = ? AND (o.assigned_to = ? OR o.created_by = ?) LIMIT 1`,
+            [customer.id, req.user.id, req.user.id]
+          );
+      if (!hasAccess) {
+        return res.json({ data: null });
+      }
     }
 
     res.json({ data: customer });
@@ -170,6 +183,19 @@ router.get('/:id', async (req, res) => {
       }
     } else if (req.user.role === 'root') {
       return res.status(404).json({ error: 'Customer not found' });
+    } else if (req.user.role === 'employer') {
+      const hasAccess = req.user.store_id
+        ? await queryOne(
+            `SELECT 1 FROM orders o WHERE o.customer_id = ? AND o.store_id = ? LIMIT 1`,
+            [customer.id, req.user.store_id]
+          )
+        : await queryOne(
+            `SELECT 1 FROM orders o WHERE o.customer_id = ? AND (o.assigned_to = ? OR o.created_by = ?) LIMIT 1`,
+            [customer.id, req.user.id, req.user.id]
+          );
+      if (!hasAccess) {
+        return res.status(404).json({ error: 'Customer not found' });
+      }
     }
 
     res.json({ data: customer });
@@ -192,11 +218,19 @@ router.get('/:id/orders', async (req, res) => {
 
     // Filter by store based on user role
     if (req.user.role === 'employer' && req.user.store_id) {
-      querySql += ' AND o.store_id = ?';
-      params.push(req.user.store_id);
+      querySql += ' AND (o.store_id = ? OR (o.store_id IS NULL AND (o.assigned_to = ? OR o.created_by = ?)))';
+      params.push(req.user.store_id, req.user.id, req.user.id);
     } else if (req.user.role === 'admin' && req.user.role !== 'root') {
-      querySql += ' AND o.store_id IN (SELECT id FROM stores WHERE admin_id = ?)';
-      params.push(req.user.id);
+      querySql += ` AND (
+        (o.store_id IS NOT NULL AND o.store_id IN (SELECT id FROM stores WHERE admin_id = ?))
+        OR (
+          o.store_id IS NULL AND (
+            o.assigned_to IN (SELECT id FROM users WHERE store_id IN (SELECT id FROM stores WHERE admin_id = ?))
+            OR o.created_by IN (SELECT id FROM users WHERE store_id IN (SELECT id FROM stores WHERE admin_id = ?))
+          )
+        )
+      )`;
+      params.push(req.user.id, req.user.id, req.user.id);
     } else if (req.user.role === 'root') {
       // Root admin is software vendor, not store operator - return empty
       return res.json({ data: [] });

@@ -417,7 +417,9 @@ function Dashboard() {
           <div className="flex items-center justify-between mb-4">
             <div>
               <h3 className="text-lg font-bold text-indigo-800 mb-1">Doanh thu theo từng cửa hàng</h3>
-              <p className="text-sm text-indigo-600">Tổng hợp doanh thu trong ngày</p>
+              <p className="text-sm text-indigo-600">
+                Tổng hợp doanh thu {periodView === 'day' ? 'trong ngày' : periodView === 'month' ? 'trong tháng' : 'trong năm'}
+              </p>
             </div>
             <div className="text-2xl">🏬</div>
           </div>
@@ -439,7 +441,9 @@ function Dashboard() {
       <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
         <div className="bg-gradient-to-br from-blue-50 to-cyan-100 rounded-xl shadow-lg p-5 border border-blue-200 hover:shadow-xl transition-all duration-300">
           <div className="flex items-center justify-between mb-3">
-            <div className="text-xs font-medium text-blue-700 uppercase tracking-wide">Đơn hôm nay</div>
+            <div className="text-xs font-medium text-blue-700 uppercase tracking-wide">
+              {periodView === 'day' ? 'Đơn hôm nay' : periodView === 'month' ? 'Đơn tháng này' : 'Đơn năm nay'}
+            </div>
             <div className="text-xl">📋</div>
           </div>
           <div className="text-2xl font-bold text-blue-600">{stats.todayOrders}</div>

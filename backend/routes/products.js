@@ -39,9 +39,9 @@ router.get('/', async (req, res) => {
         return res.json({ data: [] });
       }
     } else if (req.user.role === 'admin' && req.user.role !== 'root') {
-      // Admin: only show products from stores owned by this admin
-      querySql += ' AND s.admin_id = ?';
-      params.push(req.user.id);
+      // Admin: only show products from stores owned by this admin, or global products they created
+      querySql += ' AND (s.admin_id = ? OR (p.store_id IS NULL AND p.created_by = ?))';
+      params.push(req.user.id, req.user.id);
     } else if (req.user.role === 'root') {
       // Root admin is software vendor, not store operator - return empty
       return res.json({ data: [] });
@@ -85,9 +85,9 @@ router.get('/:id', async (req, res) => {
         return res.status(404).json({ error: 'Product not found' });
       }
     } else if (req.user.role === 'admin' && req.user.role !== 'root') {
-      // Admin: only show products from stores owned by this admin
-      querySql += ' AND s.admin_id = ?';
-      params.push(req.user.id);
+      // Admin: only show products from stores owned by this admin, or global products they created
+      querySql += ' AND (s.admin_id = ? OR (p.store_id IS NULL AND p.created_by = ?))';
+      params.push(req.user.id, req.user.id);
     } else if (req.user.role === 'root') {
       // Root admin is software vendor, not store operator - return 404
       return res.status(404).json({ error: 'Product not found' });
@@ -206,7 +206,11 @@ router.patch('/:id', authorize('admin'), auditLog('update', 'product'), async (r
     }
 
     // For admin (not root), verify product belongs to their store chain
-    if (req.user.role === 'admin' && oldProduct.store_admin_id !== req.user.id) {
+    if (
+      req.user.role === 'admin' &&
+      oldProduct.store_admin_id !== req.user.id &&
+      !(oldProduct.store_id == null && oldProduct.created_by === req.user.id)
+    ) {
       return res.status(403).json({ error: 'Bạn chỉ có thể sửa sản phẩm trong chuỗi cửa hàng của mình' });
     }
 
@@ -286,7 +290,7 @@ router.patch('/:id', authorize('admin'), auditLog('update', 'product'), async (r
 router.delete('/:id', authorize('admin'), auditLog('delete', 'product'), async (req, res) => {
   try {
     const product = await queryOne(`
-      SELECT p.id, s.admin_id as store_admin_id
+      SELECT p.id, p.store_id, p.created_by, s.admin_id as store_admin_id
       FROM products p
       LEFT JOIN stores s ON p.store_id = s.id
       WHERE p.id = ?
@@ -302,7 +306,11 @@ router.delete('/:id', authorize('admin'), auditLog('delete', 'product'), async (
     }
 
     // For admin, verify product belongs to their store chain
-    if (req.user.role === 'admin' && product.store_admin_id !== req.user.id) {
+    if (
+      req.user.role === 'admin' &&
+      product.store_admin_id !== req.user.id &&
+      !(product.store_id == null && product.created_by === req.user.id)
+    ) {
       return res.status(403).json({ error: 'Bạn chỉ có thể xóa sản phẩm trong chuỗi cửa hàng của mình' });
     }
 

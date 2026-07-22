@@ -2,6 +2,7 @@ import express from 'express';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
+import net from 'node:net';
 import { fileURLToPath } from 'url';
 import { query, queryOne } from '../database/db.js';
 import { authenticate } from '../middleware/auth.js';
@@ -56,42 +57,159 @@ if (!fontRegistered) {
 const router = express.Router();
 router.use(authenticate);
 
+/** Đơn hàng + khách — chỉ khi user được phép xem/in (admin chuỗi, employer cửa hàng). */
+async function getOrderForBill(req, orderId) {
+  if (req.user.role === 'root') return null;
+
+  let sql = `
+    SELECT o.*, c.name as customer_name, c.phone as customer_phone
+    FROM orders o
+    LEFT JOIN customers c ON o.customer_id = c.id
+    WHERE o.id = ?`;
+  const params = [orderId];
+
+  if (req.user.role === 'admin' && req.user.role !== 'root') {
+    sql += ` AND (
+      (o.store_id IS NOT NULL AND o.store_id IN (SELECT id FROM stores WHERE admin_id = ?))
+      OR (
+        o.store_id IS NULL AND (
+          o.assigned_to IN (SELECT id FROM users WHERE store_id IN (SELECT id FROM stores WHERE admin_id = ?))
+          OR o.created_by IN (SELECT id FROM users WHERE store_id IN (SELECT id FROM stores WHERE admin_id = ?))
+        )
+      )
+    )`;
+    params.push(req.user.id, req.user.id, req.user.id);
+  } else if (req.user.role === 'employer') {
+    if (req.user.store_id) {
+      sql += ` AND (
+        o.store_id = ?
+        OR (o.store_id IS NULL AND (o.assigned_to = ? OR o.created_by = ?))
+      )`;
+      params.push(req.user.store_id, req.user.id, req.user.id);
+    } else {
+      sql += ` AND (o.assigned_to = ? OR o.created_by = ?)`;
+      params.push(req.user.id, req.user.id);
+    }
+  } else {
+    return null;
+  }
+
+  return queryOne(sql, params);
+}
+
+function sendEscPosToNetworkPrinter(host, port, buffer) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (err) => {
+      if (settled) return;
+      settled = true;
+      if (err) reject(err);
+      else resolve();
+    };
+
+    const sock = net.createConnection({ host, port });
+    sock.setTimeout(15000, () => {
+      sock.destroy();
+      finish(new Error('Hết thời gian chờ máy in (kiểm tra IP/cổng và mạng)'));
+    });
+    sock.once('error', (e) => {
+      sock.destroy();
+      finish(e);
+    });
+    sock.once('connect', () => {
+      sock.write(buffer, (writeErr) => {
+        if (writeErr) {
+          sock.destroy();
+          return finish(writeErr);
+        }
+        sock.end();
+      });
+    });
+    sock.once('close', () => finish());
+  });
+}
+
+async function loadBillPayload(req, orderId) {
+  if (!validateId(orderId).valid) {
+    return { error: { status: 400, body: { error: 'Order ID không hợp lệ' } } };
+  }
+
+  const order = await getOrderForBill(req, orderId);
+  if (!order) {
+    return { error: { status: 404, body: { error: 'Order not found' } } };
+  }
+
+  const items = await query(
+    `SELECT oi.*, p.name as product_name, p.unit as product_unit
+     FROM order_items oi
+     JOIN products p ON oi.product_id = p.id
+     WHERE oi.order_id = ?`,
+    [orderId]
+  );
+
+  const storeId = order.store_id ?? null;
+  const settingsRows = await query(
+    'SELECT `key`, value FROM settings WHERE store_id = ? OR (store_id IS NULL AND ? IS NULL)',
+    [storeId, storeId]
+  );
+  const settings = {};
+  settingsRows.forEach((s) => {
+    settings[s.key] = s.value;
+  });
+  const paperSize = settings.paper_size || '80mm';
+
+  const billData = await generateBill(order, items, settings, paperSize);
+  return { order, items, settings, paperSize, billData };
+}
+
 // GET /bill-data/:orderId - returns base64 ESC/POS bitmap for Bluetooth printing
 router.get('/bill-data/:orderId', async (req, res) => {
   try {
     const { orderId } = req.params;
-    if (!validateId(orderId).valid) return res.status(400).json({ error: 'Order ID không hợp lệ' });
-
-    const order = await queryOne(
-      `SELECT o.*, c.name as customer_name, c.phone as customer_phone
-       FROM orders o
-       LEFT JOIN customers c ON o.customer_id=c.id
-       WHERE o.id=?`,
-      [orderId]
-    );
-    if (!order) return res.status(404).json({ error: 'Order not found' });
-
-    const items = await query(
-      `SELECT oi.*, p.name as product_name, p.unit as product_unit
-       FROM order_items oi
-       JOIN products p ON oi.product_id=p.id
-       WHERE oi.order_id=?`,
-      [orderId]
-    );
-
-    const storeId = order.store_id ?? null;
-    const settingsRows = await query(
-      'SELECT `key`, value FROM settings WHERE store_id = ? OR (store_id IS NULL AND ? IS NULL)',
-      [storeId, storeId]
-    );
-    const settings = {};
-    settingsRows.forEach((s) => { settings[s.key] = s.value; });
-    const paperSize = settings.paper_size || '80mm';
-
-    const billData = await generateBill(order, items, settings, paperSize);
+    const payload = await loadBillPayload(req, orderId);
+    if (payload.error) {
+      return res.status(payload.error.status).json(payload.error.body);
+    }
+    const { billData, paperSize } = payload;
     res.json({ success: true, data: billData.toString('base64'), paperSize });
   } catch (err) {
     res.status(500).json({ error: 'Lỗi khi tạo bill' });
+  }
+});
+
+// POST /bill/:orderId - gửi ESC/POS tới máy in mạng (printer_ip / printer_port trong Cài đặt)
+router.post('/bill/:orderId', async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const payload = await loadBillPayload(req, orderId);
+    if (payload.error) {
+      return res.status(payload.error.status).json(payload.error.body);
+    }
+
+    const { settings, billData } = payload;
+    const printerIp = (settings.printer_ip && String(settings.printer_ip).trim()) || '';
+    const portRaw = settings.printer_port;
+    const printerPort = portRaw != null && String(portRaw).trim() !== '' ? parseInt(String(portRaw), 10) : NaN;
+
+    if (!printerIp || Number.isNaN(printerPort) || printerPort < 1 || printerPort > 65535) {
+      return res.status(400).json({
+        error: 'Chưa cấu hình IP và cổng máy in. Vào Cài đặt → In bill → nhập IP và cổng (thường 9100), rồi Lưu.',
+      });
+    }
+
+    try {
+      await sendEscPosToNetworkPrinter(printerIp, printerPort, billData);
+    } catch (e) {
+      const msg = e?.message || 'Lỗi kết nối máy in';
+      return res.status(502).json({
+        error: `Không gửi được tới máy in ${printerIp}:${printerPort}. ${msg}`,
+      });
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Print bill error:', err);
+    res.status(500).json({ error: 'Lỗi khi in bill' });
   }
 });
 

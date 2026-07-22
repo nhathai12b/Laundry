@@ -26,6 +26,27 @@ function addYears(date, years) {
   return d;
 }
 
+async function getEmployerInAdminChain(userId, adminId) {
+  return queryOne(
+    `
+    SELECT u.id, u.role, u.store_id
+    FROM users u
+    WHERE u.id = ? AND u.role = 'employer'
+      AND (
+        EXISTS (
+          SELECT 1 FROM stores s
+          WHERE s.admin_id = ? AND s.id = u.store_id
+        )
+        OR EXISTS (
+          SELECT 1 FROM stores s
+          WHERE s.admin_id = ? AND s.shared_account_id = u.id
+        )
+      )
+  `,
+    [userId, adminId, adminId]
+  );
+}
+
 // All routes require authentication
 router.use(authenticate);
 
@@ -46,18 +67,26 @@ router.get('/', authorize('admin'), async (req, res) => {
           ORDER BY u.created_at DESC
         `);
       } else if (req.user.role === 'admin' && req.user.role !== 'root') {
-        // Admin can only see users from stores in their chain (stores with admin_id = user.id)
-        // Exclude admin/root users - only show employer users (tài khoản tiệm)
-        users = await query(`
-          SELECT u.id, u.name, u.phone, u.role, u.status, u.started_at, u.hourly_rate, u.shift_rate, 
-                 u.created_at, u.updated_at, u.store_id, s.name as store_name,
+        // Admin: employer gắn store_id HOẶC tài khoản chung (shared_account_id) của cửa trong chuỗi
+        users = await query(
+          `
+          SELECT u.id, u.name, u.phone, u.role, u.status, u.started_at, u.hourly_rate, u.shift_rate,
+                 u.created_at, u.updated_at, u.store_id,
+                 (SELECT s2.name FROM stores s2
+                  WHERE s2.admin_id = ?
+                    AND (s2.id = u.store_id OR s2.shared_account_id = u.id)
+                  ORDER BY s2.id LIMIT 1) as store_name,
                  u.subscription_expires_at, u.subscription_package
           FROM users u
-          LEFT JOIN stores s ON u.store_id = s.id
-          WHERE s.admin_id = ?
-            AND u.role = 'employer'
+          WHERE u.role = 'employer'
+            AND (
+              EXISTS (SELECT 1 FROM stores s WHERE s.admin_id = ? AND s.id = u.store_id)
+              OR EXISTS (SELECT 1 FROM stores s WHERE s.admin_id = ? AND s.shared_account_id = u.id)
+            )
           ORDER BY u.created_at DESC
-        `, [req.user.id]);
+        `,
+          [req.user.id, req.user.id, req.user.id]
+        );
       } else {
         // Admin without proper setup (should not happen, but handle gracefully)
         users = [];
@@ -95,11 +124,27 @@ router.get('/', authorize('admin'), async (req, res) => {
 // Get single user
 router.get('/:id', authorize('admin'), async (req, res) => {
   try {
-    const user = await queryOne(`
-      SELECT id, name, phone, role, status, started_at, hourly_rate, shift_rate, created_at, updated_at
-      FROM users
-      WHERE id = ?
-    `, [req.params.id]);
+    let user;
+    if (req.user.role === 'root') {
+      user = await queryOne(`
+        SELECT id, name, phone, role, status, started_at, hourly_rate, shift_rate, created_at, updated_at
+        FROM users
+        WHERE id = ?
+      `, [req.params.id]);
+    } else {
+      user = await queryOne(
+        `
+        SELECT u.id, u.name, u.phone, u.role, u.status, u.started_at, u.hourly_rate, u.shift_rate, u.created_at, u.updated_at
+        FROM users u
+        WHERE u.id = ? AND u.role = 'employer'
+          AND (
+            EXISTS (SELECT 1 FROM stores s WHERE s.admin_id = ? AND s.id = u.store_id)
+            OR EXISTS (SELECT 1 FROM stores s WHERE s.admin_id = ? AND s.shared_account_id = u.id)
+          )
+      `,
+        [req.params.id, req.user.id, req.user.id]
+      );
+    }
 
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
@@ -157,10 +202,12 @@ router.post('/', authorize('admin'), auditLog('create', 'user', (req) => req.bod
         return res.status(400).json({ error: 'Store ID is required. Please select a store.' });
       }
 
-      // Verify store exists in stores table
-      const storeExists = await queryOne('SELECT id FROM stores WHERE id = ?', [store_id]);
+      // Verify store exists and, for chain admin, belongs to them
+      const storeExists = req.user.role === 'root'
+        ? await queryOne('SELECT id FROM stores WHERE id = ?', [store_id])
+        : await queryOne('SELECT id FROM stores WHERE id = ? AND admin_id = ?', [store_id, req.user.id]);
       if (!storeExists) {
-        return res.status(400).json({ error: 'Selected store does not exist' });
+        return res.status(400).json({ error: 'Selected store does not exist or does not belong to your chain' });
       }
 
       storeId = parseInt(store_id);
@@ -258,6 +305,13 @@ router.patch('/:id', authorize('admin'), auditLog('update', 'user'), async (req,
       return res.status(404).json({ error: 'User not found' });
     }
 
+    if (req.user.role !== 'root' && oldUser.role !== 'admin') {
+      const scopedUser = await getEmployerInAdminChain(req.params.id, req.user.id);
+      if (!scopedUser) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+    }
+
     const isSelf = parseInt(req.params.id, 10) === req.user.id;
     // Chỉ root mới được cập nhật admin khác; admin thường được đổi mật khẩu của chính mình
     if (oldUser.role === 'admin' && req.user.role !== 'root') {
@@ -296,6 +350,10 @@ router.patch('/:id', authorize('admin'), auditLog('update', 'user'), async (req,
 
     const updates = [];
     const values = [];
+
+    if (role !== undefined && req.user.role !== 'root' && role !== oldUser.role) {
+      return res.status(403).json({ error: 'Chỉ root admin mới có thể thay đổi role người dùng' });
+    }
 
     if (name !== undefined) { updates.push('name = ?'); values.push(name.trim()); }
     if (phone !== undefined) { 
@@ -440,6 +498,13 @@ router.delete('/:id', authorize('admin'), auditLog('delete', 'user'), async (req
       return res.status(403).json({ error: 'Chỉ root admin mới có thể xóa admin' });
     }
 
+    if (req.user.role !== 'root' && user.role !== 'admin') {
+      const scopedUser = await getEmployerInAdminChain(req.params.id, req.user.id);
+      if (!scopedUser) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+    }
+
     // Don't allow deleting yourself
     if (user.id === req.user.id) {
       return res.status(400).json({ error: 'Cannot delete yourself' });
@@ -469,6 +534,12 @@ router.delete('/:id', authorize('admin'), auditLog('delete', 'user'), async (req
     res.json({ message: 'User deleted successfully' });
   } catch (error) {
     console.error('Delete user error:', error);
+    if (error.code === 'ER_ROW_IS_REFERENCED_2' || error.errno === 1451) {
+      return res.status(409).json({
+        error:
+          'Không thể xóa tài khoản vì còn đơn hàng hoặc dữ liệu khác gắn với user này. Hãy vô hiệu hóa tài khoản (inactive) thay vì xóa, hoặc xử lý dữ liệu liên quan trước.',
+      });
+    }
     res.status(500).json({ error: 'Lỗi máy chủ. Vui lòng thử lại.' });
   }
 });

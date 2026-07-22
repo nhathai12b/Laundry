@@ -1,6 +1,7 @@
 import express from 'express';
 import { query, queryOne, execute } from '../database/db.js';
 import { calculateHours, formatDateTimeGMT7, parseTimesheetDateTimeMs } from '../utils/helpers.js';
+import { resolveStoresIdForEmployerUser } from '../utils/employerStore.js';
 import { authenticate } from '../middleware/auth.js';
 import { authorize } from '../middleware/auth.js';
 import { OVERTIME_MULTIPLIER } from '../utils/constants.js';
@@ -145,16 +146,14 @@ router.post('/check-in', async (req, res) => {
     }
 
     const { employee_id, note } = req.body;
-    
-    // Get the actual store_id from users table (users.store_id references stores.id)
-    // For employer, we need to get users.store_id, not users.id
-    const user = await queryOne('SELECT store_id FROM users WHERE id = ? AND role = ?', [req.user.id, 'employer']);
-    
-    if (!user || !user.store_id) {
-      return res.status(400).json({ error: 'Employer account không có cửa hàng được gán. Vui lòng liên hệ admin.' });
+
+    const storeId = await resolveStoresIdForEmployerUser(req.user.id);
+    if (!storeId) {
+      return res.status(400).json({
+        error:
+          'Tài khoản chưa gắn cửa hàng (store_id) hoặc chưa được gán làm tài khoản chung cho cửa hàng nào. Vui lòng liên hệ admin.',
+      });
     }
-    
-    const storeId = user.store_id; // This is stores.id, not users.id
     
     // Ưu tiên dùng employee_id từ token (nếu đã chọn khi login)
     // Nếu không có trong token, dùng từ request body
@@ -172,27 +171,24 @@ router.post('/check-in', async (req, res) => {
     // Lưu giờ vào theo GMT+7 (Việt Nam) — đúng chấm công / xuất Excel
     const checkIn = formatDateTimeGMT7(new Date());
 
-    // A: Chặn mở ca mới nếu cùng cửa hàng + cùng slot nhân viên vẫn còn ca chưa checkout (mọi ngày)
-    let openSameSlot;
-    if (employeeId) {
-      openSameSlot = await queryOne(`
-        SELECT id, check_in FROM timesheets
-        WHERE store_id = ? AND employee_id = ? AND check_out IS NULL
-        LIMIT 1
-      `, [storeId, employeeId]);
-    } else {
-      openSameSlot = await queryOne(`
-        SELECT id, check_in FROM timesheets
-        WHERE store_id = ? AND employee_id IS NULL AND check_out IS NULL
-        LIMIT 1
-      `, [storeId]);
-    }
-    if (openSameSlot) {
-      const d = String(openSameSlot.check_in || '').slice(0, 10);
+    // Một employer chỉ 1 ca mở (không lọc store_id): phải khớp GET /open-shifts.
+    // Dữ liệu cũ có store_id NULL vẫn là ca mở — nếu chỉ so khớp store_id hiện tại sẽ INSERT thêm ca,
+    // UI / checkout lệch (open-shifts trả ca khác hoặc nhiều ca).
+    const anyOpenShift = await queryOne(
+      `
+      SELECT id, check_in FROM timesheets
+      WHERE user_id = ? AND check_out IS NULL
+      ORDER BY check_in ASC
+      LIMIT 1
+    `,
+      [req.user.id]
+    );
+    if (anyOpenShift) {
+      const d = String(anyOpenShift.check_in || '').slice(0, 10);
       return res.status(400).json({
-        error: `Còn ca chưa checkout (check-in ${d}). Vui lòng check-out ca này trước khi mở ca mới.`,
+        error: `Bạn đã có ca chưa check-out (check-in ${d}). Hãy bấm Check-out trước khi check-in lại — kể cả khi muốn đổi nhân viên.`,
         code: 'OPEN_SHIFT_EXISTS',
-        open_shift: { id: openSameSlot.id, check_in: openSameSlot.check_in },
+        open_shift: { id: anyOpenShift.id, check_in: anyOpenShift.check_in },
       });
     }
 
@@ -214,6 +210,13 @@ router.post('/check-in', async (req, res) => {
     res.status(201).json({ data: timesheet });
   } catch (error) {
     console.error('Check in error:', error);
+    if (error.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({
+        error:
+          'Dữ liệu chấm công bị trùng (có thể đã check-in). Hãy tải lại trang Chấm công; nếu vẫn có ca mở thì check-out trước khi check-in lại.',
+        code: 'DUPLICATE_CHECKIN',
+      });
+    }
     res.status(500).json({ error: 'Lỗi máy chủ. Vui lòng thử lại.' });
   }
 });
