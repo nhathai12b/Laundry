@@ -70,10 +70,13 @@ export function formatDateTimeGMT7(date = new Date()) {
     hour: '2-digit',
     minute: '2-digit',
     second: '2-digit',
-    hour12: false,
+    // hour12: false alone can render midnight as "24" under ICU; hourCycle
+    // 'h23' guarantees 00-23 so MySQL DATETIME never rejects the value.
+    hourCycle: 'h23',
   }).formatToParts(date);
   const g = (t) => parts.find((p) => p.type === t)?.value ?? '';
-  return `${g('year')}-${g('month')}-${g('day')} ${g('hour')}:${g('minute')}:${g('second')}`;
+  const hour = g('hour') === '24' ? '00' : g('hour');
+  return `${g('year')}-${g('month')}-${g('day')} ${hour}:${g('minute')}:${g('second')}`;
 }
 
 /**
@@ -82,7 +85,23 @@ export function formatDateTimeGMT7(date = new Date()) {
  */
 export function parseTimesheetDateTimeMs(value) {
   if (value == null || value === '') return NaN;
-  if (value instanceof Date) return value.getTime();
+  if (value instanceof Date) {
+    // mysql2 builds DATETIME values into a Date whose *local* getters equal the
+    // literal stored value, regardless of the Node process's own timezone.
+    // Re-interpret those literal components as GMT+7 (same convention as
+    // formatDateTimeGMT7/the string branch below) instead of trusting
+    // getTime(), which depends on process.env.TZ and can silently be off by
+    // hours whenever the server isn't running in Asia/Ho_Chi_Minh.
+    return Date.UTC(
+      value.getFullYear(),
+      value.getMonth(),
+      value.getDate(),
+      value.getHours() - 7,
+      value.getMinutes(),
+      value.getSeconds(),
+      value.getMilliseconds()
+    );
+  }
   let s = String(value).trim().replace(' ', 'T');
   if (/[zZ]$|[+-]\d{2}:?\d{2}$/.test(s)) {
     return new Date(s).getTime();

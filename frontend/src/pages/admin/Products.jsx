@@ -34,9 +34,11 @@ function Products() {
   }, []);
 
   useEffect(() => {
-    // Filter products by selected store (only show active products)
+    // Filter products by selected store. Inactive products are still shown
+    // (with a badge) so admins can re-activate them; otherwise there would be
+    // no way to undo a deactivation once it happens.
     if (!selectedStoreId || selectedStoreId === 'all') return;
-    setProducts(allProducts.filter(p => p.store_id === parseInt(selectedStoreId) && p.status === 'active'));
+    setProducts(allProducts.filter(p => p.store_id === parseInt(selectedStoreId)));
   }, [selectedStoreId, allProducts]);
 
   // Save store filter whenever it changes
@@ -58,9 +60,9 @@ function Products() {
       const response = await api.get('/products');
       const productsData = response.data.data || [];
       setAllProducts(productsData);
-      // Apply current filter (only show active products)
+      // Apply current store filter (both active and inactive products)
       if (selectedStoreId && selectedStoreId !== 'all') {
-        setProducts(productsData.filter(p => p.store_id === parseInt(selectedStoreId) && p.status === 'active'));
+        setProducts(productsData.filter(p => p.store_id === parseInt(selectedStoreId)));
       }
     } catch (error) {
       console.error('Error loading products:', error);
@@ -120,6 +122,17 @@ function Products() {
     } catch (error) {
       console.error('Error deleting product:', error);
       alert(error.response?.data?.error || 'Có lỗi xảy ra khi xử lý sản phẩm');
+    }
+  };
+
+  const handleReactivate = async (product) => {
+    if (!confirm('Kích hoạt lại sản phẩm này?')) return;
+    try {
+      await api.patch(`/products/${product.id}`, { status: 'active' });
+      await loadProducts();
+    } catch (error) {
+      console.error('Error reactivating product:', error);
+      alert(error.response?.data?.error || 'Có lỗi xảy ra khi kích hoạt sản phẩm');
     }
   };
 
@@ -225,12 +238,21 @@ function Products() {
               >
                 Sửa
               </button>
-              <button
-                onClick={() => handleDelete(product.id)}
-                className="flex-1 text-red-600 hover:text-red-700 text-sm font-medium"
-              >
-                Xóa
-              </button>
+              {product.status === 'active' ? (
+                <button
+                  onClick={() => handleDelete(product.id)}
+                  className="flex-1 text-red-600 hover:text-red-700 text-sm font-medium"
+                >
+                  Xóa
+                </button>
+              ) : (
+                <button
+                  onClick={() => handleReactivate(product)}
+                  className="flex-1 text-green-600 hover:text-green-700 text-sm font-medium"
+                >
+                  Kích hoạt
+                </button>
+              )}
             </div>
           </div>
           ))}

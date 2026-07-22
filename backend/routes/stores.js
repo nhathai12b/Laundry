@@ -12,6 +12,24 @@ function sameChainAdmin(storeAdminId, userId) {
   return storeAdminId != null && Number(storeAdminId) === Number(userId);
 }
 
+/**
+ * Xác nhận tài khoản dùng chung (shared_account_id) đã thuộc chuỗi của admin
+ * này (là chủ một cửa hàng, hoặc đã là tài khoản chung của một cửa hàng khác,
+ * trong chuỗi). Không kiểm tra sẽ cho phép gán bất kỳ employer id nào (kể cả
+ * của chuỗi khác) làm tài khoản đăng nhập chung cho cửa hàng của mình.
+ */
+async function sharedAccountBelongsToAdminChain(sharedUserId, adminId) {
+  const row = await queryOne(
+    `SELECT 1
+     FROM users u
+     LEFT JOIN stores s_own ON u.store_id = s_own.id AND s_own.admin_id = ?
+     LEFT JOIN stores s_shared ON s_shared.shared_account_id = u.id AND s_shared.admin_id = ?
+     WHERE u.id = ? AND (s_own.id IS NOT NULL OR s_shared.id IS NOT NULL)`,
+    [adminId, adminId, sharedUserId]
+  );
+  return !!row;
+}
+
 // All routes require authentication
 router.use(authenticate);
 
@@ -214,6 +232,11 @@ router.post('/', authorize('admin'), async (req, res) => {
       if (sharedAccount.role !== 'employer') {
         return res.status(400).json({ error: 'Tài khoản chung phải là tài khoản employer' });
       }
+      // Prevent attaching another chain's employer as a shared login (would
+      // leak their identity/credentials access into this admin's store).
+      if (!(await sharedAccountBelongsToAdminChain(sharedId, req.user.id))) {
+        return res.status(403).json({ error: 'Tài khoản chung phải thuộc chuỗi cửa hàng của bạn' });
+      }
     }
 
     // Admin can only create stores for their chain
@@ -367,18 +390,14 @@ router.patch('/:id', authorize('admin'), async (req, res) => {
       return res.status(404).json({ error: 'Store not found' });
     }
 
-    // Admin can only update stores from their chain
-    if (req.user.role === 'admin') {
-      if (store.admin_id == null) {
-        await execute(
-          'UPDATE stores SET admin_id = ? WHERE id = ? AND admin_id IS NULL',
-          [req.user.id, req.params.id]
-        );
-        store = await queryOne('SELECT * FROM stores WHERE id = ?', [req.params.id]);
-      }
-      if (!sameChainAdmin(store.admin_id, req.user.id)) {
-        return res.status(403).json({ error: 'Bạn chỉ có thể sửa cửa hàng trong chuỗi của mình' });
-      }
+    // Admin can only update stores from their chain. Orphan stores
+    // (admin_id IS NULL, from legacy data) are intentionally NOT
+    // auto-claimed here: doing so let any admin who guesses/enumerates a
+    // store id take permanent ownership of it. Assigning admin_id for
+    // orphans should be done explicitly (e.g. via a migration script), not
+    // as a side effect of an unrelated PATCH.
+    if (req.user.role === 'admin' && !sameChainAdmin(store.admin_id, req.user.id)) {
+      return res.status(403).json({ error: 'Bạn chỉ có thể sửa cửa hàng trong chuỗi của mình' });
     }
 
     const updates = [];
@@ -413,6 +432,9 @@ router.patch('/:id', authorize('admin'), async (req, res) => {
         }
         if (sharedAccount.role !== 'employer') {
           return res.status(400).json({ error: 'Tài khoản chung phải là tài khoản employer' });
+        }
+        if (req.user.role === 'admin' && !(await sharedAccountBelongsToAdminChain(shared_account_id, req.user.id))) {
+          return res.status(403).json({ error: 'Tài khoản chung phải thuộc chuỗi cửa hàng của bạn' });
         }
       }
       updates.push('shared_account_id = ?');
@@ -456,17 +478,9 @@ async function handleStoreRemoval(req, res, permanent) {
       return res.status(404).json({ error: 'Store not found' });
     }
 
-    if (req.user.role === 'admin') {
-      if (store.admin_id == null) {
-        await execute(
-          'UPDATE stores SET admin_id = ? WHERE id = ? AND admin_id IS NULL',
-          [req.user.id, storeId]
-        );
-        store = await queryOne('SELECT * FROM stores WHERE id = ?', [storeId]);
-      }
-      if (!sameChainAdmin(store.admin_id, req.user.id)) {
-        return res.status(403).json({ error: 'Bạn chỉ có thể xóa cửa hàng trong chuỗi của mình' });
-      }
+    // See PATCH /:id for why orphan stores are not auto-claimed here.
+    if (req.user.role === 'admin' && !sameChainAdmin(store.admin_id, req.user.id)) {
+      return res.status(403).json({ error: 'Bạn chỉ có thể xóa cửa hàng trong chuỗi của mình' });
     }
 
     await transaction(async (db) => {
@@ -551,8 +565,7 @@ async function handleStoreRemoval(req, res, permanent) {
     if (error.code === 'ER_ROW_IS_REFERENCED_2' || error.errno === 1451) {
       return res.status(409).json({
         error:
-          'Không thể xóa cửa hàng vì database còn ràng buộc tới bảng khác. Hãy cập nhật schema FK (ON DELETE SET NULL/CASCADE) hoặc gỡ dữ liệu liên quan. Chi tiết: ' +
-          (error.sqlMessage || error.message),
+          'Không thể xóa cửa hàng vì database còn ràng buộc tới bảng khác. Hãy cập nhật schema FK (ON DELETE SET NULL/CASCADE) hoặc gỡ dữ liệu liên quan.',
       });
     }
     return res.status(500).json({ error: 'Lỗi máy chủ. Vui lòng thử lại.' });

@@ -185,7 +185,7 @@ router.post('/login', loginRateLimiter(), async (req, res) => {
           minutesRemaining
         });
       } else {
-        const remainingAttempts = 5 - currentAttempts;
+        const remainingAttempts = MAX_LOGIN_ATTEMPTS - currentAttempts;
         if (remainingAttempts > 0) {
           errorMessage = `Sai mật khẩu. Còn ${remainingAttempts} lần thử.`;
         } else {
@@ -432,22 +432,26 @@ router.get('/me', authenticate, async (req, res) => {
 });
 
 // Select store (for admin after login)
-router.post('/select-store', async (req, res) => {
+// Requires authentication: the caller must already hold a valid JWT for the
+// admin account. userId is taken from the token, never trusted from the body,
+// and the store must belong to that admin's chain.
+router.post('/select-store', authenticate, async (req, res) => {
   try {
-    const { userId, storeId } = req.body;
+    const { storeId } = req.body;
+    const userId = req.user.id;
 
-    if (!userId || !storeId) {
-      return res.status(400).json({ error: 'User ID and Store ID are required' });
+    if (!storeId) {
+      return res.status(400).json({ error: 'Store ID is required' });
     }
 
     const user = await queryOne('SELECT * FROM users WHERE id = ?', [userId]);
     if (!user || user.role !== 'admin') {
-      return res.status(400).json({ error: 'Invalid user or not an admin' });
+      return res.status(403).json({ error: 'Invalid user or not an admin' });
     }
 
     let store;
     try {
-      store = await queryOne('SELECT * FROM stores WHERE id = ? AND status = ?', [storeId, 'active']);
+      store = await queryOne('SELECT * FROM stores WHERE id = ? AND status = ? AND admin_id = ?', [storeId, 'active', user.id]);
     } catch (error) {
       // If stores table doesn't exist, allow using storeId as user.id (backward compatibility)
       const userStore = await queryOne('SELECT * FROM users WHERE id = ? AND role = ?', [storeId, 'employer']);
@@ -504,17 +508,16 @@ router.post('/select-store', async (req, res) => {
 });
 
 // Select employee (for employer after login)
-router.post('/select-employee', async (req, res) => {
+// Requires authentication: userId is taken from the caller's own JWT, never
+// trusted from the request body.
+router.post('/select-employee', authenticate, async (req, res) => {
   try {
-    const { userId, employeeId } = req.body;
-
-    if (!userId) {
-      return res.status(400).json({ error: 'User ID is required' });
-    }
+    const { employeeId } = req.body;
+    const userId = req.user.id;
 
     const user = await queryOne('SELECT * FROM users WHERE id = ?', [userId]);
     if (!user || user.role !== 'employer') {
-      return res.status(400).json({ error: 'Invalid user or not an employer' });
+      return res.status(403).json({ error: 'Invalid user or not an employer' });
     }
 
     // employees.store_id references users.id, so use user.id for employees query

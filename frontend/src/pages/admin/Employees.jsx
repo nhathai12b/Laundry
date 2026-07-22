@@ -61,9 +61,11 @@ function Employees() {
         return;
       }
       
-      // Prepare data - for employer, don't send store_id (backend will use user.id)
+      // Prepare data - for employer, don't send store_id (backend will use user.id).
+      // POST /employees reads `user_id` (PATCH accepts either `user_id` or
+      // `store_id`), so send both to work for create and update.
       const submitData = isAdmin() 
-        ? { name: formData.name.trim(), phone: formData.phone?.trim() || '', store_id: formData.store_id }
+        ? { name: formData.name.trim(), phone: formData.phone?.trim() || '', user_id: formData.store_id, store_id: formData.store_id }
         : { name: formData.name.trim(), phone: formData.phone?.trim() || '' };
       
       if (editingEmployee) {

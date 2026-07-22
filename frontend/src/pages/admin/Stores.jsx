@@ -320,6 +320,9 @@ function Stores() {
       status: store.status || 'active',
       account_phone: '',
       account_password: '',
+      // Preserve the existing shared account link; there is no UI control to
+      // change it here, so leaving it out would silently clear it on save.
+      shared_account_id: store.shared_account_id || '',
     });
     setShowModal(true);
   };
@@ -375,7 +378,7 @@ function Stores() {
     });
   };
 
-  if (loading) {
+  if (loading && activeTab === 'stores') {
     return <div className="text-center py-8">Đang tải...</div>;
   }
 

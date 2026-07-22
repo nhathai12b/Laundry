@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import api from '../utils/api';
 import { isAdmin } from '../utils/auth';
 import { format, getDaysInMonth } from 'date-fns';
@@ -16,17 +16,26 @@ function Customers() {
   const [selectedDate, setSelectedDate] = useState(format(new Date(), 'yyyy-MM-dd'));
   const [selectedMonth, setSelectedMonth] = useState(savedFilters.selectedMonth);
   const [selectedYear, setSelectedYear] = useState(savedFilters.selectedYear);
+  // Tracks the latest search input so typing fast doesn't trigger a request per
+  // keystroke, and guards against an older (slower) request response
+  // overwriting the results of a newer one that already resolved.
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+  const requestSeqRef = useRef(0);
 
   useEffect(() => {
     if (isAdmin()) {
       loadStores();
     }
-    loadCustomers();
   }, []);
 
   useEffect(() => {
+    const timer = setTimeout(() => setDebouncedSearch(search), 300);
+    return () => clearTimeout(timer);
+  }, [search]);
+
+  useEffect(() => {
     loadCustomers();
-  }, [search, viewMode, selectedDate, selectedMonth, selectedYear, selectedStoreId]);
+  }, [debouncedSearch, viewMode, selectedDate, selectedMonth, selectedYear, selectedStoreId]);
 
   // Save filters whenever they change
   useEffect(() => {
@@ -45,17 +54,19 @@ function Customers() {
   };
 
   const loadCustomers = async () => {
+    const seq = ++requestSeqRef.current;
     try {
       setLoading(true);
       const params = new URLSearchParams();
-      if (search) {
-        params.append('search', search);
+      if (debouncedSearch) {
+        params.append('search', debouncedSearch);
       }
       if (isAdmin() && selectedStoreId !== 'all') {
         params.append('store_id', selectedStoreId);
       }
       const queryString = params.toString();
       const response = await api.get(`/customers${queryString ? '?' + queryString : ''}`);
+      if (seq !== requestSeqRef.current) return; // a newer request has already started
       const allCustomersData = response.data.data || [];
       setAllCustomers(allCustomersData);
 
@@ -83,6 +94,7 @@ function Customers() {
         }
 
         const ordersResponse = await api.get(`/orders?${ordersParams.toString()}`);
+        if (seq !== requestSeqRef.current) return; // a newer request has already started
         const orders = ordersResponse.data.data || [];
         
         // Get unique customer IDs from orders
@@ -97,7 +109,7 @@ function Customers() {
     } catch (error) {
       console.error('Error loading customers:', error);
     } finally {
-      setLoading(false);
+      if (seq === requestSeqRef.current) setLoading(false);
     }
   };
 
@@ -237,6 +249,21 @@ function Customers() {
                   <option key={i + 1} value={i + 1}>Tháng {i + 1}</option>
                 ))}
               </select>
+              <select
+                value={selectedYear}
+                onChange={(e) => setSelectedYear(parseInt(e.target.value))}
+                className="px-2 py-1.5 border rounded text-xs"
+              >
+                {Array.from({ length: 5 }, (_, i) => {
+                  const year = new Date().getFullYear() - 2 + i;
+                  return <option key={year} value={year}>{year}</option>;
+                })}
+              </select>
+            </div>
+          )}
+
+          {viewMode === 'year' && (
+            <div className="flex items-center gap-2">
               <select
                 value={selectedYear}
                 onChange={(e) => setSelectedYear(parseInt(e.target.value))}

@@ -31,9 +31,11 @@ function Promotions() {
     if (isAdmin()) {
       loadStores();
     }
-    loadPromotions();
   }, []);
 
+  // Runs on mount too (deps go from undefined to their initial value), so this
+  // alone is enough to load promotions - calling loadPromotions() again in the
+  // mount-only effect above caused a duplicate request/race on first render.
   useEffect(() => {
     loadPromotions();
   }, [filterType, selectedStoreId]);
@@ -226,7 +228,19 @@ function Promotions() {
     const now = new Date();
     const start = new Date(promotion.start_date);
     const end = new Date(promotion.end_date);
+    // end_date is a date-only value parsed as UTC midnight; without this the
+    // promotion would appear expired hours before the end date actually ends
+    // for users in Vietnam (UTC+7).
+    end.setHours(23, 59, 59, 999);
     return now >= start && now <= end;
+  };
+
+  const promotionStatusLabel = (promotion) => {
+    if (isActive(promotion)) return 'Đang áp dụng';
+    if (promotion.status !== 'active') return 'Ngừng';
+    const now = new Date();
+    const start = new Date(promotion.start_date);
+    return now < start ? 'Chưa bắt đầu' : 'Đã hết hạn';
   };
 
   if (loading) {
@@ -370,7 +384,7 @@ function Promotions() {
                             ? 'bg-yellow-100 text-yellow-800'
                             : 'bg-gray-100 text-gray-800'
                         }`}>
-                          {isActive(promotion) ? 'Đang áp dụng' : promotion.status === 'active' ? 'Chưa bắt đầu' : 'Ngừng'}
+                          {promotionStatusLabel(promotion)}
                         </span>
                       </div>
                     </td>

@@ -5,11 +5,20 @@ export const setAuth = (token, user) => {
 
 export const getAuth = () => {
   const token = localStorage.getItem('token');
-  const user = localStorage.getItem('user');
-  return {
-    token,
-    user: user ? JSON.parse(user) : null,
-  };
+  const rawUser = localStorage.getItem('user');
+  let user = null;
+  if (rawUser) {
+    try {
+      user = JSON.parse(rawUser);
+    } catch {
+      // Corrupted value (manual edit, partial write, etc.) - clear it instead
+      // of throwing and breaking every screen that calls getAuth().
+      localStorage.removeItem('token');
+      localStorage.removeItem('user');
+      return { token: null, user: null };
+    }
+  }
+  return { token, user };
 };
 
 export const clearAuth = () => {

@@ -9,6 +9,44 @@ const router = express.Router();
 // All routes require authentication
 router.use(authenticate);
 
+/**
+ * Kiểm tra user hiện tại có quyền truy cập khách hàng này không (dựa trên đơn
+ * hàng thuộc chuỗi/cửa hàng của họ). Dùng chung cho GET/PATCH để tránh IDOR -
+ * PATCH trước đây không kiểm tra gì, cho phép sửa khách hàng của chuỗi khác.
+ */
+async function canAccessCustomer(req, customerId) {
+  if (req.user.role === 'root') {
+    return false;
+  }
+  if (req.user.role === 'admin') {
+    const hasOrderInChain = await queryOne(`
+      SELECT 1 FROM orders o
+      WHERE o.customer_id = ?
+        AND (
+          (o.store_id IN (SELECT id FROM stores WHERE admin_id = ?))
+          OR (o.store_id IS NULL AND (
+            o.assigned_to IN (SELECT id FROM users WHERE store_id IN (SELECT id FROM stores WHERE admin_id = ?))
+            OR o.created_by IN (SELECT id FROM users WHERE store_id IN (SELECT id FROM stores WHERE admin_id = ?))
+          ))
+        )
+    `, [customerId, req.user.id, req.user.id, req.user.id]);
+    return !!hasOrderInChain;
+  }
+  if (req.user.role === 'employer') {
+    const hasAccess = req.user.store_id
+      ? await queryOne(
+          `SELECT 1 FROM orders o WHERE o.customer_id = ? AND o.store_id = ? LIMIT 1`,
+          [customerId, req.user.store_id]
+        )
+      : await queryOne(
+          `SELECT 1 FROM orders o WHERE o.customer_id = ? AND (o.assigned_to = ? OR o.created_by = ?) LIMIT 1`,
+          [customerId, req.user.id, req.user.id]
+        );
+    return !!hasAccess;
+  }
+  return false;
+}
+
 // Get all customers
 router.get('/', async (req, res) => {
   try {
@@ -220,6 +258,12 @@ router.get('/:id/orders', async (req, res) => {
     if (req.user.role === 'employer' && req.user.store_id) {
       querySql += ' AND (o.store_id = ? OR (o.store_id IS NULL AND (o.assigned_to = ? OR o.created_by = ?)))';
       params.push(req.user.store_id, req.user.id, req.user.id);
+    } else if (req.user.role === 'employer') {
+      // No store_id resolved for this employer - fall back to their own
+      // orders instead of leaving the query unscoped (would leak every
+      // store's orders for this customer).
+      querySql += ' AND (o.assigned_to = ? OR o.created_by = ?)';
+      params.push(req.user.id, req.user.id);
     } else if (req.user.role === 'admin' && req.user.role !== 'root') {
       querySql += ` AND (
         (o.store_id IS NOT NULL AND o.store_id IN (SELECT id FROM stores WHERE admin_id = ?))
@@ -316,6 +360,13 @@ router.patch('/:id', async (req, res) => {
 
     const customer = await queryOne('SELECT id, phone FROM customers WHERE id = ?', [req.params.id]);
     if (!customer) {
+      return res.status(404).json({ error: 'Customer not found' });
+    }
+
+    // Without this check, anyone could edit/overwrite any other store's
+    // customer by guessing an id (IDOR) - GET already enforced this, PATCH did not.
+    const hasAccess = await canAccessCustomer(req, customer.id);
+    if (!hasAccess) {
       return res.status(404).json({ error: 'Customer not found' });
     }
 

@@ -3,16 +3,7 @@ import api from '../utils/api';
 import { isAdmin, getEmployeeId, getAuth } from '../utils/auth';
 import { format, getDaysInMonth } from 'date-fns';
 import { getSavedFilters, saveFilters } from '../utils/filterStorage';
-
-/** So sánh "hôm nay" với check_in lưu dạng YYYY-MM-DD HH:mm:ss (GMT+7) — tránh lệch ngày do parse Date. */
-function calendarDayFromDbDateTime(value) {
-  if (value == null || value === '') return '';
-  const s = String(value);
-  const m = s.match(/^(\d{4}-\d{2}-\d{2})/);
-  if (m) return m[1];
-  const d = new Date(s);
-  return Number.isNaN(d.getTime()) ? '' : format(d, 'yyyy-MM-dd');
-}
+import { calendarDayVN as calendarDayFromDbDateTime } from '../utils/dateVN';
 
 function Timesheets() {
   const savedFilters = getSavedFilters();
@@ -123,7 +114,7 @@ function Timesheets() {
       // Filter by date if day mode
       if (isAdmin() && periodViewMode === 'day') {
         allTimesheets = allTimesheets.filter(ts => {
-          const tsDate = format(new Date(ts.check_in), 'yyyy-MM-dd');
+          const tsDate = calendarDayFromDbDateTime(ts.check_in);
           return tsDate === selectedDate;
         });
       }

@@ -33,6 +33,7 @@ function EmployerHome() {
   const [orderToComplete, setOrderToComplete] = useState(null);
   const [shouldPrint, setShouldPrint] = useState(false);
   const [printing, setPrinting] = useState(false);
+  const [completing, setCompleting] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState('cash');
   const [applicablePromotions, setApplicablePromotions] = useState([]);
   const [customerSuggestions, setCustomerSuggestions] = useState([]);
@@ -64,7 +65,7 @@ function EmployerHome() {
       const todayOrdersRes = await api.get(`/orders?date=${today}`);
       const todayOrders = todayOrdersRes.data.data || [];
       const completedToday = todayOrders.filter(o => o.status === 'completed');
-      const activeToday = todayOrders.filter(o => o.status === 'created');
+      const activeToday = todayOrders.filter(o => o.status !== 'completed' && o.status !== 'cancelled');
 
       setStats({
         todayRevenue: todayRevenueData?.total_revenue || 0,
@@ -112,7 +113,8 @@ function EmployerHome() {
   };
 
   const handleCompleteOrder = async () => {
-    if (!orderToComplete) return;
+    if (!orderToComplete || completing) return;
+    setCompleting(true);
 
     try {
       await api.post(`/orders/${orderToComplete.id}/status`, { 
@@ -145,6 +147,8 @@ function EmployerHome() {
     } catch (error) {
       alert(error.response?.data?.error || 'Cập nhật thất bại');
       setPrinting(false);
+    } finally {
+      setCompleting(false);
     }
   };
 
@@ -162,8 +166,7 @@ function EmployerHome() {
   };
 
   const handleItemChange = (index, field, value) => {
-    const newItems = [...formData.items];
-    newItems[index][field] = value;
+    const newItems = formData.items.map((item, i) => (i === index ? { ...item, [field]: value } : item));
     setFormData({ ...formData, items: newItems });
     
     // Calculate total and load applicable promotions when items change
@@ -474,7 +477,7 @@ function EmployerHome() {
                   </div>
                   <div className="text-right">
                     <div className="text-lg font-bold text-gray-800 mb-2">
-                      {new Intl.NumberFormat('vi-VN').format(parseFloat(order.total_amount) || 0)} đ
+                      {new Intl.NumberFormat('vi-VN').format(parseFloat(order.final_amount ?? order.total_amount) || 0)} đ
                     </div>
                     {order.items && (
                       <div className="text-sm text-gray-600">
@@ -854,10 +857,10 @@ function EmployerHome() {
               <div className="flex flex-col sm:flex-row gap-3 pt-4">
                 <button
                   onClick={handleCompleteOrder}
-                  disabled={printing}
+                  disabled={printing || completing}
                   className="flex-1 bg-green-600 text-white py-3 rounded-lg hover:bg-green-700 font-medium text-base disabled:opacity-50"
                 >
-                  {printing ? 'Đang in...' : 'Xác nhận'}
+                  {completing ? 'Đang xử lý...' : printing ? 'Đang in...' : 'Xác nhận'}
                 </button>
                 <button
                   onClick={() => {

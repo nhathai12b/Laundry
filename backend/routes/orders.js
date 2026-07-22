@@ -335,24 +335,24 @@ router.post('/', auditLog('create', 'order'), async (req, res) => {
       for (const item of items) {
         // Validate product_id
         if (!item.product_id) {
-          throw new Error('Product ID is required for all items');
+          throw httpError(400, 'Product ID is required for all items');
         }
 
         // Validate quantity
         const quantity = parseFloat(item.quantity);
         if (isNaN(quantity) || !isFinite(quantity) || quantity <= 0) {
-          throw new Error(`Số lượng phải là số dương hợp lệ (item product_id: ${item.product_id})`);
+          throw httpError(400, `Số lượng phải là số dương hợp lệ (item product_id: ${item.product_id})`);
         }
 
         // Get product and validate it exists and is active
         const product = await db.queryOne('SELECT * FROM products WHERE id = ? AND status = ?', [item.product_id, 'active']);
         if (!product) {
-          throw new Error(`Sản phẩm ${item.product_id} không tồn tại hoặc đã bị vô hiệu hóa`);
+          throw httpError(400, `Sản phẩm ${item.product_id} không tồn tại hoặc đã bị vô hiệu hóa`);
         }
 
         const itemTotal = product.price * quantity;
         if (!isFinite(itemTotal) || itemTotal < 0) {
-          throw new Error(`Tính toán giá trị đơn hàng không hợp lệ cho sản phẩm ${product.name}`);
+          throw httpError(400, `Tính toán giá trị đơn hàng không hợp lệ cho sản phẩm ${product.name}`);
         }
 
         total += itemTotal;
@@ -451,7 +451,8 @@ router.post('/', auditLog('create', 'order'), async (req, res) => {
             finalAssignedTo = employerUser.id;
           }
         }
-      } else if (!finalAssignedTo && req.user.role === 'employer') {
+      } else if (req.user.role === 'employer') {
+        // Employers cannot assign orders to another account; always use their own id.
         finalAssignedTo = req.user.id;
       }
 
@@ -561,8 +562,7 @@ router.post('/', auditLog('create', 'order'), async (req, res) => {
     res.status(201).json({ data: { ...newOrder, items: orderItemsWithProduct } });
   } catch (error) {
     console.error('Create order error:', error);
-    const errorMessage = error.message || 'Server error';
-    res.status(error.status || 500).json({ error: errorMessage });
+    res.status(error.status || 500).json({ error: error.status ? error.message : 'Server error' });
   }
 });
 
@@ -641,7 +641,12 @@ router.patch('/:id', auditLog('update', 'order'), async (req, res) => {
       }
 
       if (assigned_to !== undefined) {
-        if (assigned_to && req.user.role === 'admin' && req.user.role !== 'root') {
+        if (req.user.role === 'employer') {
+          // Employers cannot reassign orders to another account.
+          if (assigned_to && Number(assigned_to) !== req.user.id) {
+            throw httpError(403, 'Bạn không thể gán đơn hàng cho tài khoản khác');
+          }
+        } else if (assigned_to && req.user.role === 'admin' && req.user.role !== 'root') {
           const assignedUser = await db.queryOne(`
             SELECT u.id
             FROM users u
@@ -684,6 +689,10 @@ router.patch('/:id', auditLog('update', 'order'), async (req, res) => {
 
       // Update items if provided
       if (items && Array.isArray(items)) {
+        if (items.length === 0) {
+          throw httpError(400, 'Đơn hàng phải có ít nhất một sản phẩm');
+        }
+
         // Delete old items
         await db.execute('DELETE FROM order_items WHERE order_id = ?', [req.params.id]);
 
@@ -692,24 +701,24 @@ router.patch('/:id', auditLog('update', 'order'), async (req, res) => {
         for (const item of items) {
           // Validate product_id
           if (!item.product_id) {
-            throw new Error('Product ID is required for all items');
+            throw httpError(400, 'Product ID is required for all items');
           }
 
           // Validate quantity
           const quantity = parseFloat(item.quantity);
           if (isNaN(quantity) || !isFinite(quantity) || quantity <= 0) {
-            throw new Error(`Số lượng phải là số dương hợp lệ (item product_id: ${item.product_id})`);
+            throw httpError(400, `Số lượng phải là số dương hợp lệ (item product_id: ${item.product_id})`);
           }
 
           // Get product and validate it exists and is active
           const product = await db.queryOne('SELECT * FROM products WHERE id = ? AND status = ?', [item.product_id, 'active']);
           if (!product) {
-            throw new Error(`Sản phẩm ${item.product_id} không tồn tại hoặc đã bị vô hiệu hóa`);
+            throw httpError(400, `Sản phẩm ${item.product_id} không tồn tại hoặc đã bị vô hiệu hóa`);
           }
 
           const itemTotal = product.price * quantity;
           if (!isFinite(itemTotal) || itemTotal < 0) {
-            throw new Error(`Tính toán giá trị đơn hàng không hợp lệ cho sản phẩm ${product.name}`);
+            throw httpError(400, `Tính toán giá trị đơn hàng không hợp lệ cho sản phẩm ${product.name}`);
           }
 
           total += itemTotal;

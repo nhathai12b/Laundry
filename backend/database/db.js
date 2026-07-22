@@ -22,7 +22,11 @@ const pool = mysql.createPool({
   connectionLimit: 10,
   queueLimit: 0,
   charset: 'utf8mb4',
-  multipleStatements: true
+  // Disabled: the app pool only ever runs single, parameterized statements.
+  // Allowing multiple statements would let a SQL-injection payload chain
+  // additional commands (e.g. "; DROP TABLE ..."). Schema init uses its own
+  // connection/statement splitting below and does not need this flag.
+  multipleStatements: false
 });
 
 // Initialize database - create database if not exists and execute schema
@@ -37,8 +41,11 @@ async function initializeDatabase() {
     });
 
     const dbName = process.env.MYSQL_DATABASE || 'laundry66';
-    await tempConnection.query(`CREATE DATABASE IF NOT EXISTS \`${dbName}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
-    await tempConnection.end();
+    try {
+      await tempConnection.query(`CREATE DATABASE IF NOT EXISTS \`${dbName}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
+    } finally {
+      await tempConnection.end();
+    }
 
     // Read and execute schema
     const schema = readFileSync(schemaPath, 'utf-8');
@@ -198,9 +205,9 @@ export const execute = async (sql, params = []) => {
 // Helper function for transactions
 export const transaction = async (callback) => {
   const connection = await pool.getConnection();
-  await connection.beginTransaction();
-  
+
   try {
+    await connection.beginTransaction();
     const result = await callback({
       query: async (sql, params) => {
         const [rows] = await connection.query(sql, params);
@@ -219,7 +226,9 @@ export const transaction = async (callback) => {
     await connection.commit();
     return result;
   } catch (error) {
-    await connection.rollback();
+    // rollback() itself throws if beginTransaction() never succeeded;
+    // swallow that so the original error isn't masked.
+    await connection.rollback().catch(() => {});
     throw error;
   } finally {
     connection.release();

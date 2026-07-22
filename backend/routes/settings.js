@@ -21,7 +21,7 @@ async function resolveAdminStoreId(adminId, preferredStoreId) {
 }
 
 // Get settings (Admin or Employer)
-router.get('/', async (req, res) => {
+router.get('/', authorize('admin', 'employer', 'root'), async (req, res) => {
   try {
     let storeId = null;
     
@@ -80,7 +80,7 @@ router.get('/', async (req, res) => {
 });
 
 // Update settings (Admin or Employer)
-router.put('/', async (req, res) => {
+router.put('/', authorize('admin', 'employer', 'root'), async (req, res) => {
   try {
     const { printer_ip, printer_port, paper_size, print_method, bill_store_name, bill_store_address, bill_store_phone, bill_footer_message, bill_qr_image, bill_qr_content, bill_bottom_padding_mm, store_id } = req.body;
     

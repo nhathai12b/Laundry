@@ -461,6 +461,10 @@ router.patch('/:id', authorize('admin'), auditLog('update', 'user'), async (req,
       values.push(subscription_expires_at || null);
     }
 
+    if (updates.length === 0) {
+      return res.status(400).json({ error: 'Không có trường nào để cập nhật' });
+    }
+
     // MySQL handles updated_at automatically with ON UPDATE CURRENT_TIMESTAMP
     values.push(req.params.id);
 

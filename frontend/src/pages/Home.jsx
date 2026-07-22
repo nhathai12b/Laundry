@@ -5,15 +5,7 @@ import { getAuth, isAdmin, isEmployer, getEmployeeId } from '../utils/auth';
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDaysInMonth } from 'date-fns';
 import { printBill } from '../utils/printBill';
 import { bestApplicablePromotionId, promotionDiscountAmount } from '../utils/promotions';
-
-function calendarDayFromDbDateTime(value) {
-  if (value == null || value === '') return '';
-  const s = String(value);
-  const m = s.match(/^(\d{4}-\d{2}-\d{2})/);
-  if (m) return m[1];
-  const d = new Date(s);
-  return Number.isNaN(d.getTime()) ? '' : format(d, 'yyyy-MM-dd');
-}
+import { calendarDayVN as calendarDayFromDbDateTime } from '../utils/dateVN';
 
 function Home() {
   const [orders, setOrders] = useState([]);
@@ -144,7 +136,7 @@ function Home() {
       const filteredOrders = allOrders.filter(order => {
         if (!order.created_at) return false;
         try {
-          const orderDate = format(new Date(order.created_at), 'yyyy-MM-dd');
+          const orderDate = calendarDayFromDbDateTime(order.created_at);
           return orderDate === selectedDate;
         } catch (e) {
           return false;
@@ -415,8 +407,7 @@ function Home() {
   };
 
   const handleItemChange = (index, field, value) => {
-    const newItems = [...formData.items];
-    newItems[index][field] = value;
+    const newItems = formData.items.map((item, i) => (i === index ? { ...item, [field]: value } : item));
     setFormData({ ...formData, items: newItems });
     
     // Calculate total and load applicable promotions when items change
@@ -619,7 +610,7 @@ function Home() {
         const response = await api.get(`/orders?${params.toString()}`);
         const allOrders = response.data.data || [];
         const filteredOrders = allOrders.filter(order => {
-          const orderDate = format(new Date(order.created_at), 'yyyy-MM-dd');
+          const orderDate = calendarDayFromDbDateTime(order.created_at);
           return orderDate === today;
         });
         setOrders(filteredOrders);

@@ -67,7 +67,7 @@ router.get('/', authorize('admin'), async (req, res) => {
     console.error('Get promotions error:', error);
     const errorMessage = error.code === 'ER_NO_SUCH_TABLE' 
       ? 'Bảng promotions chưa được tạo. Vui lòng kiểm tra cơ sở dữ liệu.'
-      : error.message || 'Lỗi máy chủ';
+      : 'Lỗi máy chủ';
     res.status(500).json({ error: errorMessage });
   }
 });
@@ -210,6 +210,9 @@ router.post('/', authorize('admin'), auditLog('create', 'promotion'), async (req
 
     const descriptionSanitized = sanitizeString(description);
     const statusValidation = status ? validateEnum(status, ['active', 'inactive'], 'Trạng thái') : { valid: true, value: 'active' };
+    if (!statusValidation.valid) {
+      return res.status(400).json({ error: statusValidation.error });
+    }
 
     const result = await execute(`
       INSERT INTO promotions (
@@ -315,24 +318,24 @@ router.patch('/:id', authorize('admin'), auditLog('update', 'promotion'), async 
     // Không còn hỗ trợ min_order_count
     
     if (min_bill_amount !== undefined) {
-      if (min_bill_amount === null || min_bill_amount === '') {
-        updates.push('min_bill_amount = ?');
-        values.push(null);
-      } else {
-        const validation = validatePositiveNumber(min_bill_amount, false);
-        if (!validation.valid) {
-          return res.status(400).json({ error: `Giá trị đơn hàng tối thiểu: ${validation.error}` });
-        }
-        updates.push('min_bill_amount = ?');
-        values.push(validation.value);
+      // min_bill_amount is required (validated as such on create); allowing
+      // it to be cleared here breaks the `min_bill_amount <= ?` comparison
+      // used when matching applicable promotions.
+      const validation = validatePositiveNumber(min_bill_amount, false);
+      if (!validation.valid) {
+        return res.status(400).json({ error: `Giá trị đơn hàng tối thiểu: ${validation.error}` });
       }
+      updates.push('min_bill_amount = ?');
+      values.push(validation.value);
     }
     
+    let effectiveDiscountType = promotion.discount_type;
     if (discount_type !== undefined) {
       const validation = validateEnum(discount_type, ['percentage', 'fixed'], 'Loại giảm giá');
       if (!validation.valid) {
         return res.status(400).json({ error: validation.error });
       }
+      effectiveDiscountType = validation.value;
       updates.push('discount_type = ?');
       values.push(validation.value);
     }
@@ -343,8 +346,11 @@ router.patch('/:id', authorize('admin'), auditLog('update', 'promotion'), async 
         return res.status(400).json({ error: `Giá trị khuyến mãi: ${validation.error}` });
       }
       
-      // Validate percentage discount (must be <= 100)
-      if (promotion.discount_type === 'percentage' && validation.value > 100) {
+      // Validate percentage discount (must be <= 100). Use the *effective*
+      // type (new value if discount_type is also being changed in this same
+      // request) so switching to percentage + >100 in one PATCH can't bypass
+      // the cap.
+      if (effectiveDiscountType === 'percentage' && validation.value > 100) {
         return res.status(400).json({ error: 'Phần trăm giảm giá không được vượt quá 100%' });
       }
       
@@ -500,8 +506,15 @@ router.post('/applicable', async (req, res) => {
       }
     }
     // If no customer info provided, orderCount remains 0
-    // Use DATE format for comparison (YYYY-MM-DD) since start_date and end_date are DATE columns
-    const now = new Date().toISOString().slice(0, 10); // YYYY-MM-DD format
+    // Use DATE format for comparison (YYYY-MM-DD) since start_date and end_date are DATE columns.
+    // Compute "today" in Vietnam local time (GMT+7), not UTC - using UTC here
+    // made promotions start/end up to 7 hours early/late for users in Vietnam.
+    const now = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Ho_Chi_Minh',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(new Date());
 
     // Build query with store filter if provided
     let querySql = `
@@ -530,9 +543,11 @@ router.post('/applicable', async (req, res) => {
         }
         effectiveStoreId = parseInt(store_id);
       } else {
-        // Admin without explicit store filter: only show promotions from their stores or global
-        querySql += ' AND (s.admin_id = ? OR p.store_id IS NULL)';
-        params.push(req.user.id);
+        // Admin without explicit store filter: only show promotions from their
+        // own stores, or their own store-less ("global") promotions - not
+        // every admin's NULL-store promotions.
+        querySql += ' AND ((p.store_id IS NOT NULL AND s.admin_id = ?) OR (p.store_id IS NULL AND p.created_by = ?))';
+        params.push(req.user.id, req.user.id);
       }
     } else if (store_id) {
       // Fallback (should be rare): allow explicit store filter for non-admin/employer roles

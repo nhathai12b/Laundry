@@ -21,6 +21,17 @@ import { getMemoryUsageFormatted } from './utils/memoryMonitor.js';
 
 dotenv.config();
 
+// Warn loudly (without aborting an already-working deployment) on missing/
+// weak critical configuration, since these silently break auth or CORS.
+if (!process.env.JWT_SECRET) {
+  console.error('❌ JWT_SECRET is not set. All login/token verification will fail.');
+} else if (process.env.JWT_SECRET.length < 32) {
+  console.warn('⚠️  JWT_SECRET is shorter than 32 characters. Use a longer, random secret in production.');
+}
+if (process.env.NODE_ENV === 'production' && !process.env.FRONTEND_URL) {
+  console.warn('⚠️  FRONTEND_URL is not set in production; CORS will fall back to http://localhost:3000.');
+}
+
 const app = express();
 const PORT = process.env.PORT || 5000;
 
@@ -103,7 +114,10 @@ app.get('/api/health', (req, res) => {
 // Error handling middleware
 app.use((err, req, res, next) => {
   console.error('Error:', err);
-  res.status(500).json({ error: 'Internal server error' });
+  if (res.headersSent) {
+    return next(err);
+  }
+  res.status(err.status || 500).json({ error: 'Internal server error' });
 });
 
 // Start server

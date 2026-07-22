@@ -24,7 +24,13 @@ function getStoreIdFilter(req) {
 }
 
 // Admin chỉ được dùng store_id thuộc chuỗi của mình. Nếu không thuộc thì coi như null (sẽ dùng adminStoresOnlyFilter).
+// Employer luôn bị ép về store_id của chính họ - query param store_id KHÔNG được tin dùng,
+// nếu không một employer có thể truyền ?store_id=<cửa hàng khác> để đọc báo cáo/doanh thu của cửa hàng đó (IDOR).
 async function resolveStoreIdForAdmin(req) {
+  if (req.user.role === 'employer') {
+    return req.user.store_id || null;
+  }
+
   let storeId = getStoreIdFilter(req);
   if (req.user.role === 'admin' && storeId) {
     const row = await queryOne('SELECT 1 FROM stores WHERE id = ? AND admin_id = ?', [storeId, req.user.id]);
@@ -609,14 +615,12 @@ router.get('/export', authorize('admin', 'employer'), async (req, res) => {
     const monthNum = parseInt(month) || new Date().getMonth() + 1;
     const yearNum = parseInt(year) || new Date().getFullYear();
     let storeId = await resolveStoreIdForAdmin(req);
-    if (!storeId && store_id && store_id !== 'all') {
+    // Employers are always locked to their own store_id (see resolveStoreIdForAdmin);
+    // only re-check the query param for admins, and only against their own chain.
+    if (!storeId && store_id && store_id !== 'all' && req.user.role === 'admin') {
       const sid = parseInt(store_id);
-      if (req.user.role === 'admin') {
-        const row = await queryOne('SELECT 1 FROM stores WHERE id = ? AND admin_id = ?', [sid, req.user.id]);
-        if (row) storeId = sid;
-      } else {
-        storeId = sid;
-      }
+      const row = await queryOne('SELECT 1 FROM stores WHERE id = ? AND admin_id = ?', [sid, req.user.id]);
+      if (row) storeId = sid;
     }
 
     let data = [];
@@ -1160,7 +1164,7 @@ router.get('/revenue-by-product-daily', authorize('admin', 'employer'), async (r
     });
   } catch (error) {
 
-    res.status(500).json({ error: error.message || 'Server error' });
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
@@ -1284,7 +1288,7 @@ router.get('/revenue-by-category-daily', authorize('admin', 'employer'), async (
   } catch (error) {
     console.error('Get revenue by category daily error:', error);
     console.error('User role:', req.user?.role, 'Store ID:', req.user?.store_id);
-    res.status(500).json({ error: error.message || 'Server error' });
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
@@ -1351,6 +1355,12 @@ router.get('/revenue-by-employee-daily', authorize('admin', 'employer'), async (
         )
       )`;
       params.push(storeId, storeId, storeId);
+    } else if (req.user.role === 'admin') {
+      // No specific store selected - unlike the branch above, this was missing
+      // entirely, so an admin viewing "all stores" saw every admin's data.
+      const filter = adminStoresOnlyFilter('o');
+      querySql += filter.sql;
+      params.push(...filter.params(req.user.id));
     }
 
     querySql += ' GROUP BY DATE(o.updated_at), u.id, u.name ORDER BY date DESC, total_revenue DESC';
@@ -1474,8 +1484,11 @@ router.get('/revenue-by-payment-daily', authorize('admin'), async (req, res) => 
 
     querySql += ' GROUP BY DATE(o.updated_at), o.payment_method ORDER BY date DESC, payment_method';
     
+    // Rows are per (date, payment_method) pair - counting distinct dates only
+    // undercounts and produces a wrong totalPages whenever a day has both
+    // cash and transfer orders.
     const countSql = querySql
-      .replace(/SELECT[\s\S]*?FROM/, 'SELECT COUNT(DISTINCT DATE(o.updated_at)) as total FROM')
+      .replace(/SELECT[\s\S]*?FROM/, "SELECT COUNT(DISTINCT CONCAT(DATE(o.updated_at), '-', o.payment_method)) as total FROM")
       .replace(/\s*ORDER BY[\s\S]*$/, '')
       .replace(/\s*GROUP BY[\s\S]*$/i, '');
     const countResult = await queryOne(countSql, params);
@@ -1585,7 +1598,7 @@ router.get('/revenue-by-shift-daily', authorize('admin', 'employer'), async (req
   } catch (error) {
     console.error('Get revenue by shift daily error:', error);
     console.error('User role:', req.user?.role, 'Store ID:', req.user?.store_id);
-    res.status(500).json({ error: error.message || 'Server error' });
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
@@ -1815,7 +1828,7 @@ router.get('/revenue-daily', authorize('admin', 'employer'), async (req, res) =>
       days_in_month: lastDay,
     });
   } catch (error) {
-    res.status(500).json({ error: error.message || 'Server error' });
+    res.status(500).json({ error: 'Server error' });
   }
 });
 

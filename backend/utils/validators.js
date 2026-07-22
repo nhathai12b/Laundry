@@ -26,8 +26,14 @@ export const validatePositiveNumber = (value, allowZero = false) => {
   if (value === null || value === undefined || value === '') {
     return { valid: false, value: null, error: 'Giá trị không được để trống' };
   }
-  
-  const num = parseFloat(value);
+
+  // parseFloat/Number would silently accept trailing garbage like "10abc" as
+  // 10; reject anything that isn't a plain (optionally signed/decimal) number.
+  if (typeof value === 'string' && !/^-?\d+(\.\d+)?$/.test(value.trim())) {
+    return { valid: false, value: null, error: 'Giá trị phải là số hợp lệ' };
+  }
+
+  const num = typeof value === 'string' ? Number(value.trim()) : Number(value);
   
   if (isNaN(num) || !isFinite(num)) {
     return { valid: false, value: null, error: 'Giá trị phải là số hợp lệ' };
@@ -70,10 +76,17 @@ export const validateId = (id) => {
   if (id === null || id === undefined || id === '') {
     return { valid: false, value: null, error: 'ID không được để trống' };
   }
-  
-  const num = parseInt(id);
-  
-  if (isNaN(num) || num <= 0) {
+
+  // parseInt would silently accept trailing garbage like "12abc" as 12;
+  // require the whole (trimmed) value to be a plain positive integer.
+  const trimmed = String(id).trim();
+  if (!/^\d+$/.test(trimmed)) {
+    return { valid: false, value: null, error: 'ID không hợp lệ' };
+  }
+
+  const num = Number(trimmed);
+
+  if (!Number.isInteger(num) || num <= 0) {
     return { valid: false, value: null, error: 'ID không hợp lệ' };
   }
   
@@ -97,7 +110,7 @@ export const sanitizeString = (value, maxLength = null) => {
   
   const trimmed = value.trim();
   
-  if (maxLength && trimmed.length > maxLength) {
+  if (maxLength != null && trimmed.length > maxLength) {
     return { valid: false, value: trimmed, error: `Độ dài không được vượt quá ${maxLength} ký tự` };
   }
   

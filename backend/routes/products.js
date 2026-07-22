@@ -140,6 +140,13 @@ router.post('/', authorize('admin'), auditLog('create', 'product'), async (req, 
       return res.status(400).json({ error: `Giá sản phẩm: ${priceValidation.error}` });
     }
 
+    // Validate status (PATCH already does this - create skipped it, allowing
+    // any arbitrary string to be stored).
+    const statusValidation = validateEnum(status || 'active', ['active', 'inactive'], 'Trạng thái');
+    if (!statusValidation.valid) {
+      return res.status(400).json({ error: statusValidation.error });
+    }
+
     // Determine store_id: use provided store_id or default to user's store_id
     let finalStoreId = store_id || currentUser.store_id || null;
 
@@ -175,7 +182,7 @@ router.post('/', authorize('admin'), auditLog('create', 'product'), async (req, 
       nameValidation.value,
       unitValidation.value,
       priceValidation.value,
-      status || 'active',
+      statusValidation.value,
       currentUser.id,
       currentUser.id,
       finalStoreId,
@@ -322,7 +329,7 @@ router.delete('/:id', authorize('admin'), auditLog('delete', 'product'), async (
     });
   } catch (error) {
     console.error('Delete product error:', error);
-    res.status(500).json({ error: error.message || 'Server error' });
+    res.status(500).json({ error: 'Server error' });
   }
 });
 

@@ -5,6 +5,7 @@ import { format, getDaysInMonth } from 'date-fns';
 import { getSavedFilters, saveFilters } from '../utils/filterStorage';
 import { printBill } from '../utils/printBill';
 import { bestApplicablePromotionId } from '../utils/promotions';
+import { calendarDayVN } from '../utils/dateVN';
 
 function Orders() {
   const [orders, setOrders] = useState([]);
@@ -41,6 +42,7 @@ function Orders() {
   const [orderToComplete, setOrderToComplete] = useState(null);
   const [shouldPrint, setShouldPrint] = useState(false);
   const [printing, setPrinting] = useState(false);
+  const [completing, setCompleting] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState('cash');
 
   // Load products and stores only once on mount
@@ -122,7 +124,7 @@ function Orders() {
       // Filter by date if day mode (additional client-side filter for safety)
       if (isAdmin() && viewMode === 'day') {
         allOrders = allOrders.filter(order => {
-          const orderDate = format(new Date(order.created_at), 'yyyy-MM-dd');
+          const orderDate = calendarDayVN(order.created_at);
           return orderDate === selectedDate;
         });
       }
@@ -214,7 +216,8 @@ function Orders() {
   };
 
   const handleCompleteOrder = async () => {
-    if (!orderToComplete) return;
+    if (!orderToComplete || completing) return;
+    setCompleting(true);
 
     try {
       await api.post(`/orders/${orderToComplete.id}/status`, { 
@@ -246,6 +249,8 @@ function Orders() {
     } catch (error) {
       alert(error.response?.data?.error || 'Cập nhật thất bại');
       setPrinting(false);
+    } finally {
+      setCompleting(false);
     }
   };
 
@@ -263,8 +268,7 @@ function Orders() {
   };
 
   const handleItemChange = (index, field, value) => {
-    const newItems = [...formData.items];
-    newItems[index][field] = value;
+    const newItems = formData.items.map((item, i) => (i === index ? { ...item, [field]: value } : item));
     setFormData({ ...formData, items: newItems });
     
     // Calculate total and load applicable promotions when items change
@@ -527,7 +531,11 @@ function Orders() {
                 onChange={(e) => {
                   const year = parseInt(e.target.value);
                   setSelectedYear(year);
-                  const newDate = `${year}-${String(selectedMonth).padStart(2, '0')}-${String(new Date(selectedYear, selectedMonth - 1, 1).getDate()).padStart(2, '0')}`;
+                  const currentDate = new Date(selectedDate);
+                  let day = currentDate.getDate();
+                  const daysInMonth = getDaysInMonth(new Date(year, selectedMonth - 1, 1));
+                  if (day > daysInMonth) day = daysInMonth;
+                  const newDate = `${year}-${String(selectedMonth).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
                   setSelectedDate(newDate);
                 }}
                 className="px-2 py-1.5 border rounded text-xs"
@@ -709,7 +717,7 @@ function Orders() {
                       </td>
                       <td className="px-4 py-3 text-right text-gray-600">{order.items?.length || 0}</td>
                       <td className="px-4 py-3 text-right font-bold text-gray-800">
-                        {new Intl.NumberFormat('vi-VN').format(parseFloat(order.total_amount) || 0)} đ
+                        {new Intl.NumberFormat('vi-VN').format(parseFloat(order.final_amount ?? order.total_amount) || 0)} đ
                       </td>
                       {isAdmin() && (
                         <td className="px-4 py-3 text-center">
@@ -761,7 +769,7 @@ function Orders() {
                       {orders.reduce((sum, o) => sum + (o.items?.length || 0), 0)}
                     </td>
                     <td className="px-4 py-3 text-right text-green-600">
-                      {new Intl.NumberFormat('vi-VN').format(orders.reduce((sum, o) => sum + (parseFloat(o.total_amount) || 0), 0))} đ
+                      {new Intl.NumberFormat('vi-VN').format(orders.reduce((sum, o) => sum + (parseFloat(o.final_amount ?? o.total_amount) || 0), 0))} đ
                     </td>
                     {isAdmin() && <td className="px-4 py-3"></td>}
                   </tr>
@@ -809,7 +817,7 @@ function Orders() {
                   </div>
                   <div className="text-right">
                     <div className="text-lg font-bold text-gray-800 mb-2">
-                      {new Intl.NumberFormat('vi-VN').format(parseFloat(order.total_amount) || 0)} đ
+                      {new Intl.NumberFormat('vi-VN').format(parseFloat(order.final_amount ?? order.total_amount) || 0)} đ
                     </div>
                     {order.items && (
                       <div className="text-sm text-gray-600">
@@ -1260,10 +1268,10 @@ function Orders() {
               <div className="flex flex-col gap-2 pt-2 border-t border-gray-200 min-w-0">
                 <button
                   onClick={handleCompleteOrder}
-                  disabled={printing}
+                  disabled={printing || completing}
                   className="w-full min-w-0 bg-gradient-to-r from-green-500 to-green-600 text-white py-2.5 rounded-lg hover:from-green-600 hover:to-green-700 active:from-green-700 active:to-green-800 font-medium text-sm shadow-md transition-all touch-manipulation disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  {printing ? '⏳ Đang xử lý...' : '✓ Hoàn thành'}
+                  {printing || completing ? '⏳ Đang xử lý...' : '✓ Hoàn thành'}
                 </button>
                 <button
                   onClick={async () => {

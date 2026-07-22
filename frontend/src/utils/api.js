@@ -25,10 +25,20 @@ api.interceptors.request.use((config) => {
 api.interceptors.response.use(
   (response) => response,
   (error) => {
-    if (error.response?.status === 401) {
+    const url = error.config?.url || '';
+    // These endpoints return 401 for normal reasons (wrong password, invalid
+    // session), not because an existing session expired. Redirecting/clearing
+    // storage here would wipe the on-screen error message via a full reload
+    // and can even log a still-valid user out while they're just fixing a
+    // typo in the change-password form.
+    const isAuthEndpoint = /\/auth\/(login|register|select-store|select-employee)(\?|$)/.test(url);
+
+    if (error.response?.status === 401 && !isAuthEndpoint) {
       localStorage.removeItem('token');
       localStorage.removeItem('user');
-      window.location.href = '/login';
+      if (window.location.pathname !== '/login') {
+        window.location.href = '/login';
+      }
     }
     return Promise.reject(error);
   }

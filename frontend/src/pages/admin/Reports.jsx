@@ -210,6 +210,20 @@ function Reports() {
       alert('Xuất Excel thành công!');
     } catch (error) {
       console.error('Error exporting Excel:', error);
+      // Because the request uses responseType: 'blob', an error response body
+      // (typically JSON) also arrives as a Blob instead of a parsed object, so
+      // error.response.data.error is always undefined unless we decode it first.
+      const blobData = error.response?.data;
+      if (blobData instanceof Blob && blobData.type?.includes('json')) {
+        try {
+          const text = await blobData.text();
+          const parsed = JSON.parse(text);
+          alert(parsed.error || 'Có lỗi xảy ra khi xuất Excel');
+          return;
+        } catch {
+          // fall through to generic message below
+        }
+      }
       alert(error.response?.data?.error || 'Có lỗi xảy ra khi xuất Excel');
     }
   };

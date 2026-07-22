@@ -272,22 +272,24 @@ function Users() {
           <h1 className="text-2xl font-bold text-gray-800">Tài khoản & Nhân viên</h1>
           <p className="text-gray-600">Quản lý tài khoản và nhân viên</p>
         </div>
-        <button
-          onClick={() => {
-            if (activeTab === 'users') {
-              setEditingUser(null);
-              resetUserForm();
-              setShowUserModal(true);
-            } else {
-              setEditingEmployee(null);
-              setEmployeeFormData({ name: '', phone: '', user_id: '' });
-              setShowEmployeeModal(true);
-            }
-          }}
-          className="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700"
-        >
-          + {activeTab === 'users' ? 'Thêm tài khoản' : 'Thêm nhân viên'}
-        </button>
+        {activeTab !== 'pending' && (
+          <button
+            onClick={() => {
+              if (activeTab === 'users') {
+                setEditingUser(null);
+                resetUserForm();
+                setShowUserModal(true);
+              } else if (activeTab === 'employees') {
+                setEditingEmployee(null);
+                setEmployeeFormData({ name: '', phone: '', user_id: '' });
+                setShowEmployeeModal(true);
+              }
+            }}
+            className="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700"
+          >
+            + {activeTab === 'users' ? 'Thêm tài khoản' : 'Thêm nhân viên'}
+          </button>
+        )}
       </div>
 
       {/* Tabs */}
@@ -375,16 +377,11 @@ function Users() {
                         </td>
                         <td className="px-4 py-3 text-sm">
                           <span className={`px-2 py-1 rounded-full text-xs ${
-                            user.role === 'admin' ? 'bg-purple-100 text-purple-800' : 'bg-blue-100 text-blue-800'
+                            user.status === 'active' ? 'bg-green-100 text-green-800' :
+                            user.status === 'pending' ? 'bg-yellow-100 text-yellow-800' :
+                            'bg-red-100 text-red-800'
                           }`}>
-                            {user.role === 'admin' ? 'Admin' : 'Nhân viên'}
-                          </span>
-                        </td>
-                        <td className="px-4 py-3 text-sm">
-                          <span className={`px-2 py-1 rounded-full text-xs ${
-                            user.status === 'active' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
-                          }`}>
-                            {user.status === 'active' ? 'Hoạt động' : 'Ngưng'}
+                            {user.status === 'active' ? 'Hoạt động' : user.status === 'pending' ? 'Chờ duyệt' : 'Ngưng'}
                           </span>
                         </td>
                         <td className="px-4 py-3 text-sm text-gray-600">
