@@ -28,7 +28,7 @@ async function createRootAdmin() {
       await execute('UPDATE users SET role = ? WHERE id = ?', ['root', existingAdmin.id]);
       console.log('✅ Admin user converted to root admin!');
 
-      process.exit(0);
+       process.exit(0); 
     }
 
     // Create new root admin user
