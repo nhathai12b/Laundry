@@ -68,21 +68,8 @@ Frontend sẽ chạy tại `http://localhost:3000`
 
 ## 📚 Tài liệu Deploy
 
-Để deploy hệ thống lên hosting/VPS, xem các tài liệu sau:
-
-- **[DEPLOY_MANUAL.md](./DEPLOY_MANUAL.md)** - Hướng dẫn deploy thủ công từng bước (khuyến nghị cho người mới)
-- **[DEPLOY_GUIDE.md](./DEPLOY_GUIDE.md)** - Hướng dẫn deploy tự động từ GitHub (dùng script)
+- **[DOCKER.md](./DOCKER.md)** - Chạy toàn bộ hệ thống (MySQL + Backend + Frontend) bằng Docker Compose
 - **[TROUBLESHOOTING.md](./TROUBLESHOOTING.md)** - Xử lý sự cố
-
-### Scripts hỗ trợ deploy
-
-- **`deploy.sh`** - Script deploy backend tự động từ GitHub (chạy trên VPS)
-- **`deploy-frontend.sh`** - Script build và upload frontend (chạy trên máy local)
-
-Trong thư mục `deploy-scripts/` có các script bổ sung:
-- `setup-backend.sh` - Tự động setup backend
-- `setup-database.sh` - Tự động setup database
-- `update-frontend.sh` - Deploy frontend nhanh
 
 ## Tài khoản mặc định
 

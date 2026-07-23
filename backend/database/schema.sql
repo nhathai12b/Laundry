@@ -164,7 +164,7 @@ CREATE TABLE IF NOT EXISTS timesheets (
     expected_revenue DECIMAL(10, 2) DEFAULT 0,
     note TEXT,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    -- NULL when the shift is closed (check_out set); MySQL unique indexes allow
+    -- NULL when the shift is closed (check_out is set). MySQL unique indexes allow
     -- unlimited NULLs but still enforce uniqueness across NOT-NULL values, so this
     -- guarantees a user can never have two open (check_out IS NULL) shifts at once,
     -- even under concurrent check-in requests.

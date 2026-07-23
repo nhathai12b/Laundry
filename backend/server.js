@@ -35,9 +35,10 @@ if (process.env.NODE_ENV === 'production' && !process.env.FRONTEND_URL) {
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// Deployed behind a single Nginx reverse proxy on the same host (see
-// DEPLOY_MANUAL.md) which sets X-Forwarded-For. Without this, req.ip resolves
-// to Nginx's own address (127.0.0.1) for every request, collapsing per-IP
+// Deployed behind a single Nginx reverse proxy (system Nginx on the VPS, or
+// the frontend container in docker-compose.yml) which sets X-Forwarded-For.
+// Without this, req.ip resolves to the proxy's own address (127.0.0.1) for
+// every request, collapsing per-IP
 // login rate limiting/lockout into one shared bucket for all users.
 app.set('trust proxy', 1);
 

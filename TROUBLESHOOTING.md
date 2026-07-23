@@ -272,8 +272,6 @@ sudo cat /etc/nginx/conf.d/laundry-frontend.conf
 # - ssl_certificate_key /etc/letsencrypt/live/.../privkey.pem;
 ```
 
-**Nếu chưa có cấu hình SSL, xem hướng dẫn trong DEPLOY_MANUAL.md phần 4.1**
-
 #### Bước 3: Kiểm tra Nginx có lỗi
 
 ```bash

@@ -58,11 +58,25 @@ async function initializeDatabase() {
       }
     );
     
+    // Strip full-line `--` comments BEFORE splitting on ';'. Without this, any
+    // statement preceded by a leading comment line (no blank/semicolon between
+    // them, e.g. "-- Timesheets table\nCREATE TABLE ...") becomes one chunk
+    // whose trimmed text starts with "--" — the filter below then silently
+    // drops the whole chunk, comment AND the real CREATE TABLE statement with
+    // it. On a schema.sql where every table has such a header comment (as
+    // this one does), that silently creates zero tables on a fresh database
+    // with no error surfaced. scripts/initDatabase.js already works around
+    // this the same way; mirrored here so this auto-init path (used in dev
+    // and whenever DB_AUTO_INIT=true) actually creates the schema too.
+    const schemaWithoutLineComments = processedSchema
+      .replace(/^\s*--.*$/gm, '')
+      .trim();
+
     // Split by semicolon and execute each statement
-    const statements = processedSchema
+    const statements = schemaWithoutLineComments
       .split(';')
       .map(s => s.trim())
-      .filter(s => s.length > 0 && !s.startsWith('--'));
+      .filter(s => s.length > 0);
 
     const connection = await pool.getConnection();
     try {
