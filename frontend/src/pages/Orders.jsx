@@ -17,6 +17,7 @@ function Orders() {
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
+  const [submittingOrder, setSubmittingOrder] = useState(false);
   const [viewMode, setViewMode] = useState(isAdmin() ? 'day' : 'all'); // 'day', 'month', 'year', 'all'
   const [selectedDate, setSelectedDate] = useState(format(new Date(), 'yyyy-MM-dd'));
   const [selectedMonth, setSelectedMonth] = useState(savedFilters.selectedMonth);
@@ -377,6 +378,8 @@ function Orders() {
 
   const handleSubmitOrder = async (e) => {
     e.preventDefault();
+    if (submittingOrder) return;
+    setSubmittingOrder(true);
     try {
       const selectedStoreValue =
         isAdmin() && selectedStoreId && selectedStoreId !== 'all'
@@ -422,6 +425,8 @@ function Orders() {
       loadOrders();
     } catch (error) {
       alert(error.response?.data?.error || 'Tạo đơn thất bại');
+    } finally {
+      setSubmittingOrder(false);
     }
   };
 
@@ -1165,9 +1170,10 @@ function Orders() {
               <div className="flex flex-row gap-1.5 pt-2 border-t border-gray-200 min-w-0">
                 <button
                   type="submit"
-                  className="flex-1 min-w-0 bg-gradient-to-r from-blue-600 to-blue-700 text-white py-2 rounded-lg hover:from-blue-700 hover:to-blue-800 active:from-blue-800 active:to-blue-900 font-semibold text-xs sm:text-sm shadow-md hover:shadow-lg transition-all touch-manipulation"
+                  disabled={submittingOrder}
+                  className="flex-1 min-w-0 bg-gradient-to-r from-blue-600 to-blue-700 text-white py-2 rounded-lg hover:from-blue-700 hover:to-blue-800 active:from-blue-800 active:to-blue-900 font-semibold text-xs sm:text-sm shadow-md hover:shadow-lg transition-all touch-manipulation disabled:opacity-60 disabled:cursor-not-allowed"
                 >
-                  ✓ Tạo đơn
+                  {submittingOrder ? 'Đang tạo...' : '✓ Tạo đơn'}
                 </button>
                 <button
                   type="button"

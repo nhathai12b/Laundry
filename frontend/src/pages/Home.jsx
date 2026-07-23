@@ -12,6 +12,7 @@ function Home() {
   const [products, setProducts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
+  const [submittingOrder, setSubmittingOrder] = useState(false);
   const [selectedDate, setSelectedDate] = useState(format(new Date(), 'yyyy-MM-dd'));
   const [selectedMonth, setSelectedMonth] = useState(new Date().getMonth() + 1);
   const [selectedYear, setSelectedYear] = useState(new Date().getFullYear());
@@ -556,6 +557,8 @@ function Home() {
 
   const handleSubmitOrder = async (e) => {
     e.preventDefault();
+    if (submittingOrder) return;
+    setSubmittingOrder(true);
     try {
       const orderData = {
         customer_name: formData.customer_name || '',
@@ -645,6 +648,8 @@ function Home() {
       console.error('Create order error:', error);
       const errorMessage = error.response?.data?.error || error.message || 'Tạo đơn thất bại';
       alert(errorMessage);
+    } finally {
+      setSubmittingOrder(false);
     }
   };
 
@@ -1524,9 +1529,10 @@ function Home() {
               <div className="flex flex-row gap-1.5 pt-2 border-t border-gray-200 min-w-0">
                 <button
                   type="submit"
-                  className="flex-1 min-w-0 bg-gradient-to-r from-blue-600 to-blue-700 text-white py-2 rounded-lg hover:from-blue-700 hover:to-blue-800 active:from-blue-800 active:to-blue-900 font-semibold text-xs sm:text-sm shadow-md transition-all touch-manipulation"
+                  disabled={submittingOrder}
+                  className="flex-1 min-w-0 bg-gradient-to-r from-blue-600 to-blue-700 text-white py-2 rounded-lg hover:from-blue-700 hover:to-blue-800 active:from-blue-800 active:to-blue-900 font-semibold text-xs sm:text-sm shadow-md transition-all touch-manipulation disabled:opacity-60 disabled:cursor-not-allowed"
                 >
-                  ✓ Tạo đơn
+                  {submittingOrder ? 'Đang tạo...' : '✓ Tạo đơn'}
                 </button>
                 <button
                   type="button"

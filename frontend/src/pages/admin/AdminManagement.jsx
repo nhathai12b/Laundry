@@ -231,9 +231,14 @@ function AdminManagement() {
       if (editFormData.subscription_package) {
         updateData.subscription_package = editFormData.subscription_package;
         if (editFormData.subscription_expires_at) {
-          // Convert to MySQL datetime format
-          const date = new Date(editFormData.subscription_expires_at);
-          updateData.subscription_expires_at = date.toISOString().slice(0, 19).replace('T', ' ');
+          // The datetime-local input's value ("YYYY-MM-DDTHH:mm") holds the same
+          // literal digits the server sent (server stores/returns UTC-labeled
+          // digits via toISOString()). Send those digits through unchanged —
+          // do NOT round-trip through `new Date(...)`, which reinterprets the
+          // string in the browser's local timezone and silently shifts the
+          // stored value by the browser's UTC offset every time the form is
+          // saved without touching this field.
+          updateData.subscription_expires_at = `${editFormData.subscription_expires_at}:00`.replace('T', ' ');
         }
       } else {
         updateData.subscription_package = null;

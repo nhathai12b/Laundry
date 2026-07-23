@@ -40,8 +40,14 @@ router.get('/', authorize('admin', 'employer', 'root'), async (req, res) => {
         return res.status(400).json({ error: 'Admin account chưa có cửa hàng nào trong chuỗi để cấu hình settings' });
       }
     } else if (req.user.role === 'root') {
-      // Root can specify store_id in query
-      storeId = req.query.store_id || null;
+      // Root can specify store_id in query, but it must be a real store
+      if (req.query.store_id) {
+        const store = await queryOne('SELECT id FROM stores WHERE id = ?', [req.query.store_id]);
+        if (!store) {
+          return res.status(404).json({ error: 'Store not found' });
+        }
+        storeId = store.id;
+      }
     }
     
     // Query settings for the store (store_id can be null for global settings)
@@ -136,8 +142,16 @@ router.put('/', authorize('admin', 'employer', 'root'), async (req, res) => {
         }
       }
     } else if (req.user.role === 'root') {
-      // Root can set store_id explicitly
-      targetStoreId = store_id || null;
+      // Root can set store_id explicitly, but it must be a real store
+      if (store_id) {
+        const store = await queryOne('SELECT id FROM stores WHERE id = ?', [store_id]);
+        if (!store) {
+          return res.status(404).json({ error: 'Store not found' });
+        }
+        targetStoreId = store.id;
+      } else {
+        targetStoreId = null;
+      }
     }
 
     // Use transaction to ensure atomicity

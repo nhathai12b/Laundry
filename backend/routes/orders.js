@@ -619,6 +619,13 @@ router.patch('/:id', auditLog('update', 'order'), async (req, res) => {
   try {
     const { status, assigned_to, note, items, customer_name, customer_phone } = req.body;
 
+    if (status !== undefined) {
+      const validStatuses = ['created', 'washing', 'drying', 'waiting_pickup', 'completed', 'cancelled'];
+      if (!validStatuses.includes(status)) {
+        return res.status(400).json({ error: 'Invalid status. Allowed: created, washing, drying, waiting_pickup, completed, cancelled.' });
+      }
+    }
+
     const order = await getAccessibleOrder(req, req.params.id);
     if (!order) {
       return res.status(404).json({ error: 'Order not found' });

@@ -164,9 +164,15 @@ CREATE TABLE IF NOT EXISTS timesheets (
     expected_revenue DECIMAL(10, 2) DEFAULT 0,
     note TEXT,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    -- NULL when the shift is closed (check_out set); MySQL unique indexes allow
+    -- unlimited NULLs but still enforce uniqueness across NOT-NULL values, so this
+    -- guarantees a user can never have two open (check_out IS NULL) shifts at once,
+    -- even under concurrent check-in requests.
+    open_shift_guard INT AS (CASE WHEN check_out IS NULL THEN user_id ELSE NULL END) STORED,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT,
     FOREIGN KEY (store_id) REFERENCES stores(id) ON DELETE SET NULL,
-    FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE SET NULL
+    FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE SET NULL,
+    UNIQUE KEY unique_open_shift_per_user (open_shift_guard)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Audit logs table

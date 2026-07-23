@@ -18,6 +18,7 @@ function EmployerHome() {
   const [loading, setLoading] = useState(true);
   const [ordersLoading, setOrdersLoading] = useState(false);
   const [showModal, setShowModal] = useState(false);
+  const [submittingOrder, setSubmittingOrder] = useState(false);
   const [selectedDate, setSelectedDate] = useState(format(new Date(), 'yyyy-MM-dd'));
   const [currentMonth, setCurrentMonth] = useState(new Date().getMonth() + 1);
   const [currentYear, setCurrentYear] = useState(new Date().getFullYear());
@@ -264,6 +265,8 @@ function EmployerHome() {
 
   const handleSubmitOrder = async (e) => {
     e.preventDefault();
+    if (submittingOrder) return;
+    setSubmittingOrder(true);
     try {
       const orderData = {
         customer_name: formData.customer_name,
@@ -297,6 +300,8 @@ function EmployerHome() {
       loadData(); // Reload stats
     } catch (error) {
       alert(error.response?.data?.error || 'Tạo đơn thất bại');
+    } finally {
+      setSubmittingOrder(false);
     }
   };
 
@@ -772,9 +777,10 @@ function EmployerHome() {
               <div className="flex flex-col sm:flex-row gap-3 pt-4">
                 <button
                   type="submit"
-                  className="flex-1 bg-blue-600 text-white py-3 rounded-lg hover:bg-blue-700 font-medium text-base"
+                  disabled={submittingOrder}
+                  className="flex-1 bg-blue-600 text-white py-3 rounded-lg hover:bg-blue-700 font-medium text-base disabled:opacity-60 disabled:cursor-not-allowed"
                 >
-                  Tạo đơn
+                  {submittingOrder ? 'Đang tạo...' : 'Tạo đơn'}
                 </button>
                 <button
                   type="button"

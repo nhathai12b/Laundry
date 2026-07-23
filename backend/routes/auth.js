@@ -33,10 +33,15 @@ const isAccountLocked = (user) => {
 // Helper function to increment failed login attempts
 const incrementFailedAttempts = async (userId, maxAttempts = MAX_LOGIN_ATTEMPTS, lockoutMinutes = ACCOUNT_LOCKOUT_MINUTES) => {
   try {
-    // Check if security columns exist
-    let user;
+    // Atomically increment in the DB itself so concurrent requests can't race
+    // past the lockout threshold via a lost-update (read-then-write).
     try {
-      user = await queryOne('SELECT failed_login_attempts FROM users WHERE id = ?', [userId]);
+      await execute(`
+        UPDATE users
+        SET failed_login_attempts = COALESCE(failed_login_attempts, 0) + 1,
+            last_failed_login = NOW()
+        WHERE id = ?
+      `, [userId]);
     } catch (error) {
       if (error.code === 'ER_BAD_FIELD_ERROR') {
         // Security columns don't exist yet, skip lockout
@@ -45,23 +50,17 @@ const incrementFailedAttempts = async (userId, maxAttempts = MAX_LOGIN_ATTEMPTS,
       }
       throw error;
     }
-    
-    const currentAttempts = (user?.failed_login_attempts || 0) + 1;
-    
+
+    const user = await queryOne('SELECT failed_login_attempts FROM users WHERE id = ?', [userId]);
+    const currentAttempts = user?.failed_login_attempts || 0;
+
     let lockedUntil = null;
     if (currentAttempts >= maxAttempts) {
       // Lock account for lockoutMinutes
       lockedUntil = new Date(Date.now() + lockoutMinutes * 60 * 1000);
+      await execute('UPDATE users SET locked_until = ? WHERE id = ?', [lockedUntil, userId]);
     }
-    
-    await execute(`
-      UPDATE users 
-      SET failed_login_attempts = ?,
-          last_failed_login = NOW(),
-          locked_until = ?
-      WHERE id = ?
-    `, [currentAttempts, lockedUntil, userId]);
-    
+
     return { currentAttempts, isLocked: lockedUntil !== null, lockedUntil };
   } catch (error) {
     // If columns don't exist, gracefully degrade

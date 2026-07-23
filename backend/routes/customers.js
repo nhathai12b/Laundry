@@ -125,7 +125,7 @@ router.get('/', async (req, res) => {
     querySql += ' ORDER BY c.total_spent DESC, c.created_at DESC';
     
     // Add limit for autocomplete (default 20, max 50)
-    const limit = Math.min(parseInt(req.query.limit) || 20, 50);
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 20, 1), 50);
     querySql += ` LIMIT ${limit}`;
 
     const customers = await query(querySql, params);

@@ -48,6 +48,21 @@ const RootAdminRoute = ({ children }) => {
   return children;
 };
 
+// Route protection cho trang chỉ dành cho root (vd: Admin Management) - admin thường bị redirect,
+// khác RootAdminRoute (chỉ giới hạn điều hướng của chính root, không chặn admin thường).
+const RootOnlyRoute = ({ children }) => {
+  if (!isAuthenticated()) {
+    return <Navigate to="/login" />;
+  }
+  if (!isAdmin()) {
+    return <Navigate to="/" />;
+  }
+  if (!isRoot()) {
+    return <Navigate to="/admin" replace />;
+  }
+  return children;
+};
+
 // Route protection cho admin thường - root admin không được truy cập
 const AdminOnlyRoute = ({ children }) => {
   const location = useLocation();
@@ -120,7 +135,7 @@ function App() {
           }
         >
           <Route index element={<RootAdminRoute><Dashboard /></RootAdminRoute>} />
-          <Route path="admin-management" element={<RootAdminRoute><AdminManagement /></RootAdminRoute>} />
+          <Route path="admin-management" element={<RootOnlyRoute><AdminManagement /></RootOnlyRoute>} />
           {/* Các route chỉ dành cho admin thường, root admin sẽ bị redirect */}
           <Route path="users" element={<AdminOnlyRoute><Users /></AdminOnlyRoute>} />
           <Route path="products" element={<AdminOnlyRoute><Products /></AdminOnlyRoute>} />
