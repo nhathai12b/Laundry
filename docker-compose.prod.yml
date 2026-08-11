@@ -1,0 +1,65 @@
+services:
+  xwash-cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: xwash-cloudflared
+    restart: unless-stopped
+    # Token mode: the tunnel is remotely managed, so ingress rules live in the
+    # Cloudflare dashboard, not here. See .docker/cloudflared/README.md
+    command: tunnel --no-autoupdate run
+    environment:
+      # Env var rather than `--token`, to keep it out of Config.Cmd / ps output.
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:?set CLOUDFLARE_TUNNEL_TOKEN in /srv/xwash/.env}
+    depends_on:
+      - xwash-api
+      - xwash-web
+    networks:
+      - xwash-edge
+
+  xwash-api:
+    image: ${REGISTRY_IMAGE:-xwash}/api:${IMAGE_TAG:-latest}
+    container_name: xwash-api
+    restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      xwash-mysql:
+        condition: service_healthy
+    networks:
+      - xwash-edge
+      - xwash-internal
+
+  xwash-web:
+    image: ${REGISTRY_IMAGE:-xwash}/web:${IMAGE_TAG:-latest}
+    container_name: xwash-web
+    restart: unless-stopped
+    networks:
+      - xwash-edge
+
+  xwash-mysql:
+    image: mysql:8.0
+    container_name: xwash-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+    volumes:
+      - xwash_mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 180s
+    networks:
+      - xwash-internal
+
+networks:
+  xwash-edge:
+    name: xwash-edge
+  xwash-internal:
+    name: xwash-internal
+
+volumes:
+  xwash_mysql_data:

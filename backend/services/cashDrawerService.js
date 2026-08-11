@@ -1,0 +1,298 @@
+import { query, queryOne, transaction } from '../database/db.js';
+import { formatDateTimeUTC } from '../utils/helpers.js';
+
+const IN_TYPES = new Set(['opening_float', 'cash_payment', 'cash_in', 'shortage_reimbursement']);
+const OUT_TYPES = new Set(['cash_out']);
+const NEUTRAL_TYPES = new Set(['closing_count']);
+
+function normalizeAmount(amount, fieldName = 'amount', allowZero = false) {
+  const value = Number.parseFloat(amount);
+  if (!Number.isFinite(value) || value < 0 || (!allowZero && value <= 0)) {
+    const error = new Error(`${fieldName} must be ${allowZero ? 'zero or greater' : 'greater than zero'}`);
+    error.statusCode = 400;
+    throw error;
+  }
+  return Math.round(value * 100) / 100;
+}
+
+function directionForType(type) {
+  if (IN_TYPES.has(type)) return 'in';
+  if (OUT_TYPES.has(type)) return 'out';
+  if (NEUTRAL_TYPES.has(type)) return 'neutral';
+  const error = new Error('Invalid cash drawer transaction type');
+  error.statusCode = 400;
+  throw error;
+}
+
+async function insertCashDrawerTransactionTx(db, payload) {
+  const amount = normalizeAmount(payload.amount, 'amount', payload.allowZero === true);
+  const type = payload.type;
+  const direction = directionForType(type);
+  const occurredAt = payload.occurred_at
+    ? formatDateTimeUTC(new Date(payload.occurred_at))
+    : formatDateTimeUTC();
+
+  const result = await db.execute(`
+    INSERT INTO cash_drawer_transactions (
+      store_id, timesheet_id, user_id, employee_id, order_id, order_payment_id,
+      type, direction, amount, reason, occurred_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `, [
+    payload.store_id || null,
+    payload.timesheet_id,
+    payload.user_id || null,
+    payload.employee_id || null,
+    payload.order_id || null,
+    payload.order_payment_id || null,
+    type,
+    direction,
+    amount,
+    payload.reason || null,
+    occurredAt,
+  ]);
+
+  return {
+    id: result.insertId,
+    type,
+    direction,
+    amount,
+    occurred_at: occurredAt,
+  };
+}
+
+async function getTimesheetForActorTx(db, timesheetId, actor, requireOpen = true) {
+  const conditions = ['t.id = ?'];
+  const params = [timesheetId];
+
+  if (actor?.role === 'employer') {
+    conditions.push('t.user_id = ?');
+    params.push(actor.id);
+  } else if (actor?.role === 'admin') {
+    conditions.push('t.store_id IN (SELECT id FROM stores WHERE admin_id = ?)');
+    params.push(actor.id);
+  }
+
+  if (requireOpen) {
+    conditions.push('t.check_out IS NULL');
+  }
+
+  const timesheet = await db.queryOne(`
+    SELECT t.*, u.name AS user_name, COALESCE(e.name, u.name) AS employee_name, s.name AS store_name
+    FROM timesheets t
+    JOIN users u ON t.user_id = u.id
+    LEFT JOIN employees e ON t.employee_id = e.id
+    LEFT JOIN stores s ON t.store_id = s.id
+    WHERE ${conditions.join(' AND ')}
+    LIMIT 1
+  `, params);
+
+  if (!timesheet) {
+    const error = new Error('Timesheet not found');
+    error.statusCode = 404;
+    throw error;
+  }
+
+  return timesheet;
+}
+
+export async function ensureOpeningFloatTx(db, timesheet, amount, actor) {
+  const openingAmount = normalizeAmount(amount || 0, 'opening_cash_amount', true);
+
+  if (openingAmount > 0) {
+    await insertCashDrawerTransactionTx(db, {
+      type: 'opening_float',
+      amount: openingAmount,
+      store_id: timesheet.store_id,
+      timesheet_id: timesheet.id,
+      user_id: actor?.id || timesheet.user_id,
+      employee_id: timesheet.employee_id,
+      reason: 'Opening cash float',
+    });
+  }
+
+  await db.execute(
+    'UPDATE timesheets SET opening_cash_amount = ? WHERE id = ?',
+    [openingAmount, timesheet.id]
+  );
+
+  return openingAmount;
+}
+
+export async function recordCashPaymentTx(db, { order, paymentId, amount, timesheet, actor }) {
+  if (!timesheet?.id) return null;
+
+  return insertCashDrawerTransactionTx(db, {
+    type: 'cash_payment',
+    amount,
+    store_id: order.store_id || timesheet.store_id || actor?.store_id || null,
+    timesheet_id: timesheet.id,
+    user_id: actor?.id || null,
+    employee_id: timesheet.employee_id || null,
+    order_id: order.id,
+    order_payment_id: paymentId,
+    reason: `Cash payment for order ${order.code || order.id}`,
+  });
+}
+
+export async function recordCashIn(timesheetId, payload, actor) {
+  return transaction(async (db) => {
+    const timesheet = await getTimesheetForActorTx(db, timesheetId, actor, true);
+    const record = await insertCashDrawerTransactionTx(db, {
+      type: 'cash_in',
+      amount: payload.amount,
+      store_id: timesheet.store_id,
+      timesheet_id: timesheet.id,
+      user_id: actor?.id || null,
+      employee_id: timesheet.employee_id,
+      reason: payload.reason || 'Cash added to drawer',
+    });
+    return { record, summary: await getDrawerSummaryTx(db, timesheet.id) };
+  });
+}
+
+export async function recordCashOut(timesheetId, payload, actor) {
+  if (!String(payload.reason || '').trim()) {
+    const error = new Error('Reason is required for cash out');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return transaction(async (db) => {
+    const timesheet = await getTimesheetForActorTx(db, timesheetId, actor, true);
+    const record = await insertCashDrawerTransactionTx(db, {
+      type: 'cash_out',
+      amount: payload.amount,
+      store_id: timesheet.store_id,
+      timesheet_id: timesheet.id,
+      user_id: actor?.id || null,
+      employee_id: timesheet.employee_id,
+      reason: payload.reason,
+    });
+    return { record, summary: await getDrawerSummaryTx(db, timesheet.id) };
+  });
+}
+
+export async function recordClosingCountTx(db, timesheet, payload, actor) {
+  const summary = await getDrawerSummaryTx(db, timesheet.id);
+  const actualAmount = normalizeAmount(payload.actual_cash_amount, 'actual_cash_amount', true);
+  const expectedAmount = summary.expected_cash_amount;
+  const cashDifference = Math.round((actualAmount - expectedAmount) * 100) / 100;
+  const shortagePaidAmount = normalizeAmount(payload.cash_shortage_paid_amount || 0, 'cash_shortage_paid_amount', true);
+
+  if (shortagePaidAmount > 0) {
+    await insertCashDrawerTransactionTx(db, {
+      type: 'shortage_reimbursement',
+      amount: shortagePaidAmount,
+      store_id: timesheet.store_id,
+      timesheet_id: timesheet.id,
+      user_id: actor?.id || null,
+      employee_id: timesheet.employee_id,
+      reason: 'Cash shortage reimbursement',
+    });
+  }
+
+  await insertCashDrawerTransactionTx(db, {
+    type: 'closing_count',
+    amount: actualAmount,
+    allowZero: true,
+    store_id: timesheet.store_id,
+    timesheet_id: timesheet.id,
+    user_id: actor?.id || null,
+    employee_id: timesheet.employee_id,
+    reason: payload.note || 'Closing cash count',
+  });
+
+  await db.execute(`
+    UPDATE timesheets
+    SET expected_cash_amount = ?,
+        actual_cash_amount = ?,
+        cash_difference = ?,
+        cash_shortage_paid_amount = ?
+    WHERE id = ?
+  `, [
+    expectedAmount,
+    actualAmount,
+    cashDifference,
+    shortagePaidAmount,
+    timesheet.id,
+  ]);
+
+  return {
+    ...summary,
+    actual_cash_amount: actualAmount,
+    cash_difference: cashDifference,
+    cash_shortage_paid_amount: shortagePaidAmount,
+  };
+}
+
+export async function getDrawerSummaryTx(db, timesheetId) {
+  const summary = await db.queryOne(`
+    SELECT
+      COALESCE(SUM(CASE WHEN type = 'opening_float' THEN amount ELSE 0 END), 0) AS opening_cash_amount,
+      COALESCE(SUM(CASE WHEN type = 'cash_payment' THEN amount ELSE 0 END), 0) AS cash_payment_amount,
+      COALESCE(SUM(CASE WHEN type = 'cash_in' THEN amount ELSE 0 END), 0) AS cash_in_amount,
+      COALESCE(SUM(CASE WHEN type = 'cash_out' THEN amount ELSE 0 END), 0) AS cash_out_amount,
+      COALESCE(SUM(CASE WHEN type = 'shortage_reimbursement' THEN amount ELSE 0 END), 0) AS shortage_reimbursement_amount
+    FROM cash_drawer_transactions
+    WHERE timesheet_id = ?
+  `, [timesheetId]);
+
+  const opening = Number.parseFloat(summary?.opening_cash_amount || 0);
+  const cashPayments = Number.parseFloat(summary?.cash_payment_amount || 0);
+  const cashIn = Number.parseFloat(summary?.cash_in_amount || 0);
+  const cashOut = Number.parseFloat(summary?.cash_out_amount || 0);
+  const shortageReimbursement = Number.parseFloat(summary?.shortage_reimbursement_amount || 0);
+
+  return {
+    opening_cash_amount: opening,
+    cash_payment_amount: cashPayments,
+    cash_in_amount: cashIn,
+    cash_out_amount: cashOut,
+    shortage_reimbursement_amount: shortageReimbursement,
+    expected_cash_amount: Math.round((opening + cashPayments + cashIn - cashOut) * 100) / 100,
+  };
+}
+
+export async function getDrawerSummary(timesheetId) {
+  return transaction(async (db) => getDrawerSummaryTx(db, timesheetId));
+}
+
+export async function getDrawerDetails(timesheetId, actor, requireOpen = false) {
+  return transaction(async (db) => {
+    const timesheet = await getTimesheetForActorTx(db, timesheetId, actor, requireOpen);
+    const summary = await getDrawerSummaryTx(db, timesheet.id);
+    const transactions = await db.query(`
+      SELECT *
+      FROM cash_drawer_transactions
+      WHERE timesheet_id = ?
+      ORDER BY occurred_at ASC, id ASC
+    `, [timesheet.id]);
+
+    return { timesheet, summary, transactions };
+  });
+}
+
+export async function getCurrentDrawer(actor) {
+  if (!actor?.id) return null;
+
+  const timesheet = await queryOne(`
+    SELECT id
+    FROM timesheets
+    WHERE user_id = ? AND check_out IS NULL
+    ORDER BY check_in ASC
+    LIMIT 1
+  `, [actor.id]);
+
+  if (!timesheet) return null;
+  return getDrawerDetails(timesheet.id, actor, true);
+}
+
+export async function getDrawerTransactions(timesheetId) {
+  return query(`
+    SELECT *
+    FROM cash_drawer_transactions
+    WHERE timesheet_id = ?
+    ORDER BY occurred_at ASC, id ASC
+  `, [timesheetId]);
+}

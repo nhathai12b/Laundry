@@ -1,0 +1,15 @@
+**/.git
+**/node_modules
+**/dist
+**/*.log
+**/.DS_Store
+
+# Runtime env files should not be baked into images.
+**/.env
+
+# Kept in git intentionally for the current deploy flow; copied to /srv/xwash/.env by deploy.
+!backend/.env.production
+
+# Cloudflare Tunnel material must never reach an image build context.
+**/cloudflared/credentials.json
+**/cloudflared/cert.pem

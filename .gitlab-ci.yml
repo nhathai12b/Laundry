@@ -1,0 +1,99 @@
+# CI/CD for XWash production (https://shop.xwash.vn).
+# Runs on the shared 103.90.224.156 host (also hosts the dokomap stack).
+# Image delivery: docker save | ssh | docker load (no registry required).
+#
+# Required GitLab CI/CD variables:
+#   SSH_PRIVATE_KEY  (type: File)  -> deploy private key
+#   PROD_HOST        = 103.90.224.156
+#   PROD_USER        = root
+#
+# The production server keeps runtime state at:
+#   /srv/xwash/docker-compose.prod.yml
+#   /srv/xwash/.env                     (from backend/.env.production, includes
+#                                        CLOUDFLARE_TUNNEL_TOKEN)
+#   Docker networks: xwash-edge, xwash-internal (both owned by this stack)
+#
+# Public ingress for shop.xwash.vn is configured in the Cloudflare Zero Trust
+# dashboard (token mode = remotely managed). See .docker/cloudflared/README.md.
+
+stages:
+  - test
+  - build
+  - deploy
+
+variables:
+  TAG: "$CI_COMMIT_SHORT_SHA"
+
+default:
+  tags:
+    - xwash
+
+typecheck_frontend:
+  stage: test
+  image: node:20-bookworm-slim
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "master"'
+  script:
+    - 'for i in icon-180.png icon-192.png icon-512.png icon-maskable-512.png; do test -s "frontend/public/$i" || { echo "FATAL missing PWA icon frontend/public/$i"; exit 1; }; done'
+    - cd frontend
+    - npm ci
+    - npm run build
+  allow_failure: false
+
+install_backend:
+  stage: test
+  image: node:20-bookworm-slim
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "master"'
+  before_script:
+    - apt-get update
+    - apt-get install -y --no-install-recommends build-essential libcairo2-dev libgif-dev libjpeg-dev libpango1.0-dev librsvg2-dev make pkg-config python3
+  script:
+    - cd backend
+    - npm ci
+  allow_failure: false
+
+.build:
+  stage: build
+  image: docker:27
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "master"'
+
+build_api:
+  extends: .build
+  script:
+    - docker build -f .docker/backend/Dockerfile -t xwash/api:$TAG .
+
+build_web:
+  extends: .build
+  script:
+    - docker build -f .docker/frontend/Dockerfile -t xwash/web:$TAG .
+
+deploy_prod:
+  stage: deploy
+  image: docker:27
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "master"'
+      when: manual
+  environment:
+    name: production
+    url: https://shop.xwash.vn
+  before_script:
+    - apk add --no-cache openssh-client gzip
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - cp "$SSH_PRIVATE_KEY" ~/.ssh/id_ed25519
+    - chmod 600 ~/.ssh/id_ed25519
+    - ssh-keyscan -H "$PROD_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+  script:
+    - 'if grep -q CHANGE_ME backend/.env.production; then echo "FATAL: fill placeholder values in backend/.env.production before deploying"; exit 1; fi'
+    - docker save xwash/api:$TAG xwash/web:$TAG | gzip | ssh "$PROD_USER@$PROD_HOST" 'gunzip | docker load'
+    - ssh "$PROD_USER@$PROD_HOST" 'mkdir -p /srv/xwash'
+    - scp docker-compose.prod.yml "$PROD_USER@$PROD_HOST:/srv/xwash/docker-compose.prod.yml"
+    - ssh "$PROD_USER@$PROD_HOST" "cp /srv/xwash/.env /srv/xwash/.env.bak 2>/dev/null || true"
+    - scp backend/.env.production "$PROD_USER@$PROD_HOST:/srv/xwash/.env"
+    - ssh "$PROD_USER@$PROD_HOST" "cd /srv/xwash && REGISTRY_IMAGE=xwash IMAGE_TAG=$TAG docker compose -f docker-compose.prod.yml up -d --wait --wait-timeout 360"
+    - ssh "$PROD_USER@$PROD_HOST" "cd /srv/xwash && for i in 1 2 3 4 5; do REGISTRY_IMAGE=xwash IMAGE_TAG=$TAG docker compose -f docker-compose.prod.yml exec -T xwash-api npm run init-db && break || sleep 15; done"
+    - ssh "$PROD_USER@$PROD_HOST" "cd /srv/xwash && REGISTRY_IMAGE=xwash IMAGE_TAG=$TAG docker compose -f docker-compose.prod.yml ps"

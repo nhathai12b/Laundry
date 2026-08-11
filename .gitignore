@@ -1,0 +1,24 @@
+# OS and editor
+.DS_Store
+.idea/
+.vscode/
+*.log
+
+# Node
+node_modules/
+dist/
+
+# Cloudflare Tunnel
+# The tunnel runs in TOKEN mode, so there is no credentials file in this repo.
+# These rules are kept as a guard in case anyone ever switches to credentials
+# mode -- a leaked tunnel credential/token lets an attacker run their own
+# connector for the tunnel and receive live traffic for shop.xwash.vn.
+.docker/cloudflared/credentials.json
+.docker/cloudflared/cert.pem
+.docker/cloudflared/*.json
+
+# Runtime env files
+.env
+.env.local
+.env.cloudflared
+backend/.env.production
