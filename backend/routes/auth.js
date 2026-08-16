@@ -3,10 +3,18 @@ import jwt from 'jsonwebtoken';
 import { query, queryOne, execute } from '../database/db.js';
 import { comparePassword, hashPassword } from '../utils/helpers.js';
 import { authenticate } from '../middleware/auth.js';
-import { loginRateLimiter, resetLoginRateLimit } from '../middleware/rateLimiter.js';
+import { loginRateLimiter, registerRateLimiter, resetLoginRateLimit } from '../middleware/rateLimiter.js';
 import { MAX_LOGIN_ATTEMPTS, ACCOUNT_LOCKOUT_MINUTES, TIMING_ATTACK_DELAY_MS } from '../utils/constants.js';
 
 const router = express.Router();
+
+// Generic message for both "user not found" and "wrong password" so responses
+// can't be used to probe which phone numbers have accounts.
+const INVALID_CREDENTIALS_MESSAGE = 'Số điện thoại hoặc mật khẩu không đúng.';
+
+// Valid bcrypt hash of a random throwaway string. Compared against when the user
+// doesn't exist so both branches cost one bcrypt verification (timing equalization).
+const DUMMY_PASSWORD_HASH = '$2a$10$ATOLApL9NU7650NWv2ohzOEDbpz7POcHmWK/9tzVK6FZIHxjnWFQq';
 
 // Helper function to log login attempt
 const logLoginAttempt = async (phone, ip, success, failureReason = null, userAgent = null) => {
@@ -45,23 +53,22 @@ const incrementFailedAttempts = async (userId, maxAttempts = MAX_LOGIN_ATTEMPTS,
       throw error;
     }
     
-    const currentAttempts = (user?.failed_login_attempts || 0) + 1;
-    
-    let lockedUntil = null;
-    if (currentAttempts >= maxAttempts) {
-      // Lock account for lockoutMinutes
-      lockedUntil = new Date(Date.now() + lockoutMinutes * 60 * 1000);
-    }
-    
+    // Atomic increment (read-then-write would race under concurrent attempts),
+    // locking in the same statement once the threshold is reached
     await execute(`
-      UPDATE users 
-      SET failed_login_attempts = ?,
+      UPDATE users
+      SET failed_login_attempts = failed_login_attempts + 1,
           last_failed_login = NOW(),
-          locked_until = ?
+          locked_until = IF(failed_login_attempts >= ?, DATE_ADD(NOW(), INTERVAL ? MINUTE), locked_until)
       WHERE id = ?
-    `, [currentAttempts, lockedUntil, userId]);
-    
-    return { currentAttempts, isLocked: lockedUntil !== null, lockedUntil };
+    `, [maxAttempts, lockoutMinutes, userId]);
+
+    const updated = await queryOne('SELECT failed_login_attempts, locked_until FROM users WHERE id = ?', [userId]);
+    const currentAttempts = updated?.failed_login_attempts ?? (user?.failed_login_attempts || 0) + 1;
+    const lockedUntil = updated?.locked_until ? new Date(updated.locked_until) : null;
+    const isLocked = lockedUntil !== null && lockedUntil > new Date();
+
+    return { currentAttempts, isLocked, lockedUntil: isLocked ? lockedUntil : null };
   } catch (error) {
     // If columns don't exist, gracefully degrade
     if (error.code === 'ER_BAD_FIELD_ERROR') {
@@ -114,30 +121,57 @@ router.post('/login', loginRateLimiter(), async (req, res) => {
     }
 
     if (!user) {
-      // Don't reveal if user exists or not (security best practice)
+      // Don't reveal if user exists or not: burn one bcrypt verification so this
+      // branch costs the same as a real password check, plus the standard delay
+      await comparePassword(password, DUMMY_PASSWORD_HASH);
       await logLoginAttempt(phone, ip, false, 'Invalid credentials', userAgent);
-      // Add delay to prevent timing attacks
       await new Promise(resolve => setTimeout(resolve, TIMING_ATTACK_DELAY_MS));
-      return res.status(401).json({ error: 'Invalid credentials' });
+      return res.status(401).json({ error: INVALID_CREDENTIALS_MESSAGE });
     }
 
-    // Check if account is locked
+    // Check if account is locked (must come before password check so a locked
+    // account can't keep being brute-forced)
     if (isAccountLocked(user)) {
       const lockedUntil = new Date(user.locked_until);
       const minutesRemaining = Math.ceil((lockedUntil - new Date()) / 1000 / 60);
       await logLoginAttempt(phone, ip, false, `Account locked until ${lockedUntil.toISOString()}`, userAgent);
-      return res.status(423).json({ 
+      return res.status(423).json({
         error: `Tài khoản đã bị khóa do quá nhiều lần đăng nhập sai. Vui lòng thử lại sau ${minutesRemaining} phút.`,
         lockedUntil: lockedUntil.toISOString(),
         minutesRemaining
       });
     }
 
-    // Check account status
+    // Verify password BEFORE any account-status responses: without this order,
+    // anyone can probe account state (pending/disabled/expired) with no password
+    const isValid = await comparePassword(password, user.password_hash);
+
+    if (!isValid) {
+      const { isLocked, lockedUntil } = await incrementFailedAttempts(user.id);
+
+      await logLoginAttempt(phone, ip, false, 'Invalid password', userAgent);
+
+      if (isLocked && lockedUntil) {
+        const minutesRemaining = Math.ceil((new Date(lockedUntil) - new Date()) / 1000 / 60);
+        return res.status(423).json({
+          error: `Tài khoản đã bị khóa do quá nhiều lần đăng nhập sai. Vui lòng thử lại sau ${minutesRemaining} phút.`,
+          lockedUntil: lockedUntil.toISOString(),
+          minutesRemaining
+        });
+      }
+
+      // Same generic message as the user-not-found branch (no attempt-count hint)
+      await new Promise(resolve => setTimeout(resolve, TIMING_ATTACK_DELAY_MS));
+      return res.status(401).json({ error: INVALID_CREDENTIALS_MESSAGE });
+    }
+
+    // Password verified — status/subscription details below are only revealed
+    // to someone who actually owns the account
+
     if (user.status === 'pending') {
       if (user.role === 'admin') {
-        return res.status(401).json({ 
-          error: 'Tài khoản admin đang chờ phê duyệt. Vui lòng liên hệ root admin để được phê duyệt và kích hoạt gói đăng ký.' 
+        return res.status(401).json({
+          error: 'Tài khoản admin đang chờ phê duyệt. Vui lòng liên hệ root admin để được phê duyệt và kích hoạt gói đăng ký.'
         });
       }
       return res.status(401).json({ error: 'Tài khoản đang chờ phê duyệt. Vui lòng liên hệ admin.' });
@@ -148,53 +182,14 @@ router.post('/login', loginRateLimiter(), async (req, res) => {
     }
 
     // Check subscription expiration for admin users (not root)
-    // Root admin doesn't need subscription check
-    if (user.role === 'admin') {
-      // Only check subscription if it exists
-      // If admin is active but no subscription, allow login (might be approved but subscription not set yet)
-      if (user.subscription_expires_at) {
-        const now = new Date();
-        const expirationDate = new Date(user.subscription_expires_at);
-        
-        if (now > expirationDate) {
-          return res.status(401).json({ 
-            error: `Gói đăng ký đã hết hạn vào ${expirationDate.toLocaleDateString('vi-VN')}. Vui lòng liên hệ root admin để gia hạn.` 
-          });
-        }
-      } else {
-        // Allow login for active admin even without subscription (might be in transition)
-      }
-    }
-
-    const isValid = await comparePassword(password, user.password_hash);
-
-    if (!isValid) {
-      // Increment failed login attempts
-      const { currentAttempts, isLocked, lockedUntil } = await incrementFailedAttempts(user.id);
-      
-      await logLoginAttempt(phone, ip, false, 'Invalid password', userAgent);
-      
-      let errorMessage = 'Invalid credentials';
-      if (isLocked && lockedUntil) {
-        const minutesRemaining = Math.ceil((new Date(lockedUntil) - new Date()) / 1000 / 60);
-        errorMessage = `Tài khoản đã bị khóa do quá nhiều lần đăng nhập sai (${currentAttempts} lần). Vui lòng thử lại sau ${minutesRemaining} phút.`;
-        return res.status(423).json({ 
-          error: errorMessage,
-          lockedUntil: lockedUntil.toISOString(),
-          minutesRemaining
+    // If admin is active but no subscription, allow login (might be approved but subscription not set yet)
+    if (user.role === 'admin' && user.subscription_expires_at) {
+      const expirationDate = new Date(user.subscription_expires_at);
+      if (new Date() > expirationDate) {
+        return res.status(401).json({
+          error: `Gói đăng ký đã hết hạn vào ${expirationDate.toLocaleDateString('vi-VN')}. Vui lòng liên hệ root admin để gia hạn.`
         });
-      } else {
-        const remainingAttempts = 5 - currentAttempts;
-        if (remainingAttempts > 0) {
-          errorMessage = `Sai mật khẩu. Còn ${remainingAttempts} lần thử.`;
-        } else {
-          errorMessage = 'Sai mật khẩu. Tài khoản đã bị khóa tạm thời.';
-        }
       }
-      
-      // Add delay to prevent timing attacks
-      await new Promise(resolve => setTimeout(resolve, TIMING_ATTACK_DELAY_MS));
-      return res.status(401).json({ error: errorMessage });
     }
 
     // Successful login - reset failed attempts and rate limit
@@ -379,7 +374,7 @@ router.post('/login', loginRateLimiter(), async (req, res) => {
 });
 
 // Đăng ký sử dụng dịch vụ (tạo admin thường, status = pending, chờ root phê duyệt)
-router.post('/register', async (req, res) => {
+router.post('/register', registerRateLimiter(), async (req, res) => {
   try {
     const { name, phone, password, subscription_package } = req.body;
 
@@ -393,6 +388,13 @@ router.post('/register', async (req, res) => {
     }
 
     const trimmedPhone = String(phone).trim();
+    if (!/^\d{8,15}$/.test(trimmedPhone)) {
+      return res.status(400).json({ error: 'Số điện thoại không hợp lệ. Chỉ nhập chữ số (8-15 số).' });
+    }
+
+    if (typeof password !== 'string' || password.length < 8) {
+      return res.status(400).json({ error: 'Mật khẩu phải có ít nhất 8 ký tự.' });
+    }
     const existing = await queryOne('SELECT id FROM users WHERE phone = ?', [trimmedPhone]);
     if (existing) {
       return res.status(400).json({ error: 'Số điện thoại đã được đăng ký. Vui lòng dùng số khác hoặc đăng nhập.' });
@@ -431,22 +433,30 @@ router.get('/me', authenticate, async (req, res) => {
 });
 
 // Select store (for admin after login)
-router.post('/select-store', async (req, res) => {
+// Requires a valid token: the target user is ALWAYS the authenticated user.
+// (Previously this endpoint minted a JWT for any userId passed in the body —
+// a full authentication bypass. Never trust userId from the request body.)
+router.post('/select-store', authenticate, async (req, res) => {
   try {
-    const { userId, storeId } = req.body;
+    const { storeId } = req.body;
 
-    if (!userId || !storeId) {
-      return res.status(400).json({ error: 'User ID and Store ID are required' });
+    if (!storeId) {
+      return res.status(400).json({ error: 'Store ID is required' });
     }
 
-    const user = await queryOne('SELECT * FROM users WHERE id = ?', [userId]);
-    if (!user || user.role !== 'admin') {
-      return res.status(400).json({ error: 'Invalid user or not an admin' });
+    const user = await queryOne('SELECT * FROM users WHERE id = ?', [req.user.id]);
+    if (!user || user.role !== 'admin' || user.status !== 'active') {
+      return res.status(403).json({ error: 'Invalid user or not an active admin' });
     }
 
     let store;
     try {
-      store = await queryOne('SELECT * FROM stores WHERE id = ? AND status = ?', [storeId, 'active']);
+      // Only allow selecting a store the admin actually owns — otherwise an admin
+      // could mint a token scoped to another admin's store
+      store = await queryOne('SELECT * FROM stores WHERE id = ? AND status = ? AND admin_id = ?', [storeId, 'active', user.id]);
+      if (!store) {
+        return res.status(403).json({ error: 'Cửa hàng không tồn tại hoặc không thuộc quyền quản lý của bạn' });
+      }
     } catch (error) {
       // If stores table doesn't exist, allow using storeId as user.id (backward compatibility)
       const userStore = await queryOne('SELECT * FROM users WHERE id = ? AND role = ?', [storeId, 'employer']);
@@ -503,17 +513,15 @@ router.post('/select-store', async (req, res) => {
 });
 
 // Select employee (for employer after login)
-router.post('/select-employee', async (req, res) => {
+// Requires a valid token: the target user is ALWAYS the authenticated user
+// (same auth-bypass fix as /select-store — never trust userId from the body).
+router.post('/select-employee', authenticate, async (req, res) => {
   try {
-    const { userId, employeeId } = req.body;
+    const { employeeId } = req.body;
 
-    if (!userId) {
-      return res.status(400).json({ error: 'User ID is required' });
-    }
-
-    const user = await queryOne('SELECT * FROM users WHERE id = ?', [userId]);
-    if (!user || user.role !== 'employer') {
-      return res.status(400).json({ error: 'Invalid user or not an employer' });
+    const user = await queryOne('SELECT * FROM users WHERE id = ?', [req.user.id]);
+    if (!user || user.role !== 'employer' || user.status !== 'active') {
+      return res.status(403).json({ error: 'Invalid user or not an active employer' });
     }
 
     // employees.store_id references users.id, so use user.id for employees query

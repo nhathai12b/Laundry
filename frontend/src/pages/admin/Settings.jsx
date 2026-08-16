@@ -84,10 +84,16 @@ function Settings() {
         dataToSend.store_id = selectedStoreId;
       }
       
-      // Nếu chọn Bluetooth, không gửi IP và Port (không cần thiết)
+      // Chỉ gửi các trường thuộc phương thức in đang chọn
       if (dataToSend.print_method === 'bluetooth') {
         delete dataToSend.printer_ip;
         delete dataToSend.printer_port;
+        delete dataToSend.printer_com_port;
+      } else if (dataToSend.print_method === 'com') {
+        delete dataToSend.printer_ip;
+        delete dataToSend.printer_port;
+      } else {
+        delete dataToSend.printer_com_port;
       }
       
       await api.put('/settings', dataToSend);
@@ -259,11 +265,12 @@ function Settings() {
                 className="w-full px-3 py-2.5 border rounded-lg text-base"
                 required
               >
-                <option value="server">Server (IP/Port) - In qua mạng</option>
-                <option value="bluetooth">Bluetooth - In trực tiếp từ điện thoại</option>
+                <option value="server">Server (IP/Port) - In qua mạng LAN/WiFi</option>
+                <option value="com">Cổng COM - Máy in Bluetooth ghép nối với máy chủ</option>
+                <option value="bluetooth">Bluetooth trình duyệt - In trực tiếp từ điện thoại (chỉ máy in BLE)</option>
               </select>
               <p className="text-xs text-gray-500 mt-1">
-                Cửa hàng sẽ bắt buộc sử dụng phương thức in đã được cài đặt. Bluetooth chỉ hoạt động trên Android Chrome.
+                Cửa hàng sẽ bắt buộc sử dụng phương thức in đã được cài đặt. Lưu ý: "Bluetooth trình duyệt" chỉ hoạt động trên Android Chrome với máy in hỗ trợ BLE — đa số máy in nhiệt Bluetooth (Xprinter/Gprinter) dùng Bluetooth Classic nên phải dùng "Cổng COM".
               </p>
             </div>
 
@@ -304,6 +311,26 @@ function Settings() {
                   </p>
                 </div>
               </>
+            )}
+
+            {/* Cổng COM khi chọn phương thức COM (máy in Bluetooth ghép nối với máy chủ) */}
+            {settings.print_method === 'com' && (
+              <div className="mb-4">
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Cổng COM của máy in *
+                </label>
+                <input
+                  type="text"
+                  value={settings.printer_com_port || ''}
+                  onChange={(e) => setSettings({ ...settings, printer_com_port: e.target.value })}
+                  className="w-full px-3 py-2.5 border rounded-lg text-base"
+                  placeholder="COM3"
+                  required
+                />
+                <p className="text-xs text-gray-500 mt-1">
+                  Ghép nối máy in Bluetooth với máy chủ Windows trước. Xem cổng COM tại: Control Panel → Bluetooth Settings → tab COM Ports → dòng "Outgoing" của máy in.
+                </p>
+              </div>
             )}
 
             {/* Cỡ giấy luôn hiển thị vì cả 2 phương thức đều cần */}

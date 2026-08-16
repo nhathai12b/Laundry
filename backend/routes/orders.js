@@ -665,6 +665,10 @@ router.patch('/:id', auditLog('update', 'order'), async (req, res) => {
     if (!order) {
       return res.status(404).json({ error: 'Order not found' });
     }
+    // Prevent cross-store edits: only staff who can access this order may modify it
+    if (!(await userCanAccessOrder(order, req.user))) {
+      return res.status(403).json({ error: 'Bạn không có quyền sửa đơn hàng này' });
+    }
 
     // Use transaction to ensure atomicity
     await transaction(async (db) => {
@@ -808,6 +812,10 @@ router.post('/:id/status', async (req, res) => {
     const order = await queryOne('SELECT * FROM orders WHERE id = ?', [req.params.id]);
     if (!order) {
       return res.status(404).json({ error: 'Order not found' });
+    }
+    // Prevent cross-store status changes / payments booked against another store
+    if (!(await userCanAccessOrder(order, req.user))) {
+      return res.status(403).json({ error: 'Bạn không có quyền thay đổi đơn hàng này' });
     }
 
     const deliveryMethod = delivery_method || 'pickup';

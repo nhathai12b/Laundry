@@ -946,7 +946,7 @@ function Home() {
                 </div>
                 <div className={`text-right flex-shrink-0 ${order.status !== 'completed' && order.status !== 'cancelled' ? 'mt-6' : ''}`}>
                   <div className="text-sm sm:text-base font-bold text-gray-800 leading-tight">
-                    {new Intl.NumberFormat('vi-VN').format(parseFloat(order.final_amount) || parseFloat(order.total_amount) || 0)} đ
+                    {new Intl.NumberFormat('vi-VN').format(Number.isFinite(parseFloat(order.final_amount)) ? parseFloat(order.final_amount) : (parseFloat(order.total_amount) || 0))} đ
                   </div>
                   {order.discount_amount > 0 && (
                     <div className="text-[10px] text-gray-400 line-through">

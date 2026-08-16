@@ -821,11 +821,13 @@ router.get('/payroll', authorize('admin'), async (req, res) => {
         employee_name: ts.employee_name,
         hourly_rate: ts.hourly_rate || 0,
         shift_rate: ts.shift_rate || 0,
-        total_shifts: ts.total_shifts || 0,
-        total_regular_hours: ts.total_regular_hours || 0,
-        total_overtime_hours: ts.total_overtime_hours || 0,
-        total_hours: ts.total_hours || 0,
-        total_revenue: ts.total_revenue || 0,
+        // Number(): these are SUMs of DECIMAL columns (strings from mysql2);
+        // leaving them as strings makes the reduce() totals below concatenate
+        total_shifts: Number(ts.total_shifts) || 0,
+        total_regular_hours: Number(ts.total_regular_hours) || 0,
+        total_overtime_hours: Number(ts.total_overtime_hours) || 0,
+        total_hours: Number(ts.total_hours) || 0,
+        total_revenue: Number(ts.total_revenue) || 0,
         salary: Math.round(salary * 100) / 100,
       };
     });
@@ -926,8 +928,11 @@ router.get('/daily-hours', authorize('admin'), async (req, res) => {
         employeeMap[empId].daily_hours[dateKey] = 0;
       }
       
-      // Sum hours if multiple shifts in the same day
-      employeeMap[empId].daily_hours[dateKey] += ts.total_hours || 0;
+      // Sum hours if multiple shifts in the same day.
+      // Number(): total_hours comes from SUM of DECIMAL columns, which mysql2
+      // returns as a STRING — without coercion this concatenates ("8.5"+"7"→"08.57")
+      // and later crashes the UI's .toFixed() call.
+      employeeMap[empId].daily_hours[dateKey] += Number(ts.total_hours) || 0;
     });
 
     // Convert to array format with all days of the month

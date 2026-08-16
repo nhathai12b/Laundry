@@ -97,6 +97,70 @@ router.get('/', async (req, res) => {
   }
 });
 
+// Setup status for onboarding checklist: does this admin have a store,
+// products in their stores, and employees under their store accounts?
+router.get('/setup-status', authorize('admin'), async (req, res) => {
+  try {
+    // Root admin is the software vendor: no store setup applies
+    if (req.user.role === 'root') {
+      return res.json({ data: { storeCount: 0, productCount: 0, employeeCount: 0, complete: true } });
+    }
+
+    const stores = await query(
+      `SELECT id, shared_account_id FROM stores WHERE admin_id = ? AND status = 'active'`,
+      [req.user.id]
+    );
+    const storeIds = stores.map((s) => s.id);
+
+    let productCount = 0;
+    let employeeCount = 0;
+
+    if (storeIds.length > 0) {
+      const productRow = await queryOne(
+        `SELECT COUNT(*) AS count FROM products
+         WHERE status = 'active' AND (store_id IN (?) OR created_by = ?)`,
+        [storeIds, req.user.id]
+      );
+      productCount = productRow?.count || 0;
+
+      // employees.store_id references the store's employer account (users.id):
+      // dedicated accounts have users.store_id = stores.id; shared accounts are
+      // referenced via stores.shared_account_id
+      const employerRows = await query(
+        `SELECT id FROM users WHERE role = 'employer' AND store_id IN (?)`,
+        [storeIds]
+      );
+      const employerIds = [
+        ...new Set([
+          ...employerRows.map((u) => u.id),
+          ...stores.map((s) => s.shared_account_id).filter(Boolean)
+        ])
+      ];
+
+      if (employerIds.length > 0) {
+        const employeeRow = await queryOne(
+          `SELECT COUNT(*) AS count FROM employees WHERE status = 'active' AND store_id IN (?)`,
+          [employerIds]
+        );
+        employeeCount = employeeRow?.count || 0;
+      }
+    }
+
+    const storeCount = storeIds.length;
+    res.json({
+      data: {
+        storeCount,
+        productCount,
+        employeeCount,
+        complete: storeCount > 0 && productCount > 0 && employeeCount > 0
+      }
+    });
+  } catch (error) {
+    console.error('Setup status error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // Get single store
 router.get('/:id', async (req, res) => {
   try {

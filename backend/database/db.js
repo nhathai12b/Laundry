@@ -1,4 +1,5 @@
 import mysql from 'mysql2/promise';
+import bcrypt from 'bcryptjs';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
@@ -60,11 +61,17 @@ async function initializeDatabase() {
       }
     );
     
-    // Split by semicolon and execute each statement
+    // Split by semicolon and execute each statement.
+    // Strip comment lines inside each chunk instead of discarding the whole
+    // chunk — a leading "-- comment" would otherwise drop the statement below it.
     const statements = processedSchema
       .split(';')
-      .map(s => s.trim())
-      .filter(s => s.length > 0 && !s.startsWith('--'));
+      .map(s => s
+        .split('\n')
+        .filter(line => !line.trim().startsWith('--'))
+        .join('\n')
+        .trim())
+      .filter(s => s.length > 0);
 
     const connection = await pool.getConnection();
     try {
@@ -149,6 +156,25 @@ async function initializeDatabase() {
           if (error.code !== 'ER_NO_SUCH_TABLE' && error.code !== 'ER_DUP_KEYNAME') {
             console.warn(`Warning creating index ${idx.name}: ${error.message}`);
           }
+        }
+      }
+      // Seed a root admin when the users table is empty (fresh database), so a
+      // bare `npm run dev` yields a loginable system without requiring init-db.
+      // Guarded by UNIQUE(phone): a concurrent seeder loses with ER_DUP_ENTRY.
+      try {
+        const [userCount] = await connection.query('SELECT COUNT(*) AS count FROM users');
+        if (userCount[0].count === 0) {
+          const passwordHash = await bcrypt.hash('admin123', await bcrypt.genSalt(10));
+          await connection.query(`
+            INSERT INTO users (name, phone, password_hash, role, status, store_id)
+            VALUES (?, ?, ?, 'root', 'active', NULL)
+          `, ['Root Admin', 'admin', passwordHash]);
+          console.log('✅ Users table was empty — created default root admin (phone: admin, password: admin123)');
+          console.log('⚠️  Change this password before exposing the server to anyone else.');
+        }
+      } catch (error) {
+        if (error.code !== 'ER_DUP_ENTRY') {
+          console.warn(`Warning seeding default root admin: ${error.message}`);
         }
       }
     } finally {

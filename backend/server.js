@@ -22,11 +22,35 @@ import cashDrawerRoutes from './routes/cashDrawer.js';
 import sheetsRoutes from './routes/sheets.js';
 import discordInteractionsRoutes from './routes/discordInteractions.js';
 import { getMemoryUsageFormatted } from './utils/memoryMonitor.js';
+import { duplicateRequestGuard } from './middleware/duplicateRequestGuard.js';
 
 dotenv.config();
 
+// Validate JWT secret before accepting any traffic — a missing/placeholder/short
+// secret makes every session token forgeable
+const WEAK_JWT_SECRETS = ['change_this_to_a_strong_random_value', 'secret', 'jwt_secret', 'changeme'];
+const jwtSecret = process.env.JWT_SECRET || '';
+if (!jwtSecret || jwtSecret.length < 32 || WEAK_JWT_SECRETS.includes(jwtSecret)) {
+  if (process.env.NODE_ENV === 'production') {
+    console.error('❌ JWT_SECRET is missing, too short (<32 chars), or a known placeholder.');
+    console.error('💡 Generate one with: node -e "console.log(require(\'crypto\').randomBytes(48).toString(\'base64url\'))"');
+    process.exit(1);
+  } else {
+    console.warn('⚠️  JWT_SECRET is weak or a placeholder — tokens are forgeable. Set a strong value in .env before deploying.');
+  }
+}
+
 const app = express();
 const PORT = process.env.PORT || 5000;
+const duplicateGuard = duplicateRequestGuard();
+
+// Behind a reverse proxy (nginx on VPS), req.ip is the proxy address unless
+// trust proxy is set — which would make per-IP rate limiting and login lockout
+// share one bucket for ALL clients. Enable only when actually behind a proxy,
+// since trusting X-Forwarded-For from direct clients lets them spoof their IP.
+if (process.env.TRUST_PROXY === 'true') {
+  app.set('trust proxy', 1);
+}
 
 // Security Headers - Bảo vệ khỏi XSS, clickjacking, MIME sniffing
 app.use(helmet({
@@ -82,6 +106,21 @@ app.use(express.json({
   },
 }));
 app.use(express.urlencoded({ extended: true, limit: '500kb' }));
+
+// Block accidental duplicate submissions (double-clicked "OK" buttons):
+// identical mutating requests within a short window replay the first response
+// instead of creating duplicate records. Excluded:
+//  - auth: own protections
+//  - discord/integrations: external webhooks with own retry semantics
+//  - payments: two legitimate instalments of the same amount are common and
+//    MUST both record — collapsing them would short the cash drawer
+//  - print: replaying "sent to printer" without actually printing loses a bill
+const DUPLICATE_GUARD_SKIP = ['/auth/', '/discord/', '/integrations/', '/print/'];
+app.use('/api', (req, res, next) => {
+  if (DUPLICATE_GUARD_SKIP.some((p) => req.path.startsWith(p))) return next();
+  if (/^\/orders\/\d+\/payments$/.test(req.path)) return next();
+  return duplicateGuard(req, res, next);
+});
 
 // Routes
 app.use('/api/auth', authRoutes);

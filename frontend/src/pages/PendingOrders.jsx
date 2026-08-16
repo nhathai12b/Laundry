@@ -85,10 +85,14 @@ function PendingOrders() {
   const handleCompleteAsDebt = async (order) => {
     if (!confirm(`Chuyển đơn ${order.code} sang ghi nợ? Đơn sẽ không tính doanh thu cho đến khi nhân viên bấm "Đã thanh toán" trong menu Ghi nợ.`)) return;
     try {
-      await api.post(`/orders/${order.id}/status`, { status: 'completed' });
-      await api.patch(`/orders/${order.id}/debt`);
+      // Completing with amount_paid:0 already marks the order as debt; the extra
+      // PATCH /debt used to 400 and make a successful action report failure.
+      await api.post(`/orders/${order.id}/status`, {
+        status: 'completed',
+        amount_paid: 0,
+        delivery_method: 'pickup',
+      });
       loadPendingOrders();
-
     } catch (error) {
       alert(error.response?.data?.error || 'Thao tác thất bại');
     }

@@ -702,8 +702,10 @@ router.get('/revenue-by-store', authorize('admin'), async (req, res) => {
         employee_count: row.employee_count,
         shift_count: row.shift_count,
       };
-      storeMap[row.store_id].total_revenue += row.daily_revenue;
-      storeMap[row.store_id].total_shifts += row.shift_count;
+      // Number(): daily_revenue is a SUM of DECIMAL → string from mysql2;
+      // without coercion this concatenates instead of adding
+      storeMap[row.store_id].total_revenue += Number(row.daily_revenue) || 0;
+      storeMap[row.store_id].total_shifts += Number(row.shift_count) || 0;
     });
 
     // Convert to array and fill missing days

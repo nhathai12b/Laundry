@@ -292,7 +292,7 @@ function Customers() {
                       <td className="px-4 py-3 text-gray-600">{customer.phone}</td>
                       <td className="px-4 py-3 text-right text-gray-600">{customer.total_orders || 0}</td>
                       <td className="px-4 py-3 text-right font-bold text-gray-800">
-                        {new Intl.NumberFormat('vi-VN').format(customer.total_spent || 0)} đ
+                        {new Intl.NumberFormat('vi-VN').format(parseFloat(customer.total_spent) || 0)} đ
                       </td>
                       <td className="px-4 py-3 text-gray-600 text-sm">{customer.note || '-'}</td>
                     </tr>
@@ -307,7 +307,7 @@ function Customers() {
                       {customers.reduce((sum, c) => sum + (c.total_orders || 0), 0)}
                     </td>
                     <td className="px-4 py-3 text-right text-green-600">
-                      {new Intl.NumberFormat('vi-VN').format(customers.reduce((sum, c) => sum + (c.total_spent || 0), 0))} đ
+                      {new Intl.NumberFormat('vi-VN').format(customers.reduce((sum, c) => sum + (parseFloat(c.total_spent) || 0), 0))} đ
                     </td>
                     <td className="px-4 py-3"></td>
                   </tr>

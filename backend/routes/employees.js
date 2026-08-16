@@ -258,9 +258,21 @@ router.delete('/:id', async (req, res) => {
 
     // Verify store ownership
     // For employer: employees.store_id references users.id, so use req.user.id
-    // For admin: can delete employees from their store chain
     if (req.user.role === 'employer' && employee.store_id !== req.user.id) {
       return res.status(403).json({ error: 'You can only delete employees of your own account' });
+    }
+    // For admin: employee must belong to a store account in the admin's chain
+    // (this check existed in PATCH but was missing here — cross-chain delete gap)
+    if (req.user.role === 'admin') {
+      const employeeUser = await queryOne(`
+        SELECT u.id, s.admin_id
+        FROM users u
+        LEFT JOIN stores s ON u.store_id = s.id
+        WHERE u.id = ?
+      `, [employee.store_id]);
+      if (!employeeUser || !employeeUser.admin_id || employeeUser.admin_id !== req.user.id) {
+        return res.status(403).json({ error: 'Bạn chỉ có thể xóa nhân viên trong chuỗi cửa hàng của mình' });
+      }
     }
 
     // Use transaction to ensure atomicity

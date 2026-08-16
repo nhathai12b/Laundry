@@ -306,28 +306,33 @@ function Stores() {
 
     try {
       if (editingStore) {
-        // When editing, only update store info (not account)
-        const { account_phone, account_password, use_shared_account, ...storeData } = formData;
-        if (!storeData.shared_account_id) {
-          storeData.shared_account_id = null;
-        }
+        // When editing, only update store info (name/address/phone/status).
+        // Do NOT touch account fields or shared_account_id — the form has no UI
+        // for them, and forcing shared_account_id=null here wiped the link for
+        // stores that use a shared account.
+        const storeData = {
+          name: formData.name,
+          address: formData.address,
+          phone: formData.phone,
+          status: formData.status,
+        };
         await api.patch(`/stores/${editingStore.id}`, storeData);
         alert('Cập nhật cửa hàng thành công!');
       } else {
-        // When creating, always create new account
-        // Sử dụng số điện thoại cửa hàng cho tài khoản
+        // When creating, always create a new employer account.
+        // The store phone doubles as the account login phone.
         if (!formData.phone.trim() || !formData.account_password.trim()) {
           alert('Vui lòng nhập đầy đủ thông tin (Tên cửa hàng, SĐT, Mật khẩu)');
           return;
         }
-        // Copy số điện thoại cửa hàng sang account_phone
-        formData.account_phone = formData.phone;
-        
-        const submitData = { ...formData };
-        // Remove fields not needed for backend
-        delete submitData.shared_account_id;
-        delete submitData.use_shared_account;
-        
+        const submitData = {
+          name: formData.name,
+          address: formData.address,
+          phone: formData.phone,
+          account_phone: formData.phone,
+          account_password: formData.account_password,
+        };
+
         const response = await api.post('/stores', submitData);
         // Debug log removed for security
         alert('Tạo cửa hàng thành công!');

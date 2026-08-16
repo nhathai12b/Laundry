@@ -93,17 +93,25 @@ const connectAndSend = async (device, escPosDataBase64) => {
     data[i] = binaryString.charCodeAt(i);
   }
 
-  const useWithoutResponse = characteristic.properties.writeWithoutResponse;
+  // writeValueWithoutResponse là API đúng và nhanh (không chờ ACK từng gói);
+  // writeValue(chunk, {type}) cũ truyền option không tồn tại nên mọi gói đều bị ghi kiểu chờ ACK
+  const useWithoutResponse =
+    characteristic.properties.writeWithoutResponse &&
+    typeof characteristic.writeValueWithoutResponse === 'function';
   const chunkSize = 100;
   for (let i = 0; i < data.length; i += chunkSize) {
     const chunk = data.slice(i, i + chunkSize);
     if (useWithoutResponse) {
-      await characteristic.writeValue(chunk, { type: 'without-response' });
+      await characteristic.writeValueWithoutResponse(chunk);
+      // Nghỉ ngắn giữa các gói để buffer máy in không tràn (không có ACK để tự điều tiết)
+      if (i + chunkSize < data.length) {
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+    } else if (typeof characteristic.writeValueWithResponse === 'function') {
+      // Ghi có ACK: BLE tự điều tiết, không cần delay thủ công
+      await characteristic.writeValueWithResponse(chunk);
     } else {
       await characteristic.writeValue(chunk);
-    }
-    if (i + chunkSize < data.length) {
-      await new Promise(resolve => setTimeout(resolve, 15));
     }
   }
 
@@ -126,7 +134,11 @@ const printViaBluetooth = async (escPosDataBase64) => {
       );
     }
     if (error.name === 'SecurityError') return new Error('Lỗi bảo mật. Vui lòng cho phép truy cập Bluetooth.');
-    if (error.name === 'NetworkError') return new Error('Lỗi kết nối Bluetooth. Vui lòng thử lại.');
+    if (error.name === 'NetworkError') {
+      return new Error(
+        'Không kết nối được với máy in. Nguyên nhân thường gặp: máy in dùng Bluetooth Classic (SPP) — trình duyệt chỉ kết nối được máy in BLE. Với máy in Xprinter/Gprinter Bluetooth: ghép nối máy in với máy chủ Windows rồi chuyển Cài đặt → Phương thức in sang "Cổng COM".'
+      );
+    }
     return new Error(`Lỗi kết nối Bluetooth: ${error.message || 'Lỗi không xác định'}`);
   };
 
@@ -171,12 +183,22 @@ const printViaBluetooth = async (escPosDataBase64) => {
 };
 
 /**
- * Get print settings from server
+ * Get print settings from server.
+ * Cache 30s: bỏ một round-trip mỗi lần in; admin đổi cài đặt in sẽ có hiệu lực sau tối đa 30s.
  */
+let cachedPrintSettings = null;
+let cachedPrintSettingsAt = 0;
+const PRINT_SETTINGS_CACHE_MS = 30 * 1000;
+
 const getPrintSettings = async () => {
+  if (cachedPrintSettings && Date.now() - cachedPrintSettingsAt < PRINT_SETTINGS_CACHE_MS) {
+    return cachedPrintSettings;
+  }
   try {
     const response = await api.get('/settings');
-    return response.data.data || {};
+    cachedPrintSettings = response.data.data || {};
+    cachedPrintSettingsAt = Date.now();
+    return cachedPrintSettings;
   } catch (error) {
     console.error('Error loading print settings:', error);
     return {

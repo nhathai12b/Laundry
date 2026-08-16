@@ -74,7 +74,13 @@ router.get('/', async (req, res) => {
 // Update settings (Admin or Employer)
 router.put('/', async (req, res) => {
   try {
-    const { printer_ip, printer_port, paper_size, print_method, bill_store_name, bill_store_address, bill_store_phone, bill_footer_message, bill_qr_image, bill_qr_content, bill_bottom_padding_mm, store_id } = req.body;
+    const { printer_ip, printer_port, printer_com_port, paper_size, print_method, bill_store_name, bill_store_address, bill_store_phone, bill_footer_message, bill_qr_image, bill_qr_content, bill_bottom_padding_mm, store_id } = req.body;
+
+    // COM port: "COM3" on Windows, or a /dev/tty* path on Linux
+    const isValidComPort = (value) => /^COM\d+$/i.test(String(value).trim()) || /^\/dev\/[\w./-]+$/.test(String(value).trim());
+    if (printer_com_port !== undefined && String(printer_com_port).trim() !== '' && !isValidComPort(printer_com_port)) {
+      return res.status(400).json({ error: 'Cổng COM không hợp lệ. Ví dụ hợp lệ: COM3' });
+    }
     
     // Validate inputs
     if (printer_ip !== undefined) {
@@ -99,9 +105,9 @@ router.put('/', async (req, res) => {
     }
 
     if (print_method !== undefined) {
-      const methodValidation = validateEnum(print_method, ['server', 'bluetooth'], 'Phương thức in');
+      const methodValidation = validateEnum(print_method, ['server', 'bluetooth', 'com'], 'Phương thức in');
       if (!methodValidation.valid) {
-        return res.status(400).json({ error: 'Phương thức in không hợp lệ. Chỉ chấp nhận: server hoặc bluetooth' });
+        return res.status(400).json({ error: 'Phương thức in không hợp lệ. Chỉ chấp nhận: server, bluetooth hoặc com' });
       }
     }
     
@@ -160,8 +166,18 @@ router.put('/', async (req, res) => {
           ON DUPLICATE KEY UPDATE value = VALUES(value)
         `, ['paper_size', paperSizeValue, targetStoreId]);
       }
+      if (printer_com_port !== undefined) {
+        const comSanitized = sanitizeString(String(printer_com_port).trim().toUpperCase().startsWith('COM')
+          ? String(printer_com_port).trim().toUpperCase()
+          : String(printer_com_port).trim());
+        await db.execute(`
+          INSERT INTO settings (\`key\`, value, store_id)
+          VALUES (?, ?, ?)
+          ON DUPLICATE KEY UPDATE value = VALUES(value)
+        `, ['printer_com_port', comSanitized.value, targetStoreId]);
+      }
       if (print_method !== undefined) {
-        const methodValidation = validateEnum(print_method, ['server', 'bluetooth'], 'Phương thức in');
+        const methodValidation = validateEnum(print_method, ['server', 'bluetooth', 'com'], 'Phương thức in');
         const methodValue = methodValidation.valid ? methodValidation.value : 'server';
         await db.execute(`
           INSERT INTO settings (\`key\`, value, store_id)

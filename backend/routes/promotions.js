@@ -339,8 +339,11 @@ router.patch('/:id', authorize('admin'), auditLog('update', 'promotion'), async 
         return res.status(400).json({ error: `Giá trị khuyến mãi: ${validation.error}` });
       }
       
-      // Validate percentage discount (must be <= 100)
-      if (promotion.discount_type === 'percentage' && validation.value > 100) {
+      // Validate percentage discount (must be <= 100). Use the INCOMING
+      // discount_type when it is being changed in the same request — otherwise
+      // switching fixed→percentage with a value >100 slips past the cap
+      const effectiveType = discount_type !== undefined ? discount_type : promotion.discount_type;
+      if (effectiveType === 'percentage' && validation.value > 100) {
         return res.status(400).json({ error: 'Phần trăm giảm giá không được vượt quá 100%' });
       }
       

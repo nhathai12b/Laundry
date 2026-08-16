@@ -1,5 +1,5 @@
 import express from 'express';
-import { query, queryOne, execute } from '../database/db.js';
+import { query, queryOne, execute, transaction } from '../database/db.js';
 import { hashPassword } from '../utils/helpers.js';
 import { authenticate, authorize } from '../middleware/auth.js';
 import { auditLog } from '../middleware/audit.js';
@@ -7,6 +7,25 @@ import { validatePositiveNumber, sanitizeString, validateRequiredString } from '
 import { validatePasswordStrength, containsUserInfo } from '../utils/passwordValidator.js';
 
 const router = express.Router();
+
+/**
+ * Can a non-root admin manage this target user?
+ * Root: yes. Admin: only employer accounts whose store belongs to their chain
+ * (stores.admin_id = admin.id), matching the GET /users list scoping.
+ * Returns false for cross-chain targets and for admin/root targets touched by a
+ * non-root admin (those are gated separately by role).
+ */
+async function adminCanManageUser(targetUser, requester) {
+  if (requester.role === 'root') return true;
+  if (requester.role !== 'admin') return false;
+  if (targetUser.role !== 'employer') return false;
+  if (!targetUser.store_id) return false;
+  const row = await queryOne(
+    'SELECT 1 FROM stores WHERE id = ? AND admin_id = ?',
+    [targetUser.store_id, requester.id]
+  );
+  return Boolean(row);
+}
 
 /** Add months to a date without day overflow (e.g. Jan 31 + 1 month = Feb 28, not Mar 2) */
 function addMonths(date, months) {
@@ -206,13 +225,20 @@ router.get('/', authorize('admin'), async (req, res) => {
 router.get('/:id', authorize('admin'), async (req, res) => {
   try {
     const user = await queryOne(`
-      SELECT id, name, phone, role, status, started_at, hourly_rate, shift_rate, created_at, updated_at
+      SELECT id, name, phone, role, status, started_at, hourly_rate, shift_rate, created_at, updated_at, store_id
       FROM users
       WHERE id = ?
     `, [req.params.id]);
 
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Scope to chain: a non-root admin may only read employer accounts in their
+    // own store chain (the list endpoint is scoped; this one was not)
+    if (req.user.role !== 'root' && parseInt(req.params.id, 10) !== req.user.id
+        && !(await adminCanManageUser(user, req.user))) {
+      return res.status(403).json({ error: 'Bạn không có quyền xem tài khoản này' });
     }
 
     res.json({ data: user });
@@ -383,6 +409,16 @@ router.patch('/:id', authorize('admin'), auditLog('update', 'user'), async (req,
       return res.json({ message: 'Đổi mật khẩu thành công' });
     }
 
+    // Non-admin target (employer): a non-root admin may only touch accounts in
+    // their own store chain — prevents editing/escalating other admins' staff
+    if (oldUser.role !== 'admin' && !(await adminCanManageUser(oldUser, req.user))) {
+      return res.status(403).json({ error: 'Bạn không có quyền cập nhật tài khoản này' });
+    }
+    // Never allow a non-root admin to change a role (privilege-escalation guard)
+    if (role !== undefined && role !== oldUser.role && req.user.role !== 'root') {
+      return res.status(403).json({ error: 'Bạn không có quyền thay đổi vai trò tài khoản' });
+    }
+
     // Check if phone exists (if changed)
     // Không bắt buộc phone cho admin, chỉ check duplicate nếu có
     if (phone !== undefined) {
@@ -550,32 +586,37 @@ router.delete('/:id', authorize('admin'), auditLog('delete', 'user'), async (req
       return res.status(403).json({ error: 'Chỉ root admin mới có thể xóa admin' });
     }
 
+    // Non-admin target (employer): a non-root admin may only delete accounts in
+    // their own store chain
+    if (user.role !== 'admin' && !(await adminCanManageUser(user, req.user))) {
+      return res.status(403).json({ error: 'Bạn không có quyền xóa tài khoản này' });
+    }
+
     // Don't allow deleting yourself
     if (user.id === req.user.id) {
       return res.status(400).json({ error: 'Cannot delete yourself' });
     }
 
-    // Delete related records first to avoid foreign key constraints
-    try {
-      await execute('DELETE FROM employees WHERE store_id = ?', [user.id]);
-    } catch (error) {
-      // Warning log removed for security
+    // Block deletion when the account has order history: orders.created_by is
+    // ON DELETE RESTRICT, and cascading these deletes non-atomically previously
+    // destroyed payroll/employees before failing on the user row
+    const orderRef = await queryOne(
+      'SELECT 1 FROM orders WHERE created_by = ? OR updated_by = ? OR assigned_to = ? LIMIT 1',
+      [user.id, user.id, user.id]
+    );
+    if (orderRef) {
+      return res.status(400).json({
+        error: 'Không thể xóa tài khoản đã từng tạo/xử lý đơn hàng. Hãy vô hiệu hóa tài khoản thay vì xóa.'
+      });
     }
 
-    try {
-      await execute('DELETE FROM timesheets WHERE user_id = ?', [user.id]);
-    } catch (error) {
-      // Warning log removed for security
-    }
-
-    try {
-      await execute('DELETE FROM audit_logs WHERE user_id = ?', [user.id]);
-    } catch (error) {
-      // Warning log removed for security
-    }
-
-    // Delete user
-    await execute('DELETE FROM users WHERE id = ?', [req.params.id]);
+    // Cascade related rows atomically so a mid-way failure rolls back
+    await transaction(async (db) => {
+      await db.execute('DELETE FROM employees WHERE store_id = ?', [user.id]);
+      await db.execute('DELETE FROM timesheets WHERE user_id = ?', [user.id]);
+      await db.execute('DELETE FROM audit_logs WHERE user_id = ?', [user.id]);
+      await db.execute('DELETE FROM users WHERE id = ?', [req.params.id]);
+    });
     res.json({ message: 'User deleted successfully' });
   } catch (error) {
     console.error('Delete user error:', error);

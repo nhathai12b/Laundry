@@ -5,6 +5,7 @@ import { isAdmin, isRoot, isMobileScreen } from '../utils/auth';
 import { format, startOfMonth, endOfMonth, startOfYear, endOfYear } from 'date-fns';
 import { getSavedFilters, saveFilters } from '../utils/filterStorage';
 import { getLocalDateRangeUtc, getLocalMonthRangeUtc, getLocalYearRangeUtc } from '../utils/dateTime';
+import SetupChecklist from '../components/SetupChecklist';
 
 function Dashboard() {
   const [stats, setStats] = useState({
@@ -155,7 +156,7 @@ function Dashboard() {
         }
         const debtRes = await api.get(`/orders?${params.toString()}`);
         const debtList = debtRes.data.data || [];
-        debtOrders = debtList.reduce((s, o) => s + (parseFloat(o.final_amount) || parseFloat(o.total_amount) || 0), 0);
+        debtOrders = debtList.reduce((s, o) => s + (Number.isFinite(parseFloat(o.final_amount)) ? parseFloat(o.final_amount) : (parseFloat(o.total_amount) || 0)), 0);
       } catch (error) {
         console.error('Error loading debt orders:', error);
       }
@@ -353,6 +354,7 @@ function Dashboard() {
 
   return (
     <div className="space-y-6">
+      <SetupChecklist />
       <div className="mb-6 flex flex-wrap items-end gap-4 justify-between">
         <div>
           <h1 className="text-3xl font-bold text-gray-900 mb-2">Dashboard</h1>

@@ -3,9 +3,16 @@ import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import dotenv from 'dotenv';
-import { hashPassword } from '../utils/helpers.js';
+// Import bcrypt directly instead of utils/helpers.js: helpers pulls in database/db.js,
+// whose auto-init would run CONCURRENTLY with this script's own initialization
+import bcrypt from 'bcryptjs';
 
 dotenv.config();
+
+const hashPassword = async (password) => {
+  const salt = await bcrypt.genSalt(10);
+  return bcrypt.hash(password, salt);
+};
 
 const DB_NAME = process.env.MYSQL_DATABASE || 'laundry66';
 

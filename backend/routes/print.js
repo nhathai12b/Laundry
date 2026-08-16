@@ -1,4 +1,5 @@
 import express from 'express';
+import net from 'net';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
@@ -56,42 +57,180 @@ if (!fontRegistered) {
 const router = express.Router();
 router.use(authenticate);
 
+// Load order + items + store-scoped settings for bill rendering
+async function loadBillPayload(orderId) {
+  const order = await queryOne(
+    `SELECT o.*, c.name as customer_name, c.phone as customer_phone
+     FROM orders o
+     LEFT JOIN customers c ON o.customer_id=c.id
+     WHERE o.id=?`,
+    [orderId]
+  );
+  if (!order) return null;
+
+  const items = await query(
+    `SELECT oi.*, p.name as product_name, p.unit as product_unit
+     FROM order_items oi
+     JOIN products p ON oi.product_id=p.id
+     WHERE oi.order_id=?`,
+    [orderId]
+  );
+
+  const storeId = order.store_id ?? null;
+  const settingsRows = await query(
+    'SELECT `key`, value FROM settings WHERE store_id = ? OR (store_id IS NULL AND ? IS NULL)',
+    [storeId, storeId]
+  );
+  const settings = {};
+  settingsRows.forEach((s) => { settings[s.key] = s.value; });
+  const paperSize = settings.paper_size || '80mm';
+
+  return { order, items, settings, paperSize };
+}
+
 // GET /bill-data/:orderId - returns base64 ESC/POS bitmap for Bluetooth printing
 router.get('/bill-data/:orderId', async (req, res) => {
   try {
     const { orderId } = req.params;
     if (!validateId(orderId).valid) return res.status(400).json({ error: 'Order ID không hợp lệ' });
 
-    const order = await queryOne(
-      `SELECT o.*, c.name as customer_name, c.phone as customer_phone
-       FROM orders o
-       LEFT JOIN customers c ON o.customer_id=c.id
-       WHERE o.id=?`,
-      [orderId]
-    );
-    if (!order) return res.status(404).json({ error: 'Order not found' });
+    const payload = await loadBillPayload(orderId);
+    if (!payload) return res.status(404).json({ error: 'Không tìm thấy đơn hàng' });
 
-    const items = await query(
-      `SELECT oi.*, p.name as product_name, p.unit as product_unit
-       FROM order_items oi
-       JOIN products p ON oi.product_id=p.id
-       WHERE oi.order_id=?`,
-      [orderId]
-    );
-
-    const storeId = order.store_id ?? null;
-    const settingsRows = await query(
-      'SELECT `key`, value FROM settings WHERE store_id = ? OR (store_id IS NULL AND ? IS NULL)',
-      [storeId, storeId]
-    );
-    const settings = {};
-    settingsRows.forEach((s) => { settings[s.key] = s.value; });
-    const paperSize = settings.paper_size || '80mm';
-
-    const billData = await generateBill(order, items, settings, paperSize);
-    res.json({ success: true, data: billData.toString('base64'), paperSize });
+    const billData = await generateBill(payload.order, payload.items, payload.settings, payload.paperSize);
+    res.json({ success: true, data: billData.toString('base64'), paperSize: payload.paperSize });
   } catch (err) {
     res.status(500).json({ error: 'Lỗi khi tạo bill' });
+  }
+});
+
+// Send raw ESC/POS bytes to a network printer (RAW/JetDirect, usually port 9100)
+function sendToNetworkPrinter(host, port, data, timeoutMs = 10000) {
+  return new Promise((resolve, reject) => {
+    const socket = new net.Socket();
+    let settled = false;
+    const fail = (message) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      reject(new Error(message));
+    };
+    socket.setTimeout(timeoutMs);
+    socket.on('timeout', () => fail(`Hết thời gian chờ kết nối máy in tại ${host}:${port}. Kiểm tra máy in đã bật và cùng mạng với máy chủ.`));
+    socket.on('error', (err) => {
+      if (err.code === 'ECONNREFUSED') {
+        fail(`Máy in tại ${host}:${port} từ chối kết nối. Kiểm tra IP và cổng trong Cài đặt (thường là 9100).`);
+      } else if (err.code === 'EHOSTUNREACH' || err.code === 'ETIMEDOUT' || err.code === 'ENETUNREACH') {
+        fail(`Không tìm thấy máy in tại ${host}:${port}. Kiểm tra máy in đã bật và IP đúng chưa.`);
+      } else if (err.code === 'ENOTFOUND') {
+        fail(`Địa chỉ máy in "${host}" không hợp lệ.`);
+      } else {
+        fail(`Lỗi kết nối máy in: ${err.message}`);
+      }
+    });
+    socket.connect(port, host, () => {
+      socket.end(data, () => {
+        if (!settled) {
+          settled = true;
+          resolve();
+        }
+      });
+    });
+  });
+}
+
+// Send raw ESC/POS bytes to a serial (COM) port — used for Bluetooth printers
+// paired with the server machine (Windows exposes SPP printers as COM ports)
+async function sendToComPort(comPath, data) {
+  let SerialPort;
+  try {
+    ({ SerialPort } = await import('serialport'));
+  } catch (_) {
+    throw new Error('Thư viện serialport chưa được cài trên máy chủ. Chạy: npm install serialport');
+  }
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const fail = (message) => {
+      if (settled) return;
+      settled = true;
+      try { port.close(() => {}); } catch (_) {}
+      reject(new Error(message));
+    };
+    // High baud: Bluetooth virtual COM ports usually ignore it, but some drivers
+    // throttle to the configured rate — 9600 would take ~40s for a 38KB bill
+    const port = new SerialPort({ path: comPath, baudRate: 115200, autoOpen: false });
+    port.on('error', (err) => fail(`Lỗi cổng ${comPath}: ${err.message}`));
+    port.open((err) => {
+      if (err) {
+        const msg = String(err.message || '');
+        if (msg.includes('File not found') || msg.includes('cannot find')) {
+          return fail(`Không tìm thấy cổng ${comPath}. Kiểm tra máy in đã ghép nối Bluetooth với máy chủ và đúng cổng COM (xem trong Bluetooth Settings → COM Ports).`);
+        }
+        if (msg.includes('Access denied') || msg.includes('Permission denied')) {
+          return fail(`Cổng ${comPath} đang bị chương trình khác chiếm dụng. Đóng phần mềm khác đang dùng máy in rồi thử lại.`);
+        }
+        return fail(`Không mở được cổng ${comPath}: ${msg}`);
+      }
+      port.write(data, (writeErr) => {
+        if (writeErr) return fail(`Lỗi ghi dữ liệu ra ${comPath}: ${writeErr.message}`);
+        port.drain((drainErr) => {
+          if (drainErr) return fail(`Lỗi gửi dữ liệu ra ${comPath}: ${drainErr.message}`);
+          port.close(() => {
+            if (!settled) {
+              settled = true;
+              resolve();
+            }
+          });
+        });
+      });
+    });
+  });
+}
+
+// POST /bill/:orderId - print via server: send ESC/POS to the printer
+// configured in settings — network printer (printer_ip/printer_port) or
+// COM port (printer_com_port, print_method 'com')
+router.post('/bill/:orderId', async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    if (!validateId(orderId).valid) return res.status(400).json({ error: 'Order ID không hợp lệ' });
+
+    const payload = await loadBillPayload(orderId);
+    if (!payload) return res.status(404).json({ error: 'Không tìm thấy đơn hàng' });
+
+    const billBitmap = await generateBill(payload.order, payload.items, payload.settings, payload.paperSize);
+    const escPosJob = Buffer.concat([
+      Buffer.from([0x1b, 0x40]),             // ESC @ : reset printer
+      billBitmap,
+      Buffer.from([0x1b, 0x64, 0x03]),       // ESC d 3 : feed 3 lines
+      Buffer.from([0x1d, 0x56, 0x42, 0x00])  // GS V B 0: partial cut
+    ]);
+
+    if (payload.settings.print_method === 'com') {
+      const comPort = (payload.settings.printer_com_port || '').trim();
+      if (!comPort) {
+        return res.status(400).json({
+          error: 'Chưa cấu hình cổng COM. Vào Cài đặt → nhập cổng COM của máy in (ví dụ COM3).'
+        });
+      }
+      await sendToComPort(comPort, escPosJob);
+      return res.json({ success: true, message: 'Đã gửi bill tới máy in qua cổng COM' });
+    }
+
+    const printerIp = (payload.settings.printer_ip || '').trim();
+    const printerPort = parseInt(payload.settings.printer_port, 10) || 9100;
+    if (!printerIp) {
+      return res.status(400).json({
+        error: 'Chưa cấu hình IP máy in. Vào Cài đặt → nhập IP máy in (in qua máy chủ chỉ dùng được với máy in mạng LAN/WiFi).'
+      });
+    }
+
+    await sendToNetworkPrinter(printerIp, printerPort, escPosJob);
+    res.json({ success: true, message: 'Đã gửi bill tới máy in' });
+  } catch (err) {
+    console.error('Server print error:', err.message);
+    res.status(502).json({ error: err.message || 'Lỗi khi in bill qua máy chủ' });
   }
 });
 

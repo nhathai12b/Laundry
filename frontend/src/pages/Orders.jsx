@@ -204,9 +204,15 @@ function Orders() {
   const handleMarkDebt = async (order) => {
     if (!confirm(`Chuyển đơn ${order.code} sang ghi nợ? Đơn sẽ không tính doanh thu cho đến khi nhân viên bấm "Đã thanh toán" trong menu Ghi nợ.`)) return;
     try {
+      // Completing with amount_paid:0 already flags the order as debt server-side.
+      // The old code then also PATCHed /debt, which 400s ("đã ở trạng thái ghi nợ")
+      // and made a successful action always alert failure.
       if (order.status !== 'completed') {
-        await api.post(`/orders/${order.id}/status`, { status: 'completed' });
-        await api.patch(`/orders/${order.id}/debt`);
+        await api.post(`/orders/${order.id}/status`, {
+          status: 'completed',
+          amount_paid: 0,
+          delivery_method: 'pickup',
+        });
       } else {
         await api.patch(`/orders/${order.id}/debt`);
       }

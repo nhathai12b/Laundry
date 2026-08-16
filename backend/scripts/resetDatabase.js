@@ -3,9 +3,16 @@ import dotenv from 'dotenv';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
-import { hashPassword } from '../utils/helpers.js';
+// Import bcrypt directly instead of utils/helpers.js: helpers pulls in database/db.js,
+// whose auto-init would run CONCURRENTLY with this reset (drop/create racing each other)
+import bcrypt from 'bcryptjs';
 
 dotenv.config();
+
+const hashPassword = async (password) => {
+  const salt = await bcrypt.genSalt(10);
+  return bcrypt.hash(password, salt);
+};
 
 // Create connection without database first
 const tempPool = mysql.createPool({
