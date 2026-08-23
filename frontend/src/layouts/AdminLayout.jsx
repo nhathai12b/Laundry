@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { Outlet, Link, useNavigate, useLocation } from 'react-router-dom';
 import { clearAuth, getAuth, isRoot } from '../utils/auth';
 import api from '../utils/api';
+import '../styles/premium.css';
 
 const DAYS_WARNING = 14; // Cảnh báo khi còn <= 14 ngày
 

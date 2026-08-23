@@ -4,6 +4,9 @@ const BLUETOOTH_PRINTER_NAME_KEY = 'laundry_bluetooth_printer_name';
 
 /** Cached Bluetooth printer device — dùng lại trong phiên hiện tại; đóng Chrome thì mất, dùng tên lưu để filter lần sau */
 let cachedBluetoothDevice = null;
+let cachedGattServer = null;
+let cachedCharacteristic = null;
+let gattConnectionPromise = null;
 
 const getSavedPrinterName = () => {
   try {
@@ -18,6 +21,12 @@ const setSavedPrinterName = (name) => {
     if (name) localStorage.setItem(BLUETOOTH_PRINTER_NAME_KEY, name);
     else localStorage.removeItem(BLUETOOTH_PRINTER_NAME_KEY);
   } catch (_) {}
+};
+
+const clearGattCache = () => {
+  cachedGattServer = null;
+  cachedCharacteristic = null;
+  gattConnectionPromise = null;
 };
 
 /**
@@ -44,13 +53,7 @@ const KNOWN_SERVICE_IDS = [
   '0000fff0-0000-1000-8000-00805f9b34fb',
 ];
 
-/**
- * Connect to device's GATT, find writable characteristic, send ESC/POS data
- */
-const connectAndSend = async (device, escPosDataBase64) => {
-  const server = await device.gatt.connect();
-  let characteristic = null;
-
+const findWritableCharacteristic = async (server) => {
   for (const serviceId of KNOWN_SERVICE_IDS) {
     try {
       const svc = await server.getPrimaryService(serviceId);
@@ -58,69 +61,97 @@ const connectAndSend = async (device, escPosDataBase64) => {
         try {
           const char = await svc.getCharacteristic(charId);
           if (char.properties.write || char.properties.writeWithoutResponse) {
-            characteristic = char;
-            break;
+            return char;
           }
         } catch (_) { continue; }
       }
-      if (characteristic) break;
     } catch (_) { continue; }
   }
 
-  if (!characteristic) {
-    const services = await server.getPrimaryServices();
-    for (const svc of services) {
-      try {
-        const chars = await svc.getCharacteristics();
-        for (const char of chars) {
-          if (char.properties.write || char.properties.writeWithoutResponse) {
-            characteristic = char;
-            break;
-          }
+  const services = await server.getPrimaryServices();
+  for (const svc of services) {
+    try {
+      const chars = await svc.getCharacteristics();
+      for (const char of chars) {
+        if (char.properties.write || char.properties.writeWithoutResponse) {
+          return char;
         }
-        if (characteristic) break;
-      } catch (_) { continue; }
-    }
+      }
+    } catch (_) { continue; }
   }
 
-  if (!characteristic) {
-    throw new Error('Không tìm thấy đặc tính ghi dữ liệu trên máy in. Máy in có thể dùng UUID khác — thử in qua máy chủ (WiFi) trong Cài đặt.');
-  }
+  return null;
+};
 
+const sendEscPosData = async (characteristic, escPosDataBase64) => {
   const binaryString = atob(escPosDataBase64);
   const data = new Uint8Array(binaryString.length);
   for (let i = 0; i < binaryString.length; i++) {
     data[i] = binaryString.charCodeAt(i);
   }
 
-  // writeValueWithoutResponse là API đúng và nhanh (không chờ ACK từng gói);
-  // writeValue(chunk, {type}) cũ truyền option không tồn tại nên mọi gói đều bị ghi kiểu chờ ACK
   const useWithoutResponse =
     characteristic.properties.writeWithoutResponse &&
     typeof characteristic.writeValueWithoutResponse === 'function';
   const chunkSize = 100;
+
   for (let i = 0; i < data.length; i += chunkSize) {
     const chunk = data.slice(i, i + chunkSize);
     if (useWithoutResponse) {
       await characteristic.writeValueWithoutResponse(chunk);
-      // Nghỉ ngắn giữa các gói để buffer máy in không tràn (không có ACK để tự điều tiết)
       if (i + chunkSize < data.length) {
-        await new Promise(resolve => setTimeout(resolve, 10));
+        await new Promise(resolve => setTimeout(resolve, 8));
       }
     } else if (typeof characteristic.writeValueWithResponse === 'function') {
-      // Ghi có ACK: BLE tự điều tiết, không cần delay thủ công
       await characteristic.writeValueWithResponse(chunk);
     } else {
       await characteristic.writeValue(chunk);
     }
   }
+};
 
-  device.gatt.disconnect();
+/**
+ * Connect or reuse cached GATT connection, find writable characteristic
+ * Uses promise-based locking to prevent concurrent connection attempts
+ */
+const ensureGattConnection = async (device) => {
+  if (gattConnectionPromise) {
+    return gattConnectionPromise;
+  }
+
+  if (cachedGattServer && cachedCharacteristic) {
+    try {
+      if (cachedGattServer.connected) {
+        return cachedCharacteristic;
+      }
+    } catch (_) {
+      clearGattCache();
+    }
+  }
+
+  gattConnectionPromise = (async () => {
+    try {
+      const server = await device.gatt.connect();
+      const characteristic = await findWritableCharacteristic(server);
+
+      if (!characteristic) {
+        throw new Error('Không tìm thấy đặc tính ghi dữ liệu trên máy in. Máy in có thể dùng UUID khác — thử in qua máy chủ (WiFi) trong Cài đặt.');
+      }
+
+      cachedGattServer = server;
+      cachedCharacteristic = characteristic;
+      return characteristic;
+    } finally {
+      gattConnectionPromise = null;
+    }
+  })();
+
+  return gattConnectionPromise;
 };
 
 /**
  * Connect to Bluetooth printer and print ESC/POS data.
- * Dùng lại máy in đã chọn lần trước (cachedBluetoothDevice), chỉ hiện danh sách chọn máy khi chưa có hoặc kết nối lỗi.
+ * Reuses cached device & GATT connection to eliminate reconnect overhead.
  */
 const printViaBluetooth = async (escPosDataBase64) => {
   if (!isBluetoothSupported()) {
@@ -142,17 +173,19 @@ const printViaBluetooth = async (escPosDataBase64) => {
     return new Error(`Lỗi kết nối Bluetooth: ${error.message || 'Lỗi không xác định'}`);
   };
 
-  // Ưu tiên dùng máy in đã chọn lần trước — không bao giờ xóa cache (kể cả khi kết nối lỗi)
   if (cachedBluetoothDevice) {
     try {
-      await connectAndSend(cachedBluetoothDevice, escPosDataBase64);
+      const characteristic = await ensureGattConnection(cachedBluetoothDevice);
+      await sendEscPosData(characteristic, escPosDataBase64);
       return true;
-    } catch (_) {
-      // Không xóa cachedBluetoothDevice; rơi xuống để hiện danh sách chọn máy (thử lại hoặc chọn máy khác)
+    } catch (error) {
+      clearGattCache();
+      if (error.message.includes('không tìm thấy đặc tính')) {
+        throw error;
+      }
     }
   }
 
-  // Chưa có cache hoặc kết nối lỗi → chọn máy in (ưu tiên filter theo tên đã lưu để sau khi đóng/mở lại Chrome chỉ cần chạm 1 lần)
   const savedName = getSavedPrinterName();
   try {
     let device = null;
@@ -163,7 +196,6 @@ const printViaBluetooth = async (escPosDataBase64) => {
           optionalServices: OPTIONAL_SERVICES,
         });
       } catch (filterErr) {
-        // Máy đổi tên / không thấy / user hủy → thử mở danh sách tất cả
         device = null;
       }
     }
@@ -175,9 +207,11 @@ const printViaBluetooth = async (escPosDataBase64) => {
     }
     cachedBluetoothDevice = device;
     if (device.name) setSavedPrinterName(device.name);
-    await connectAndSend(device, escPosDataBase64);
+    const characteristic = await ensureGattConnection(device);
+    await sendEscPosData(characteristic, escPosDataBase64);
     return true;
   } catch (error) {
+    clearGattCache();
     throw normalizeError(error);
   }
 };
@@ -253,6 +287,12 @@ export const printBill = async (orderId) => {
  * Gọi từ Cài đặt khi cần đổi sang máy in khác.
  */
 export const resetBluetoothPrinter = () => {
+  if (cachedGattServer && cachedGattServer.connected) {
+    try {
+      cachedGattServer.disconnect();
+    } catch (_) {}
+  }
+  clearGattCache();
   cachedBluetoothDevice = null;
   setSavedPrinterName(null);
 };

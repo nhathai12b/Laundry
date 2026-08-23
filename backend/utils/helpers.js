@@ -1,6 +1,13 @@
 import bcrypt from 'bcryptjs';
 import { queryOne } from '../database/db.js';
-import { MAX_ORDER_CODE_GENERATION_ATTEMPTS } from './constants.js';
+import {
+  MAX_ORDER_CODE_GENERATION_ATTEMPTS,
+  PASSWORD_MIN_LENGTH,
+  PASSWORD_REQUIRE_UPPERCASE,
+  PASSWORD_REQUIRE_LOWERCASE,
+  PASSWORD_REQUIRE_NUMBERS,
+  PASSWORD_REQUIRE_SPECIAL_CHARS
+} from './constants.js';
 
 export const hashPassword = async (password) => {
   const salt = await bcrypt.genSalt(10);
@@ -9,6 +16,34 @@ export const hashPassword = async (password) => {
 
 export const comparePassword = async (password, hash) => {
   return bcrypt.compare(password, hash);
+};
+
+export const validatePasswordStrength = (password) => {
+  if (!password || typeof password !== 'string') {
+    return { valid: false, message: 'Mật khẩu không hợp lệ.' };
+  }
+
+  if (password.length < PASSWORD_MIN_LENGTH) {
+    return { valid: false, message: `Mật khẩu phải có ít nhất ${PASSWORD_MIN_LENGTH} ký tự.` };
+  }
+
+  if (PASSWORD_REQUIRE_UPPERCASE && !/[A-Z]/.test(password)) {
+    return { valid: false, message: 'Mật khẩu phải chứa ít nhất một chữ hoa (A-Z).' };
+  }
+
+  if (PASSWORD_REQUIRE_LOWERCASE && !/[a-z]/.test(password)) {
+    return { valid: false, message: 'Mật khẩu phải chứa ít nhất một chữ thường (a-z).' };
+  }
+
+  if (PASSWORD_REQUIRE_NUMBERS && !/[0-9]/.test(password)) {
+    return { valid: false, message: 'Mật khẩu phải chứa ít nhất một số (0-9).' };
+  }
+
+  if (PASSWORD_REQUIRE_SPECIAL_CHARS && !/[!@#$%^&*()_+\-=\[\]{};:"\\|,.<>\/?]/.test(password)) {
+    return { valid: false, message: 'Mật khẩu phải chứa ít nhất một ký tự đặc biệt.' };
+  }
+
+  return { valid: true, message: 'Mật khẩu hợp lệ.' };
 };
 
 /**

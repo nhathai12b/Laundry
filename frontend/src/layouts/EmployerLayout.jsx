@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Outlet, Link, useNavigate, useLocation } from 'react-router-dom';
 import { clearAuth, getAuth } from '../utils/auth';
 import api from '../utils/api';
+import '../styles/premium.css';
 
 function EmployerLayout() {
   const navigate = useNavigate();

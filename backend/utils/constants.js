@@ -9,6 +9,13 @@ export const ACCOUNT_LOCKOUT_MINUTES = parseInt(process.env.ACCOUNT_LOCKOUT_MINU
 export const LOGIN_RATE_LIMIT_WINDOW_MS = parseInt(process.env.LOGIN_RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000; // 15 minutes
 export const TIMING_ATTACK_DELAY_MS = parseInt(process.env.TIMING_ATTACK_DELAY_MS) || 1000; // 1 second
 
+// Password security constants
+export const PASSWORD_MIN_LENGTH = 8;
+export const PASSWORD_REQUIRE_UPPERCASE = true;
+export const PASSWORD_REQUIRE_LOWERCASE = true;
+export const PASSWORD_REQUIRE_NUMBERS = true;
+export const PASSWORD_REQUIRE_SPECIAL_CHARS = false;
+
 // Order code generation
 export const MAX_ORDER_CODE_GENERATION_ATTEMPTS = 10;
 

@@ -1,7 +1,7 @@
 import express from 'express';
 import jwt from 'jsonwebtoken';
 import { query, queryOne, execute } from '../database/db.js';
-import { comparePassword, hashPassword } from '../utils/helpers.js';
+import { comparePassword, hashPassword, validatePasswordStrength } from '../utils/helpers.js';
 import { authenticate } from '../middleware/auth.js';
 import { loginRateLimiter, registerRateLimiter, resetLoginRateLimit } from '../middleware/rateLimiter.js';
 import { MAX_LOGIN_ATTEMPTS, ACCOUNT_LOCKOUT_MINUTES, TIMING_ATTACK_DELAY_MS } from '../utils/constants.js';
@@ -392,8 +392,13 @@ router.post('/register', registerRateLimiter(), async (req, res) => {
       return res.status(400).json({ error: 'Số điện thoại không hợp lệ. Chỉ nhập chữ số (8-15 số).' });
     }
 
-    if (typeof password !== 'string' || password.length < 8) {
-      return res.status(400).json({ error: 'Mật khẩu phải có ít nhất 8 ký tự.' });
+    if (typeof password !== 'string') {
+      return res.status(400).json({ error: 'Mật khẩu không hợp lệ.' });
+    }
+
+    const passwordValidation = validatePasswordStrength(password);
+    if (!passwordValidation.valid) {
+      return res.status(400).json({ error: passwordValidation.message });
     }
     const existing = await queryOne('SELECT id FROM users WHERE phone = ?', [trimmedPhone]);
     if (existing) {
