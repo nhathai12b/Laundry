@@ -3,7 +3,6 @@ import { query, queryOne, execute } from '../database/db.js';
 import { formatDateTimeUTC } from '../utils/helpers.js';
 import { normalizeVietnamesePhone } from '../utils/phoneNormalizer.js';
 import { getReadyZaloApi } from './zaloSessionService.js';
-import { notifyZaloFailure, notifyZaloSuccess } from './discordNotifier.js';
 
 const EVENT_TYPES = {
   ORDER_CREATED: 'order_created',
@@ -244,14 +243,6 @@ async function sendOrderEvent(orderId, eventType) {
     });
 
     await logOrderNotification({ order, eventType, message, status: 'sent' });
-    await notifyZaloSuccess({
-      storeName: order.store_name,
-      orderCode: order.code,
-      customerName: order.customer_name,
-      phone: order.customer_phone,
-      eventType,
-      message,
-    });
   } catch (error) {
     console.error(`Send Zalo notification failed (${eventType}):`, error.message);
 
@@ -262,16 +253,6 @@ async function sendOrderEvent(orderId, eventType) {
         console.error('Failed to log Zalo notification error:', logError.message);
       }
     }
-
-    await notifyZaloFailure({
-      storeName: order?.store_name,
-      orderCode: order?.code || `order_id:${orderId}`,
-      customerName: order?.customer_name,
-      phone: order?.customer_phone,
-      eventType,
-      error,
-      message,
-    });
   }
 }
 

@@ -78,7 +78,7 @@ export function parseTimesheetDateTimeMs(value) {
 
 /**
  * Tính giờ làm từ check-in đến check-out.
- * Toàn bộ giờ làm đều tính là giờ thường (không tách tăng ca).
+ * Giờ vượt 8 giờ/ca được tính là tăng ca (overtime).
  * Thời gian chấm công được hiểu là UTC và frontend hiển thị theo timezone máy dùng.
  */
 export const calculateHours = (checkIn, checkOut) => {
@@ -92,9 +92,12 @@ export const calculateHours = (checkIn, checkOut) => {
   const diffHours = diffMs / (1000 * 60 * 60);
   const totalHours = Math.max(0, diffHours);
 
+  const regularHours = Math.min(totalHours, 8);
+  const overtimeHours = Math.max(totalHours - 8, 0);
+
   return {
-    regular: Math.round(totalHours * 100) / 100,
-    overtime: 0,
+    regular: Math.round(regularHours * 100) / 100,
+    overtime: Math.round(overtimeHours * 100) / 100,
   };
 };
 

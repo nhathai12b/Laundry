@@ -213,15 +213,16 @@ const getPrintSettings = async () => {
  */
 export const printBill = async (orderId) => {
   try {
-    // Get print settings - this is mandatory
-    const settings = await getPrintSettings();
-    const printMethod = settings.print_method || 'server';
-    
+    // In bill luôn qua Bluetooth — các phương thức khác đã bị bỏ khỏi Cài đặt.
+    // Ép cứng ở đây để cửa hàng còn lưu print_method='server'/'com' cũ trong DB
+    // vẫn in được mà không cần lưu lại Cài đặt.
+    const printMethod = 'bluetooth';
+
     // Enforce the print method from settings
     if (printMethod === 'bluetooth') {
       // Must use Bluetooth
       if (!isBluetoothSupported()) {
-        throw new Error('Web Bluetooth không được hỗ trợ trên thiết bị này (thường chỉ có trên Android Chrome). Vui lòng liên hệ admin chuyển sang "In qua máy chủ" trong Cài đặt, hoặc mở ứng dụng trên điện thoại Android Chrome để in Bluetooth.');
+        throw new Error('Thiết bị này không hỗ trợ in Bluetooth qua trình duyệt (chỉ hoạt động trên Chrome ở Android). Vui lòng mở ứng dụng bằng Chrome trên điện thoại Android để in bill.');
       }
       
       // Get bill data from server

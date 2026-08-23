@@ -33,11 +33,7 @@ const pool = mysql.createPool({
 async function ensureUserSubscriptionColumns(connection) {
   const requiredColumns = [
     { name: 'subscription_package', ddl: 'ALTER TABLE users ADD COLUMN subscription_package VARCHAR(50) NULL AFTER store_id' },
-    { name: 'subscription_expires_at', ddl: 'ALTER TABLE users ADD COLUMN subscription_expires_at DATETIME NULL AFTER subscription_package' },
-    { name: 'daily_revenue_report_enabled', ddl: 'ALTER TABLE users ADD COLUMN daily_revenue_report_enabled TINYINT(1) NOT NULL DEFAULT 0 AFTER subscription_expires_at' },
-    { name: 'daily_revenue_report_webhook_url', ddl: 'ALTER TABLE users ADD COLUMN daily_revenue_report_webhook_url TEXT NULL AFTER daily_revenue_report_enabled' },
-    { name: 'daily_revenue_report_discord_guild_id', ddl: 'ALTER TABLE users ADD COLUMN daily_revenue_report_discord_guild_id VARCHAR(50) NULL AFTER daily_revenue_report_webhook_url' },
-    { name: 'daily_revenue_report_discord_channel_id', ddl: 'ALTER TABLE users ADD COLUMN daily_revenue_report_discord_channel_id VARCHAR(50) NULL AFTER daily_revenue_report_discord_guild_id' }
+    { name: 'subscription_expires_at', ddl: 'ALTER TABLE users ADD COLUMN subscription_expires_at DATETIME NULL AFTER subscription_package' }
   ];
   await ensureUsersColumns(connection, requiredColumns);
 }

@@ -478,7 +478,7 @@ router.post('/', auditLog('create', 'order'), async (req, res) => {
           total_amount, discount_amount, final_amount, promotion_id, store_id,
           created_by, is_debt, expected_return_at, payment_status, paid_amount, debt_amount
         )
-        VALUES (?, ?, 'created', ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 'unpaid', 0, ?)
+        VALUES (?, ?, 'created', ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 'unpaid', 0, 0)
       `, [
         customer.id,
         code,
@@ -490,8 +490,7 @@ router.post('/', auditLog('create', 'order'), async (req, res) => {
         finalPromotionId,
         orderStoreId,
         req.user.id,
-        expectedReturnAt,
-        finalAmount
+        expectedReturnAt
       ]);
 
       const orderId = orderResult.insertId;
@@ -796,7 +795,7 @@ router.patch('/:id', auditLog('update', 'order'), async (req, res) => {
 });
 
 // Update order status
-router.post('/:id/status', async (req, res) => {
+router.post('/:id/status', auditLog('update', 'order'), async (req, res) => {
   try {
     const { status, payment_method, withdrawn_amount, amount_paid, delivery_method } = req.body;
 

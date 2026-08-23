@@ -48,6 +48,7 @@ function Orders() {
   const [shouldPrint, setShouldPrint] = useState(false);
   const [printing, setPrinting] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState('cash');
+  const [customAmountPaid, setCustomAmountPaid] = useState('');
 
   // Load products and stores only once on mount
   useEffect(() => {
@@ -226,10 +227,33 @@ function Orders() {
     if (!orderToComplete) return;
 
     try {
-      await api.post(`/orders/${orderToComplete.id}/status`, { 
+      if (!paymentMethod) {
+        alert('Vui lòng chọn hình thức thanh toán');
+        return;
+      }
+
+      const maxAmount = parseFloat(orderToComplete.final_amount || orderToComplete.total_amount || 0) || 0;
+      let amountPaid = null;
+      if (customAmountPaid !== '') {
+        amountPaid = parseFloat(customAmountPaid);
+        if (isNaN(amountPaid) || amountPaid < 0) {
+          alert('Số tiền thanh toán phải là số không âm');
+          return;
+        }
+        if (amountPaid > maxAmount + 0.01) {
+          alert(`Số tiền thanh toán không được vượt quá ${maxAmount.toLocaleString('vi-VN')} đ`);
+          return;
+        }
+      }
+
+      const payload = {
         status: 'completed',
         payment_method: paymentMethod
-      });
+      };
+      if (amountPaid !== null) {
+        payload.amount_paid = Math.round(amountPaid * 100) / 100;
+      }
+      await api.post(`/orders/${orderToComplete.id}/status`, payload);
 
       // Print bill if selected
       if (shouldPrint) {
@@ -251,6 +275,7 @@ function Orders() {
       setOrderToComplete(null);
       setShouldPrint(false);
       setPaymentMethod('cash');
+      setCustomAmountPaid('');
       loadOrders();
     } catch (error) {
       alert(error.response?.data?.error || 'Cập nhật thất bại');
@@ -1159,6 +1184,13 @@ function Orders() {
                     setApplicablePromotions([]);
                   }}
                   className="flex-1 min-w-0 bg-gray-200 text-gray-800 py-2 rounded-lg hover:bg-gray-300 active:bg-gray-400 font-medium text-xs sm:text-sm transition-all touch-manipulation"
+                  onClick={() => {
+                    setShowCompleteModal(false);
+                    setOrderToComplete(null);
+                    setShouldPrint(false);
+                    setPaymentMethod('cash');
+                    setCustomAmountPaid('');
+                  }}
                 >
                   Hủy
                 </button>
@@ -1182,6 +1214,7 @@ function Orders() {
                   setOrderToComplete(null);
                   setShouldPrint(false);
                   setPaymentMethod('cash');
+                  setCustomAmountPaid('');
                 }}
                 disabled={printing}
                 className="text-gray-500 hover:text-gray-700 text-xl w-7 h-7 flex-shrink-0 flex items-center justify-center rounded-full hover:bg-gray-100 active:bg-gray-200 touch-manipulation disabled:opacity-50"
@@ -1208,8 +1241,8 @@ function Orders() {
                 </label>
                 <div className="grid grid-cols-2 gap-2 min-w-0">
                   <label className={`flex items-center justify-center gap-2 p-2.5 border-2 rounded-lg cursor-pointer transition-all touch-manipulation min-w-0 ${
-                    paymentMethod === 'cash' 
-                      ? 'border-green-500 bg-green-50' 
+                    paymentMethod === 'cash'
+                      ? 'border-green-500 bg-green-50'
                       : 'border-gray-300'
                   } active:scale-95`}>
                     <input
@@ -1223,8 +1256,8 @@ function Orders() {
                     <span className="text-xs font-medium text-center break-words">💰 Tiền mặt</span>
                   </label>
                   <label className={`flex items-center justify-center gap-2 p-2.5 border-2 rounded-lg cursor-pointer transition-all touch-manipulation min-w-0 ${
-                    paymentMethod === 'transfer' 
-                      ? 'border-blue-500 bg-blue-50' 
+                    paymentMethod === 'transfer'
+                      ? 'border-blue-500 bg-blue-50'
                       : 'border-gray-300'
                   } active:scale-95`}>
                     <input
@@ -1240,11 +1273,28 @@ function Orders() {
                 </div>
               </div>
 
+              <div className="min-w-0">
+                <label className="block text-xs sm:text-sm font-medium text-gray-700 mb-2">
+                  Số tiền thanh toán
+                </label>
+                <input
+                  type="number"
+                  placeholder={`${parseFloat(orderToComplete.final_amount || orderToComplete.total_amount || 0).toLocaleString('vi-VN')} đ`}
+                  value={customAmountPaid}
+                  onChange={(e) => setCustomAmountPaid(e.target.value)}
+                  step="100"
+                  min="0"
+                  max={parseFloat(orderToComplete.final_amount || orderToComplete.total_amount || 0)}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+                />
+                <p className="text-xs text-gray-500 mt-1">Để trống = toàn bộ số tiền hoặc nhập 0 để ghi nợ</p>
+              </div>
+
               <div className="flex flex-col gap-2 pt-2 border-t border-gray-200 min-w-0">
                 <button
                   onClick={handleCompleteOrder}
                   disabled={printing}
-                  className="w-full min-w-0 bg-gradient-to-r from-green-500 to-green-600 text-white py-2.5 rounded-lg hover:from-green-600 hover:to-green-700 active:from-green-700 active:to-green-800 font-medium text-sm shadow-md transition-all touch-manipulation disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="w-full min-w-0 bg-gradient-to-r from-green-500 to-green-600 text-white py-2.5 rounded-lg hover:from-green-600 hover:to-green-700 active:from-green-700 active:to-green-800 font-medium text-sm shadow-md transition-all touch-manipulation disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:from-green-500 disabled:hover:to-green-600"
                 >
                   {printing ? '⏳ Đang xử lý...' : '✓ Hoàn thành'}
                 </button>

@@ -6,10 +6,8 @@ import { resetBluetoothPrinter } from '../../utils/printBill';
 
 function Settings() {
   const [settings, setSettings] = useState({
-    printer_ip: '192.168.1.100',
-    printer_port: '9100',
     paper_size: '80mm',
-    print_method: 'server',
+    print_method: 'bluetooth',
     bill_store_name: '',
     bill_store_address: '',
     bill_store_phone: '',
@@ -83,19 +81,13 @@ function Settings() {
       if (isAdmin() && selectedStoreId) {
         dataToSend.store_id = selectedStoreId;
       }
-      
-      // Chỉ gửi các trường thuộc phương thức in đang chọn
-      if (dataToSend.print_method === 'bluetooth') {
-        delete dataToSend.printer_ip;
-        delete dataToSend.printer_port;
-        delete dataToSend.printer_com_port;
-      } else if (dataToSend.print_method === 'com') {
-        delete dataToSend.printer_ip;
-        delete dataToSend.printer_port;
-      } else {
-        delete dataToSend.printer_com_port;
-      }
-      
+
+      // In bill luôn dùng Bluetooth — không gửi cấu hình máy in mạng/COM
+      dataToSend.print_method = 'bluetooth';
+      delete dataToSend.printer_ip;
+      delete dataToSend.printer_port;
+      delete dataToSend.printer_com_port;
+
       await api.put('/settings', dataToSend);
       setMessage('Đã lưu cài đặt thành công!');
       setTimeout(() => setMessage(''), 3000);
@@ -254,86 +246,13 @@ function Settings() {
         <form onSubmit={handleSave} className="space-y-4">
           <div className="pt-4 border-t border-gray-200">
             <h3 className="text-base font-semibold text-gray-800 mb-3">Cài đặt in bill</h3>
-            
-            <div className="mb-4">
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Phương thức in *
-              </label>
-              <select
-                value={settings.print_method || 'server'}
-                onChange={(e) => setSettings({ ...settings, print_method: e.target.value })}
-                className="w-full px-3 py-2.5 border rounded-lg text-base"
-                required
-              >
-                <option value="server">Server (IP/Port) - In qua mạng LAN/WiFi</option>
-                <option value="com">Cổng COM - Máy in Bluetooth ghép nối với máy chủ</option>
-                <option value="bluetooth">Bluetooth trình duyệt - In trực tiếp từ điện thoại (chỉ máy in BLE)</option>
-              </select>
-              <p className="text-xs text-gray-500 mt-1">
-                Cửa hàng sẽ bắt buộc sử dụng phương thức in đã được cài đặt. Lưu ý: "Bluetooth trình duyệt" chỉ hoạt động trên Android Chrome với máy in hỗ trợ BLE — đa số máy in nhiệt Bluetooth (Xprinter/Gprinter) dùng Bluetooth Classic nên phải dùng "Cổng COM".
+
+            <div className="mb-4 p-3 bg-blue-50 rounded-lg">
+              <p className="text-sm text-blue-800">
+                In bill qua Bluetooth. Khi bấm "In bill", chọn máy in Bluetooth trong danh sách trình duyệt hiện ra.
               </p>
             </div>
 
-            {/* Chỉ hiển thị IP và Port khi chọn phương thức Server */}
-            {settings.print_method === 'server' && (
-              <>
-                <div className="mb-4">
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    IP máy in *
-                  </label>
-                  <input
-                    type="text"
-                    value={settings.printer_ip}
-                    onChange={(e) => setSettings({ ...settings, printer_ip: e.target.value })}
-                    className="w-full px-3 py-2.5 border rounded-lg text-base"
-                    placeholder="192.168.1.100"
-                    required
-                  />
-                  <p className="text-xs text-gray-500 mt-1">
-                    Địa chỉ IP của máy in trong mạng nội bộ
-                  </p>
-                </div>
-
-                <div className="mb-4">
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Cổng máy in *
-                  </label>
-                  <input
-                    type="number"
-                    value={settings.printer_port}
-                    onChange={(e) => setSettings({ ...settings, printer_port: e.target.value })}
-                    className="w-full px-3 py-2.5 border rounded-lg text-base"
-                    placeholder="9100"
-                    required
-                  />
-                  <p className="text-xs text-gray-500 mt-1">
-                    Cổng mặc định cho máy in network thường là 9100
-                  </p>
-                </div>
-              </>
-            )}
-
-            {/* Cổng COM khi chọn phương thức COM (máy in Bluetooth ghép nối với máy chủ) */}
-            {settings.print_method === 'com' && (
-              <div className="mb-4">
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Cổng COM của máy in *
-                </label>
-                <input
-                  type="text"
-                  value={settings.printer_com_port || ''}
-                  onChange={(e) => setSettings({ ...settings, printer_com_port: e.target.value })}
-                  className="w-full px-3 py-2.5 border rounded-lg text-base"
-                  placeholder="COM3"
-                  required
-                />
-                <p className="text-xs text-gray-500 mt-1">
-                  Ghép nối máy in Bluetooth với máy chủ Windows trước. Xem cổng COM tại: Control Panel → Bluetooth Settings → tab COM Ports → dòng "Outgoing" của máy in.
-                </p>
-              </div>
-            )}
-
-            {/* Cỡ giấy luôn hiển thị vì cả 2 phương thức đều cần */}
             <div className="mb-4">
               <label className="block text-sm font-medium text-gray-700 mb-1">
                 Cỡ giấy *
@@ -510,19 +429,7 @@ function Settings() {
           </div>
         </form>
 
-        {settings.print_method === 'server' && (
-          <div className="mt-6 p-4 bg-blue-50 rounded-lg">
-            <h3 className="font-medium text-blue-900 mb-2">Hướng dẫn (Phương thức Server):</h3>
-            <ul className="text-sm text-blue-800 space-y-1 list-disc list-inside">
-              <li>Đảm bảo máy in đã được kết nối vào cùng mạng WiFi với thiết bị</li>
-              <li>Kiểm tra IP máy in trong cài đặt máy in hoặc router</li>
-              <li>Cổng mặc định thường là 9100 (Raw TCP/IP)</li>
-              <li>Sau khi cấu hình, thử in bill từ một đơn hàng để kiểm tra</li>
-            </ul>
-          </div>
-        )}
-        {settings.print_method === 'bluetooth' && (
-          <div className="mt-6 space-y-4">
+        <div className="mt-6 space-y-4">
             <div className="p-4 bg-blue-50 rounded-lg">
               <h3 className="font-medium text-blue-900 mb-2">Hướng dẫn (Phương thức Bluetooth):</h3>
               <ul className="text-sm text-blue-800 space-y-1 list-disc list-inside">
@@ -549,7 +456,6 @@ function Settings() {
               <p className="text-xs text-gray-500 mt-1">Dùng khi muốn đổi sang máy in Bluetooth khác. Lần in bill tiếp theo sẽ hiện danh sách chọn máy.</p>
             </div>
           </div>
-        )}
       </div>
 
       {/* Change Password Modal */}

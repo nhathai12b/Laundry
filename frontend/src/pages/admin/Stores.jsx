@@ -45,15 +45,9 @@ function Stores() {
     user_id: '',
   });
   const [employerUsers, setEmployerUsers] = useState([]);
-  const [dailyReportSettings, setDailyReportSettings] = useState({
-    enabled: false,
-    webhook_url: '',
-  });
-  const [dailyReportSaving, setDailyReportSaving] = useState(false);
 
   useEffect(() => {
     if (activeTab === 'stores') {
-      loadDailyReportSettings();
       loadUsers().then(() => {
         loadStores();
       });
@@ -70,40 +64,6 @@ function Stores() {
     } catch (error) {
       console.error('Error loading stores:', error);
     }
-  };
-
-  const loadDailyReportSettings = async () => {
-    try {
-      const response = await api.get('/users/daily-revenue-report-settings');
-      setDailyReportSettings(response.data.data || { enabled: false, webhook_url: '' });
-    } catch (error) {
-      console.error('Error loading daily revenue report settings:', error);
-    }
-  };
-
-  const saveDailyReportSettings = async (nextSettings = dailyReportSettings) => {
-    try {
-      setDailyReportSaving(true);
-      const response = await api.put('/users/daily-revenue-report-settings', {
-        enabled: Boolean(nextSettings.enabled),
-        webhook_url: nextSettings.webhook_url || '',
-      });
-      setDailyReportSettings(response.data.data || nextSettings);
-      alert('Đã lưu cấu hình báo cáo doanh thu');
-    } catch (error) {
-      alert(error.response?.data?.error || 'Không thể lưu cấu hình báo cáo doanh thu');
-    } finally {
-      setDailyReportSaving(false);
-    }
-  };
-
-  const toggleDailyReportEnabled = async () => {
-    const nextSettings = {
-      ...dailyReportSettings,
-      enabled: !dailyReportSettings.enabled,
-    };
-    setDailyReportSettings(nextSettings);
-    await saveDailyReportSettings(nextSettings);
   };
 
   const loadStoresForEmployees = async () => {
@@ -454,52 +414,6 @@ function Stores() {
       {/* Stores & Users Tab */}
       {activeTab === 'stores' && (
         <div className="space-y-4">
-          <div className="bg-white rounded-lg shadow border border-gray-100 p-4">
-            <div className="flex flex-col lg:flex-row lg:items-end gap-3">
-              <div className="flex-1">
-                <div className="flex items-center justify-between gap-3 mb-2">
-                  <div>
-                    <h2 className="text-lg font-semibold text-gray-800">Báo cáo doanh thu cuối ngày</h2>
-                    <p className="text-sm text-gray-500">Tự động gửi báo cáo lúc 23:00 cho toàn chuỗi cửa hàng của admin này.</p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={toggleDailyReportEnabled}
-                    disabled={dailyReportSaving}
-                    className={`relative inline-flex h-7 w-12 items-center rounded-full transition-colors ${
-                      dailyReportSettings.enabled ? 'bg-blue-600' : 'bg-gray-300'
-                    } ${dailyReportSaving ? 'opacity-60' : ''}`}
-                    aria-label="Bật tắt báo cáo doanh thu"
-                  >
-                    <span
-                      className={`inline-block h-5 w-5 transform rounded-full bg-white transition-transform ${
-                        dailyReportSettings.enabled ? 'translate-x-6' : 'translate-x-1'
-                      }`}
-                    />
-                  </button>
-                </div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  URL webhook báo cáo doanh thu
-                </label>
-                <input
-                  type="url"
-                  value={dailyReportSettings.webhook_url}
-                  onChange={(e) => setDailyReportSettings({ ...dailyReportSettings, webhook_url: e.target.value })}
-                  className="w-full px-3 py-2.5 border rounded-lg text-base focus:border-blue-500 focus:ring-1 focus:ring-blue-200"
-                  placeholder="https://discord.com/api/webhooks/..."
-                />
-              </div>
-              <button
-                type="button"
-                onClick={() => saveDailyReportSettings()}
-                disabled={dailyReportSaving}
-                className="bg-blue-600 text-white px-4 py-2.5 rounded-lg hover:bg-blue-700 disabled:opacity-60"
-              >
-                {dailyReportSaving ? 'Đang lưu...' : 'Lưu cấu hình'}
-              </button>
-            </div>
-          </div>
-
           {/* Stores Table */}
           <div className="bg-white rounded-lg shadow overflow-hidden">
             <div className="p-4 border-b">

@@ -20,7 +20,6 @@ import promotionRoutes from './routes/promotions.js';
 import zaloRoutes from './routes/zalo.js';
 import cashDrawerRoutes from './routes/cashDrawer.js';
 import sheetsRoutes from './routes/sheets.js';
-import discordInteractionsRoutes from './routes/discordInteractions.js';
 import { getMemoryUsageFormatted } from './utils/memoryMonitor.js';
 import { duplicateRequestGuard } from './middleware/duplicateRequestGuard.js';
 
@@ -97,25 +96,18 @@ if (process.env.NODE_ENV === 'production') {
 }
 
 app.use(cors(corsOptions));
-app.use(express.json({
-  limit: '500kb',
-  verify: (req, res, buf) => {
-    if (req.originalUrl?.startsWith('/api/discord/interactions')) {
-      req.rawBody = Buffer.from(buf);
-    }
-  },
-}));
+app.use(express.json({ limit: '500kb' }));
 app.use(express.urlencoded({ extended: true, limit: '500kb' }));
 
 // Block accidental duplicate submissions (double-clicked "OK" buttons):
 // identical mutating requests within a short window replay the first response
 // instead of creating duplicate records. Excluded:
 //  - auth: own protections
-//  - discord/integrations: external webhooks with own retry semantics
+//  - integrations: external webhooks with own retry semantics
 //  - payments: two legitimate instalments of the same amount are common and
 //    MUST both record — collapsing them would short the cash drawer
 //  - print: replaying "sent to printer" without actually printing loses a bill
-const DUPLICATE_GUARD_SKIP = ['/auth/', '/discord/', '/integrations/', '/print/'];
+const DUPLICATE_GUARD_SKIP = ['/auth/', '/integrations/', '/print/'];
 app.use('/api', (req, res, next) => {
   if (DUPLICATE_GUARD_SKIP.some((p) => req.path.startsWith(p))) return next();
   if (/^\/orders\/\d+\/payments$/.test(req.path)) return next();
@@ -138,7 +130,6 @@ app.use('/api/promotions', promotionRoutes);
 app.use('/api/zalo', zaloRoutes);
 app.use('/api/cash-drawer', cashDrawerRoutes);
 app.use('/api/integrations/sheets', sheetsRoutes);
-app.use('/api/discord', discordInteractionsRoutes);
 
 // Health check
 app.get('/api/health', (req, res) => {

@@ -4,8 +4,7 @@ import { authenticate } from '../middleware/auth.js';
 import { authorize } from '../middleware/auth.js';
 import { validateId, validatePositiveInteger, validateEnum } from '../utils/validators.js';
 import { formatDateTimeUTC } from '../utils/helpers.js';
-import { buildDailyBusinessReport, getActiveStoresByAdmin } from '../services/dailyBusinessReportService.js';
-import { notifyDailyBusinessReport } from '../services/dailyBusinessDiscordNotifier.js';
+import { buildDailyBusinessReport } from '../services/dailyBusinessReportService.js';
 import * as XLSX from 'xlsx';
 
 const router = express.Router();
@@ -116,8 +115,8 @@ function getUtcRangeFromQuery(req, month, year) {
 
   if (month && year) {
     const offset = getTimezoneOffsetMinutes(req);
-    const start = new Date(Date.UTC(Number(year), Number(month) - 1, 1) + offset * 60 * 1000);
-    const end = new Date(Date.UTC(Number(year), Number(month), 1) + offset * 60 * 1000);
+    const start = new Date(Date.UTC(Number(year), Number(month) - 1, 1) - offset * 60 * 1000);
+    const end = new Date(Date.UTC(Number(year), Number(month), 1) - offset * 60 * 1000);
     return { startAt: formatDateTimeUTC(start), endAt: formatDateTimeUTC(end) };
   }
 
@@ -172,46 +171,6 @@ router.get('/daily-business', authorize('admin', 'employer'), async (req, res) =
     res.json({ data: report });
   } catch (error) {
     console.error('Daily business report error:', error);
-    res.status(error.statusCode || 500).json({ error: error.message || 'Server error' });
-  }
-});
-
-router.post('/daily-business/discord', authorize('admin', 'employer'), async (req, res) => {
-  try {
-    const { storeId, adminId } = await resolveDailyBusinessScope(req);
-    let webhookUrl = process.env.CASH_DRAWER_DISCORD_WEBHOOK_URL;
-
-    if (req.user.role === 'admin' && req.user.role !== 'root') {
-      const settings = await queryOne(`
-        SELECT daily_revenue_report_enabled, daily_revenue_report_webhook_url
-        FROM users
-        WHERE id = ?
-      `, [req.user.id]);
-
-      if (!settings?.daily_revenue_report_enabled || !settings?.daily_revenue_report_webhook_url) {
-        return res.status(400).json({ error: 'Báo cáo doanh thu chưa được bật hoặc chưa có webhook URL' });
-      }
-
-      webhookUrl = settings.daily_revenue_report_webhook_url;
-    }
-
-    const date = req.body?.date || req.query.date;
-    const stores = (!storeId && adminId) ? await getActiveStoresByAdmin(adminId) : [{ id: storeId }];
-    const reports = [];
-
-    for (const store of stores) {
-      const report = await buildDailyBusinessReport({
-        date,
-        storeId: store.id,
-        adminId,
-      });
-      await notifyDailyBusinessReport(report, webhookUrl);
-      reports.push(report);
-    }
-
-    res.json({ data: storeId ? reports[0] : reports });
-  } catch (error) {
-    console.error('Daily business Discord report error:', error);
     res.status(error.statusCode || 500).json({ error: error.message || 'Server error' });
   }
 });
@@ -698,9 +657,9 @@ router.get('/revenue-by-store', authorize('admin'), async (req, res) => {
         };
       }
       storeMap[row.store_id].daily_revenue[row.work_date] = {
-        revenue: row.daily_revenue,
-        employee_count: row.employee_count,
-        shift_count: row.shift_count,
+        revenue: Number(row.daily_revenue) || 0,
+        employee_count: Number(row.employee_count) || 0,
+        shift_count: Number(row.shift_count) || 0,
       };
       // Number(): daily_revenue is a SUM of DECIMAL → string from mysql2;
       // without coercion this concatenates instead of adding

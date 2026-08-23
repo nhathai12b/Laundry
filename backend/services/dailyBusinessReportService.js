@@ -240,19 +240,6 @@ export async function buildDailyBusinessReport({ date, storeId, adminId }) {
   };
 }
 
-export async function getEnabledDailyBusinessReportAdmins() {
-  return query(`
-    SELECT id, name, daily_revenue_report_webhook_url
-    FROM users
-    WHERE role = 'admin'
-      AND status = 'active'
-      AND daily_revenue_report_enabled = 1
-      AND daily_revenue_report_webhook_url IS NOT NULL
-      AND daily_revenue_report_webhook_url <> ''
-    ORDER BY id ASC
-  `);
-}
-
 export async function getActiveStoresByAdmin(adminId) {
   return query(`
     SELECT id, name

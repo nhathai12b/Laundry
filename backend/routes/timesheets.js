@@ -5,7 +5,6 @@ import { authenticate } from '../middleware/auth.js';
 import { authorize } from '../middleware/auth.js';
 import { OVERTIME_MULTIPLIER } from '../utils/constants.js';
 import { ensureOpeningFloatTx, getDrawerSummaryTx, recordClosingCountTx } from '../services/cashDrawerService.js';
-import { notifyCashDrawerCheckout } from '../services/cashDrawerDiscordNotifier.js';
 import * as XLSX from 'xlsx';
 
 const router = express.Router();
@@ -30,7 +29,7 @@ const FUTURE_CLOCK_SKEW_MS = 60 * 1000;
 
 const normalizeLegacyFutureTimeMs = (ms) => {
   if (Number.isNaN(ms)) return ms;
-  return ms > Date.now() + FUTURE_CLOCK_SKEW_MS ? ms - LEGACY_VN_OFFSET_MS : ms;
+  return ms;
 };
 
 const parseTimesheetDateTimeMsCompat = (value) => {
@@ -77,8 +76,8 @@ const getMonthUtcRange = (req, month, year) => {
     if (startAt && endAt) return { startAt, endAt };
   }
   const offset = getTimezoneOffsetMinutes(req);
-  const start = new Date(Date.UTC(Number(year), Number(month) - 1, 1) + offset * 60 * 1000);
-  const end = new Date(Date.UTC(Number(year), Number(month), 1) + offset * 60 * 1000);
+  const start = new Date(Date.UTC(Number(year), Number(month) - 1, 1) - offset * 60 * 1000);
+  const end = new Date(Date.UTC(Number(year), Number(month), 1) - offset * 60 * 1000);
   return { startAt: formatDateTimeUTC(start), endAt: formatDateTimeUTC(end) };
 };
 
@@ -207,16 +206,30 @@ router.get('/', async (req, res) => {
 // Get employees for store (for check-in selection)
 router.get('/store-employees', async (req, res) => {
   try {
-    // For employer, employees.store_id references users.id (the employer user id)
-    // So we use req.user.id, not users.store_id
-    const employerUserId = req.user.id;
-    
-    const employees = await query(`
+    let employeeQuery = `
       SELECT id, name, phone
       FROM employees
-      WHERE store_id = ? AND status = 'active'
-      ORDER BY name
-    `, [employerUserId]);
+      WHERE status = 'active'
+    `;
+    const params = [];
+
+    if (req.user.role === 'employer') {
+      employeeQuery += ` AND store_id = ?`;
+      params.push(req.user.id);
+    } else if (req.user.role === 'admin') {
+      const storeIds = await query(`SELECT id FROM stores WHERE admin_id = ?`, [req.user.id]);
+      if (!storeIds || storeIds.length === 0) {
+        return res.json({ data: [] });
+      }
+      const storeIdList = storeIds.map(s => s.id);
+      employeeQuery += ` AND store_id IN (${storeIdList.map(() => '?').join(',')})`;
+      params.push(...storeIdList);
+    } else {
+      return res.status(403).json({ error: 'Unauthorized' });
+    }
+
+    employeeQuery += ` ORDER BY name`;
+    const employees = await query(employeeQuery, params);
 
     res.json({ data: employees });
   } catch (error) {
@@ -486,6 +499,10 @@ router.post('/check-out', async (req, res) => {
     if (checkOutMs > Date.now()) {
       return res.status(400).json({ error: 'Giờ ra không được sau thời điểm hiện tại.' });
     }
+    const shiftHours = (checkOutMs - checkInMs) / (1000 * 60 * 60);
+    if (shiftHours > 16) {
+      return res.status(400).json({ error: 'Ca làm việc không được vượt quá 16 giờ.' });
+    }
 
     const normalizedCheckIn = formatDateTimeUTC(new Date(checkInMs));
     const { regular, overtime } = calculateHours(normalizedCheckIn, checkOut);
@@ -502,7 +519,7 @@ router.post('/check-out', async (req, res) => {
       ? (parseFloat(checkoutWithdrawn) || null)
       : null;
 
-    const { updated, cashDrawerSummary } = await transaction(async (db) => {
+    const { updated } = await transaction(async (db) => {
       const paymentSummary = await getShiftPaymentSummary(
         db,
         timesheet,
@@ -556,14 +573,6 @@ router.post('/check-out', async (req, res) => {
       `, [timesheet.id]);
 
       return { updated: updatedTimesheet, cashDrawerSummary: drawerSummary };
-    });
-
-    notifyCashDrawerCheckout({
-      timesheet: updated,
-      summary: cashDrawerSummary,
-      note,
-    }).catch((notifyError) => {
-      console.warn('Cash drawer checkout report failed:', notifyError.message);
     });
 
     res.json({ data: serializeTimesheet(updated) });
@@ -629,6 +638,12 @@ router.get('/summary', authorize('admin'), async (req, res) => {
     querySql += ' GROUP BY t.user_id, u.name';
 
     const summary = await query(querySql, params);
+    summary.forEach(s => {
+      s.total_regular_hours = Number(s.total_regular_hours) || 0;
+      s.total_overtime_hours = Number(s.total_overtime_hours) || 0;
+      s.total_hours = Number(s.total_hours) || 0;
+      s.total_revenue = Number(s.total_revenue) || 0;
+    });
     res.json({ data: summary });
   } catch (error) {
     console.error('Get timesheet summary error:', error);
@@ -951,7 +966,7 @@ router.get('/daily-hours', authorize('admin'), async (req, res) => {
         user_name: emp.employee_name,
         employee_name: emp.employee_name,
         daily_hours: dailyHours,
-        total_month_hours: Object.values(emp.daily_hours).reduce((sum, hours) => sum + hours, 0),
+        total_month_hours: Object.values(dailyHours).reduce((sum, hours) => sum + Number(hours), 0),
       };
     });
 

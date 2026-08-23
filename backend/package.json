@@ -18,9 +18,6 @@
     "migrate-zalo": "node scripts/add_zalo_tables.js",
     "migrate-payments": "node scripts/add_payment_ledger.js",
     "migrate-cash-drawer": "node scripts/add_cash_drawer_ledger.js",
-    "migrate-daily-report-settings": "node scripts/add_daily_revenue_report_settings.js",
-    "report-daily-business": "node scripts/send_daily_business_report.js",
-    "register-discord-commands": "node scripts/register_discord_commands.js",
     "update-to-root": "node scripts/update_user_to_root.js"
   },
   "keywords": [

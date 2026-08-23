@@ -10,6 +10,7 @@ function PendingOrders() {
   const [shouldPrint, setShouldPrint] = useState(false);
   const [printing, setPrinting] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState('cash');
+  const [customAmountPaid, setCustomAmountPaid] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
 
   useEffect(() => {
@@ -46,23 +47,49 @@ function PendingOrders() {
     setShowCompleteModal(true);
     setShouldPrint(false);
     setPaymentMethod('cash');
+    setCustomAmountPaid('');
   };
 
   const handleCompleteOrder = async () => {
     if (!orderToComplete) return;
 
     try {
+      if (!paymentMethod) {
+        alert('Vui lòng chọn hình thức thanh toán');
+        return;
+      }
+
+      const maxAmount = parseFloat(orderToComplete.final_amount || orderToComplete.total_amount || 0) || 0;
+      let amountPaid = null;
+      if (customAmountPaid !== '') {
+        amountPaid = parseFloat(customAmountPaid);
+        if (isNaN(amountPaid) || amountPaid < 0) {
+          alert('Số tiền thanh toán phải là số không âm');
+          return;
+        }
+        if (amountPaid > maxAmount + 0.01) {
+          alert(`Số tiền thanh toán không được vượt quá ${maxAmount.toLocaleString('vi-VN')} đ`);
+          return;
+        }
+      }
+
       setPrinting(true);
-      
-      await api.post(`/orders/${orderToComplete.id}/status`, {
+
+      const payload = {
         status: 'completed',
         payment_method: paymentMethod,
-      });
+      };
+      if (amountPaid !== null) {
+        payload.amount_paid = Math.round(amountPaid * 100) / 100;
+      }
+
+      await api.post(`/orders/${orderToComplete.id}/status`, payload);
 
       setShowCompleteModal(false);
       setOrderToComplete(null);
       setShouldPrint(false);
       setPaymentMethod('cash');
+      setCustomAmountPaid('');
       setPrinting(false);
       
       // Reload orders
@@ -278,6 +305,7 @@ function PendingOrders() {
               setOrderToComplete(null);
               setShouldPrint(false);
               setPaymentMethod('cash');
+              setCustomAmountPaid('');
             }
           }}
         >
@@ -291,6 +319,7 @@ function PendingOrders() {
                   setOrderToComplete(null);
                   setShouldPrint(false);
                   setPaymentMethod('cash');
+                  setCustomAmountPaid('');
                 }}
                 className="text-gray-500 hover:text-gray-700 text-2xl w-8 h-8 flex-shrink-0 flex items-center justify-center rounded-full hover:bg-gray-100 active:bg-gray-200 touch-manipulation"
                 aria-label="Đóng"
@@ -320,8 +349,8 @@ function PendingOrders() {
                 </label>
                 <div className="grid grid-cols-2 gap-2.5 min-w-0">
                   <label className={`flex flex-col items-center justify-center p-3.5 rounded-xl border-2 cursor-pointer touch-manipulation transition-all min-w-0 ${
-                    paymentMethod === 'cash' 
-                      ? 'border-green-500 bg-green-50 shadow-md' 
+                    paymentMethod === 'cash'
+                      ? 'border-green-500 bg-green-50 shadow-md'
                       : 'border-gray-200 bg-gray-50 active:bg-gray-100'
                   }`}>
                     <input
@@ -335,8 +364,8 @@ function PendingOrders() {
                     <span className="text-sm font-semibold text-center break-words">Tiền mặt</span>
                   </label>
                   <label className={`flex flex-col items-center justify-center p-3.5 rounded-xl border-2 cursor-pointer touch-manipulation transition-all min-w-0 ${
-                    paymentMethod === 'transfer' 
-                      ? 'border-blue-500 bg-blue-50 shadow-md' 
+                    paymentMethod === 'transfer'
+                      ? 'border-blue-500 bg-blue-50 shadow-md'
                       : 'border-gray-200 bg-gray-50 active:bg-gray-100'
                   }`}>
                     <input
@@ -350,6 +379,24 @@ function PendingOrders() {
                     <span className="text-sm font-semibold text-center break-words">Chuyển khoản</span>
                   </label>
                 </div>
+              </div>
+
+              {/* Payment Amount */}
+              <div className="mb-4">
+                <label className="block text-sm sm:text-base font-semibold text-gray-700 mb-2.5">
+                  Số tiền thanh toán
+                </label>
+                <input
+                  type="number"
+                  placeholder={`${parseFloat(orderToComplete.final_amount || orderToComplete.total_amount || 0).toLocaleString('vi-VN')} đ`}
+                  value={customAmountPaid}
+                  onChange={(e) => setCustomAmountPaid(e.target.value)}
+                  step="100"
+                  min="0"
+                  max={parseFloat(orderToComplete.final_amount || orderToComplete.total_amount || 0)}
+                  className="w-full px-3 py-2.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+                />
+                <p className="text-xs text-gray-500 mt-1.5">Để trống = toàn bộ số tiền hoặc nhập 0 để ghi nợ</p>
               </div>
 
             </div>
@@ -369,6 +416,7 @@ function PendingOrders() {
                   setOrderToComplete(null);
                   setShouldPrint(false);
                   setPaymentMethod('cash');
+                  setCustomAmountPaid('');
                 }}
                 className="flex-1 min-w-0 px-4 py-3 bg-gray-200 text-gray-800 rounded-xl active:bg-gray-300 transition-colors touch-manipulation text-base font-medium"
                 disabled={printing}
