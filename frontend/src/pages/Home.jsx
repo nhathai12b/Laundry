@@ -13,6 +13,98 @@ import {
   localInputToIso,
 } from '../utils/dateTime';
 
+// Bộ chọn hẹn trả gọn cho mobile: nhập Giờ + Ngày, Tháng mặc định tháng hiện
+// tại (đổi được). Năm không cần nhập — tự suy: chọn tháng nhỏ hơn tháng hiện
+// tại nghĩa là hẹn sang năm sau (ví dụ đang tháng 12 hẹn tháng 1).
+// value/onChange dùng chuỗi datetime-local "YYYY-MM-DDTHH:mm" như input cũ.
+function ReturnTimePicker({ value, onChange }) {
+  const now = new Date();
+  const currentMonth = now.getMonth() + 1;
+  const currentYear = now.getFullYear();
+
+  // Ngày/tháng đang chọn khi chưa nhập giờ (chưa tạo được value hoàn chỉnh)
+  const [pendingDay, setPendingDay] = useState(now.getDate());
+  const [pendingMonth, setPendingMonth] = useState(currentMonth);
+
+  let day = pendingDay;
+  let month = pendingMonth;
+  let time = '';
+  if (value) {
+    const m = String(value).match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}:\d{2})/);
+    if (m) {
+      month = parseInt(m[2], 10);
+      day = parseInt(m[3], 10);
+      time = m[4];
+    }
+  }
+
+  const inferYear = (mo) => (mo < currentMonth ? currentYear + 1 : currentYear);
+  const daysInSelectedMonth = (mo) => new Date(inferYear(mo), mo, 0).getDate();
+
+  const compose = (d, mo, t) => {
+    if (!t) return '';
+    const dd = Math.min(d, daysInSelectedMonth(mo));
+    return `${inferYear(mo)}-${String(mo).padStart(2, '0')}-${String(dd).padStart(2, '0')}T${t}`;
+  };
+
+  const update = (d, mo, t) => {
+    setPendingDay(d);
+    setPendingMonth(mo);
+    onChange(compose(d, mo, t));
+  };
+
+  return (
+    <div className="min-w-0">
+      <div className="flex gap-1.5 min-w-0 items-center">
+        <input
+          type="time"
+          value={time}
+          onChange={(e) => update(day, month, e.target.value)}
+          className="flex-1 min-w-0 px-2 py-1.5 border rounded-lg text-xs sm:text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-200 touch-manipulation"
+        />
+        <select
+          value={day}
+          onChange={(e) => update(parseInt(e.target.value, 10), month, time)}
+          className="flex-1 min-w-0 px-2 py-1.5 border rounded-lg text-xs sm:text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-200 touch-manipulation"
+        >
+          {Array.from({ length: daysInSelectedMonth(month) }, (_, i) => (
+            <option key={i + 1} value={i + 1}>Ngày {i + 1}</option>
+          ))}
+        </select>
+        <select
+          value={month}
+          onChange={(e) => update(day, parseInt(e.target.value, 10), time)}
+          className="flex-1 min-w-0 px-2 py-1.5 border rounded-lg text-xs sm:text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-200 touch-manipulation"
+        >
+          {Array.from({ length: 12 }, (_, i) => {
+            const mo = i + 1;
+            return (
+              <option key={mo} value={mo}>
+                Tháng {mo}{mo < currentMonth ? ` (${inferYear(mo)})` : ''}
+              </option>
+            );
+          })}
+        </select>
+        {time && (
+          <button
+            type="button"
+            onClick={() => update(now.getDate(), currentMonth, '')}
+            className="px-2 py-1.5 flex-shrink-0 bg-gray-100 text-gray-500 rounded-lg hover:bg-gray-200 active:bg-gray-300 text-xs font-medium touch-manipulation"
+            aria-label="Xóa hẹn trả"
+          >
+            ✕
+          </button>
+        )}
+      </div>
+      <p className="text-[10px] sm:text-xs text-gray-500 mt-0.5">
+        {time
+          ? `Hẹn trả: ${String(day).padStart(2, '0')}/${String(month).padStart(2, '0')}/${inferYear(month)} lúc ${time}`
+          : 'Chọn giờ để đặt hẹn trả (bỏ trống nếu không hẹn)'}
+      </p>
+    </div>
+  );
+}
+
 function Home() {
   const [orders, setOrders] = useState([]);
   const [products, setProducts] = useState([]);
@@ -1464,13 +1556,11 @@ function Home() {
 
               <div className="min-w-0">
                 <label className="block text-[10px] sm:text-xs font-medium text-gray-700 mb-0.5">
-                  Thời gian hẹn trả
+                  Thời gian hẹn trả <span className="text-gray-500 text-[9px]">(giờ + ngày, tháng mặc định tháng này)</span>
                 </label>
-                <input
-                  type="datetime-local"
+                <ReturnTimePicker
                   value={formData.expected_return_at}
-                  onChange={(e) => setFormData({ ...formData, expected_return_at: e.target.value })}
-                  className="w-full min-w-0 px-2 py-1.5 border rounded-lg text-xs sm:text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-200 touch-manipulation"
+                  onChange={(v) => setFormData({ ...formData, expected_return_at: v })}
                 />
               </div>
 
@@ -1601,10 +1691,10 @@ function Home() {
                 </div>
               )}
 
-              <div className="flex flex-row gap-1.5 pt-2 border-t border-gray-200 min-w-0">
+              <div className="flex flex-row gap-1.5 pt-2 pb-2 border-t border-gray-200 min-w-0 sticky bottom-0 bg-white">
                 <button
                   type="submit"
-                  className="flex-1 min-w-0 bg-gradient-to-r from-blue-600 to-blue-700 text-white py-2 rounded-lg hover:from-blue-700 hover:to-blue-800 active:from-blue-800 active:to-blue-900 font-semibold text-xs sm:text-sm shadow-md transition-all touch-manipulation"
+                  className="flex-1 min-w-0 bg-gradient-to-r from-blue-600 to-blue-700 text-white py-2.5 rounded-lg hover:from-blue-700 hover:to-blue-800 active:from-blue-800 active:to-blue-900 font-semibold text-sm shadow-md transition-all touch-manipulation"
                 >
                   ✓ Tạo đơn
                 </button>
@@ -1623,7 +1713,7 @@ function Home() {
                     setApplicablePromotions([]);
                     setLoadingPromotions(false);
                   }}
-                  className="flex-1 min-w-0 bg-gray-200 text-gray-800 py-2 rounded-lg hover:bg-gray-300 active:bg-gray-400 font-medium text-xs sm:text-sm transition-all touch-manipulation"
+                  className="flex-1 min-w-0 bg-gray-200 text-gray-800 py-2.5 rounded-lg hover:bg-gray-300 active:bg-gray-400 font-medium text-sm transition-all touch-manipulation"
                 >
                   Hủy
                 </button>

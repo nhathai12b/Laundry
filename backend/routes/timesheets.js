@@ -129,6 +129,48 @@ async function getShiftPaymentSummary(db, timesheet, userId, startAt, endAt) {
   };
 }
 
+const EMPTY_PAYMENT_SUMMARY = { revenue_amount: 0, order_count: 0, total_withdrawn: 0 };
+
+// Concurrent-shift revenue attribution. When several employees stand the same
+// shift (multiple open timesheets in one store), shift revenue must be counted
+// exactly once:
+// - the OLDEST open shift ("ca chính") owns the revenue window
+// - a shift closing while an older one is still open ("ca phụ") takes 0 —
+//   the primary will claim those payments when it closes
+// - a primary's window starts right after the latest check_out already claimed
+//   by an earlier-starting overlapping shift, so nothing is counted twice when
+//   the previous primary closed first and this shift inherited the drawer
+async function hasOlderOpenShiftTx(db, timesheet, checkInSql) {
+  const older = await db.queryOne(`
+    SELECT id FROM timesheets
+    WHERE store_id = ? AND check_out IS NULL AND id != ?
+      AND (check_in < ? OR (check_in = ? AND id < ?))
+    LIMIT 1
+  `, [timesheet.store_id, timesheet.id, checkInSql, checkInSql, timesheet.id]);
+  return Boolean(older);
+}
+
+async function getRevenueWindowStartTx(db, timesheet, checkInSql, checkOutSql) {
+  const row = await db.queryOne(`
+    SELECT MAX(check_out) AS last_claimed_until
+    FROM timesheets
+    WHERE store_id = ? AND id != ? AND check_out IS NOT NULL
+      AND check_in <= ? AND check_out > ? AND check_out <= ?
+  `, [timesheet.store_id, timesheet.id, checkInSql, checkInSql, checkOutSql]);
+  if (!row?.last_claimed_until) return checkInSql;
+  const ms = parseTimesheetDateTimeMsCompat(row.last_claimed_until);
+  // +1s: the previous shift claimed payments up to AND INCLUDING its check_out
+  return Number.isNaN(ms) ? checkInSql : formatDateTimeUTC(new Date(ms + 1000));
+}
+
+async function getShiftPaymentSummaryDeduped(db, timesheet, userId, checkInSql, checkOutSql) {
+  if (await hasOlderOpenShiftTx(db, timesheet, checkInSql)) {
+    return { ...EMPTY_PAYMENT_SUMMARY };
+  }
+  const windowStart = await getRevenueWindowStartTx(db, timesheet, checkInSql, checkOutSql);
+  return getShiftPaymentSummary(db, timesheet, userId, windowStart, checkOutSql);
+}
+
 // Get timesheets
 router.get('/', async (req, res) => {
   try {
@@ -298,15 +340,32 @@ router.post('/check-in', async (req, res) => {
     }
     
     const storeId = user.store_id; // This is stores.id, not users.id
-    
-    let employeeId = req.user.employee_id || employee_id || null;
-    
+
+    // Body employee_id takes precedence over the token's employee_id so a
+    // shared device/session can check in a DIFFERENT teammate onto the same
+    // shift. Either way the employee is validated against the store below.
+    let employeeId = employee_id || req.user.employee_id || null;
+
     // Verify employee belongs to the same store
     // Note: employees.store_id references users.id (the employer user id)
     if (employeeId) {
       const employee = await queryOne('SELECT * FROM employees WHERE id = ? AND store_id = ? AND status = ?', [employeeId, req.user.id, 'active']);
       if (!employee) {
         return res.status(400).json({ error: 'Employee does not belong to your store' });
+      }
+    } else {
+      // Checking in WITHOUT a name is only allowed for the first open shift.
+      // Anyone joining an already-open shift must pick their own name so each
+      // concurrent person gets their own timesheet slot.
+      const anyOpen = await queryOne(
+        'SELECT id FROM timesheets WHERE store_id = ? AND check_out IS NULL LIMIT 1',
+        [storeId]
+      );
+      if (anyOpen) {
+        return res.status(400).json({
+          error: 'Đã có ca đang mở. Người check-in thêm phải chọn tên nhân viên của mình.',
+          code: 'EMPLOYEE_REQUIRED',
+        });
       }
     }
 
@@ -329,7 +388,9 @@ router.post('/check-in', async (req, res) => {
     if (openSameSlot) {
       const d = String(openSameSlot.check_in || '').slice(0, 10);
       return res.status(400).json({
-        error: `Còn ca chưa checkout (check-in ${d}). Vui lòng check-out ca này trước khi mở ca mới.`,
+        error: employeeId
+          ? `Nhân viên này còn ca chưa check-out (check-in ${d}). Vui lòng check-out ca đó trước, hoặc chọn nhân viên khác.`
+          : `Còn ca chưa checkout (check-in ${d}). Vui lòng check-out ca này trước khi mở ca mới.`,
         code: 'OPEN_SHIFT_EXISTS',
         open_shift: { id: openSameSlot.id, check_in: openSameSlot.check_in },
       });
@@ -398,9 +459,10 @@ router.get('/expected-revenue', async (req, res) => {
       return res.json({ data: { expected_revenue: 0, order_count: 0 } });
     }
 
-    const revenueData = await getShiftPaymentSummary({
+    const normalizedCheckIn = formatDateTimeUTC(new Date(parseTimesheetDateTimeMsCompat(timesheet.check_in)));
+    const revenueData = await getShiftPaymentSummaryDeduped({
       queryOne,
-    }, timesheet, req.user.id, timesheet.check_in, formatDateTimeUTC(new Date()));
+    }, timesheet, req.user.id, normalizedCheckIn, formatDateTimeUTC(new Date()));
     const drawerSummary = await getDrawerSummaryTx({
       queryOne,
       execute,
@@ -520,7 +582,7 @@ router.post('/check-out', async (req, res) => {
       : null;
 
     const { updated } = await transaction(async (db) => {
-      const paymentSummary = await getShiftPaymentSummary(
+      const paymentSummary = await getShiftPaymentSummaryDeduped(
         db,
         timesheet,
         userId,

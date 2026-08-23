@@ -889,10 +889,11 @@ function Orders() {
 
       {/* Create Order Modal */}
       {showModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-2 sm:p-3 z-50 overflow-y-auto overflow-x-hidden">
-          <div className="bg-white rounded-lg max-w-xl w-full max-h-[90vh] flex flex-col my-auto shadow-2xl">
-            <div className="flex items-center justify-between p-2.5 sm:p-3 md:p-4 pb-2 border-b border-gray-200 flex-shrink-0">
-              <h2 className="text-sm sm:text-base font-bold truncate pr-2">Tạo đơn hàng mới</h2>
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-end sm:items-center justify-center z-50 overflow-y-auto overflow-x-hidden">
+          <div className="bg-white rounded-t-3xl sm:rounded-lg w-full sm:max-w-2xl sm:max-h-[95vh] flex flex-col shadow-2xl">
+            {/* Header */}
+            <div className="flex items-center justify-between p-4 sm:p-5 border-b border-gray-200 flex-shrink-0">
+              <h2 className="text-lg sm:text-xl font-bold text-gray-800">📋 Tạo đơn hàng mới</h2>
               <button
                 type="button"
                 onClick={() => {
@@ -907,158 +908,171 @@ function Orders() {
                   });
                   setApplicablePromotions([]);
                 }}
-                className="text-gray-500 hover:text-gray-700 text-xl sm:text-2xl leading-none w-7 h-7 sm:w-8 sm:h-8 flex-shrink-0 flex items-center justify-center rounded-full hover:bg-gray-100 touch-manipulation"
+                className="text-gray-400 hover:text-gray-600 text-2xl leading-none w-8 h-8 flex-shrink-0 flex items-center justify-center rounded-full hover:bg-gray-100 touch-manipulation"
                 aria-label="Đóng"
               >
-                ×
+                ✕
               </button>
             </div>
-            <div className="flex-1 overflow-y-auto overflow-x-hidden px-2.5 sm:px-3 md:px-4">
-              <form onSubmit={handleSubmitOrder} className="space-y-2 min-w-0 py-2">
-              <div className="grid grid-cols-2 gap-1.5 sm:gap-2">
-                <div className="relative">
-                  <label className="block text-[10px] sm:text-xs font-medium text-gray-700 mb-0.5">
-                    Tên khách hàng
-                  </label>
-                  <input
-                    type="text"
-                    value={formData.customer_name}
-                    onChange={(e) => {
-                      const newName = e.target.value;
-                      setFormData({ ...formData, customer_name: newName });
-                      
-                      // Clear timeout if exists
-                      if (searchTimeout) {
-                        clearTimeout(searchTimeout);
-                      }
-                      
-                      // Debounce search
-                      const timeout = setTimeout(() => {
-                        searchCustomers(newName);
-                      }, 300);
-                      setSearchTimeout(timeout);
-                    }}
-                    onFocus={() => {
-                      if (formData.customer_name && formData.customer_name.trim().length >= 2) {
-                        searchCustomers(formData.customer_name);
-                      }
-                    }}
-                    onBlur={() => {
-                      // Delay hiding suggestions to allow click
-                      setTimeout(() => setShowCustomerSuggestions(false), 200);
-                    }}
-                    className="w-full px-2 py-1.5 border border-gray-300 rounded-lg text-xs sm:text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-200 transition-all"
-                    placeholder="Nhập tên khách hàng"
-                  />
-                  {showCustomerSuggestions && customerSuggestions.length > 0 && (
-                    <div className="absolute z-50 w-full mt-1 bg-white border border-gray-300 rounded-lg shadow-xl max-h-48 overflow-y-auto">
-                      {customerSuggestions.map((customer) => (
-                        <div
-                          key={customer.id}
-                          onClick={() => handleCustomerSelect(customer)}
-                          className="px-3 py-2 hover:bg-blue-50 active:bg-blue-100 cursor-pointer border-b border-gray-100 last:border-b-0 touch-manipulation"
-                        >
-                          <div className="font-medium text-gray-900 text-sm">{customer.name || 'Không có tên'}</div>
-                          <div className="text-xs text-gray-600">{customer.phone}</div>
-                          {customer.total_orders > 0 && (
-                            <div className="text-[10px] text-gray-500 mt-0.5">
-                              {customer.total_orders} đơn • {new Intl.NumberFormat('vi-VN').format(customer.total_spent || 0)} đ
-                            </div>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-                <div className="relative">
-                  <label className="block text-[10px] sm:text-xs font-medium text-gray-700 mb-0.5">
-                    SĐT <span className="text-gray-500 text-[9px]">(tùy chọn)</span>
-                  </label>
-                  <input
-                    type="tel"
-                    inputMode="numeric"
-                    value={formData.customer_phone}
-                    onChange={async (e) => {
-                      const newPhone = e.target.value;
-                      setFormData({ ...formData, customer_phone: newPhone });
-                      
-                      // Clear timeout if exists
-                      if (searchTimeout) {
-                        clearTimeout(searchTimeout);
-                      }
-                      
-                      // Debounce search
-                      const timeout = setTimeout(() => {
-                        if (newPhone && newPhone.trim().length >= 2) {
-                          searchCustomers(newPhone);
-                        } else {
-                          setCustomerSuggestions([]);
-                          setShowCustomerSuggestions(false);
+
+            {/* Form Content */}
+            <div className="flex-1 overflow-y-auto overflow-x-hidden">
+              <form id="order-form" onSubmit={handleSubmitOrder} className="space-y-3 p-4 sm:p-5">
+
+              {/* Customer Section */}
+              <div className="bg-gradient-to-br from-blue-50 to-blue-100 p-3.5 rounded-lg border border-blue-200">
+                <h3 className="text-sm font-semibold text-gray-700 mb-2.5 flex items-center gap-2">
+                  👤 Thông tin khách hàng
+                </h3>
+                <div className="space-y-2.5">
+                  {/* Name and Phone on Mobile: Stack, on Desktop: 2 columns */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="relative">
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      Tên khách hàng
+                    </label>
+                    <input
+                      type="text"
+                      value={formData.customer_name}
+                      onChange={(e) => {
+                        const newName = e.target.value;
+                        setFormData({ ...formData, customer_name: newName });
+
+                        // Clear timeout if exists
+                        if (searchTimeout) {
+                          clearTimeout(searchTimeout);
                         }
-                      }, 300);
-                      setSearchTimeout(timeout);
-                      
-                      // Load customer info if phone exists (exact match)
-                      if (newPhone && newPhone.trim().length >= 10) {
-                        try {
-                          const customerResponse = await api.get(`/customers/by-phone/${encodeURIComponent(newPhone.trim())}`);
-                          if (customerResponse.data.data && customerResponse.data.data.name) {
-                            // Auto-fill customer name if found
-                            setFormData(prev => ({ ...prev, customer_name: customerResponse.data.data.name }));
+
+                        // Debounce search
+                        const timeout = setTimeout(() => {
+                          searchCustomers(newName);
+                        }, 300);
+                        setSearchTimeout(timeout);
+                      }}
+                      onFocus={() => {
+                        if (formData.customer_name && formData.customer_name.trim().length >= 2) {
+                          searchCustomers(formData.customer_name);
+                        }
+                      }}
+                      onBlur={() => {
+                        // Delay hiding suggestions to allow click
+                        setTimeout(() => setShowCustomerSuggestions(false), 200);
+                      }}
+                      className="w-full px-4 py-3 border border-gray-300 rounded-lg text-base focus:border-blue-500 focus:ring-2 focus:ring-blue-200 transition-all"
+                      placeholder="Nhập tên khách hàng"
+                    />
+                    {showCustomerSuggestions && customerSuggestions.length > 0 && (
+                      <div className="absolute z-50 w-full mt-2 bg-white border border-gray-300 rounded-lg shadow-xl max-h-64 overflow-y-auto">
+                        {customerSuggestions.map((customer) => (
+                          <div
+                            key={customer.id}
+                            onClick={() => handleCustomerSelect(customer)}
+                            className="px-4 py-3 hover:bg-blue-50 active:bg-blue-100 cursor-pointer border-b border-gray-100 last:border-b-0 touch-manipulation"
+                          >
+                            <div className="font-semibold text-gray-900">{customer.name || 'Không có tên'}</div>
+                            <div className="text-sm text-gray-600 mt-1">{customer.phone}</div>
+                            {customer.total_orders > 0 && (
+                              <div className="text-xs text-gray-500 mt-2">
+                                📊 {customer.total_orders} đơn • {new Intl.NumberFormat('vi-VN').format(customer.total_spent || 0)} đ
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="relative">
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      Số điện thoại <span className="text-gray-500 text-xs">(tùy chọn)</span>
+                    </label>
+                    <input
+                      type="tel"
+                      inputMode="numeric"
+                      value={formData.customer_phone}
+                      onChange={async (e) => {
+                        const newPhone = e.target.value;
+                        setFormData({ ...formData, customer_phone: newPhone });
+
+                        // Clear timeout if exists
+                        if (searchTimeout) {
+                          clearTimeout(searchTimeout);
+                        }
+
+                        // Debounce search
+                        const timeout = setTimeout(() => {
+                          if (newPhone && newPhone.trim().length >= 2) {
+                            searchCustomers(newPhone);
+                          } else {
+                            setCustomerSuggestions([]);
                             setShowCustomerSuggestions(false);
                           }
-                        } catch (error) {
-                          // Customer not found or error - keep current name
-                          // Customer not found - log removed for security
+                        }, 300);
+                        setSearchTimeout(timeout);
+
+                        // Load customer info if phone exists (exact match)
+                        if (newPhone && newPhone.trim().length >= 10) {
+                          try {
+                            const customerResponse = await api.get(`/customers/by-phone/${encodeURIComponent(newPhone.trim())}`);
+                            if (customerResponse.data.data && customerResponse.data.data.name) {
+                              // Auto-fill customer name if found
+                              setFormData(prev => ({ ...prev, customer_name: customerResponse.data.data.name }));
+                              setShowCustomerSuggestions(false);
+                            }
+                          } catch (error) {
+                            // Customer not found or error - keep current name
+                          }
                         }
-                      }
-                      
-                      // Load promotions when customer phone changes
-                      await calculateTotalAndLoadPromotions(formData.items, newPhone);
-                    }}
-                    onFocus={() => {
-                      if (formData.customer_phone && formData.customer_phone.trim().length >= 2) {
-                        searchCustomers(formData.customer_phone);
-                      }
-                    }}
-                    onBlur={() => {
-                      // Delay hiding suggestions to allow click
-                      setTimeout(() => setShowCustomerSuggestions(false), 200);
-                    }}
-                    className="w-full px-2 py-1.5 border border-gray-300 rounded-lg text-xs sm:text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-200 transition-all"
-                    placeholder="Nhập số điện thoại"
-                  />
-                  {showCustomerSuggestions && customerSuggestions.length > 0 && (
-                    <div className="absolute z-50 w-full mt-1 bg-white border border-gray-300 rounded-lg shadow-xl max-h-48 overflow-y-auto">
-                      {customerSuggestions.map((customer) => (
-                        <div
-                          key={customer.id}
-                          onClick={() => handleCustomerSelect(customer)}
-                          className="px-3 py-2 hover:bg-blue-50 active:bg-blue-100 cursor-pointer border-b border-gray-100 last:border-b-0 touch-manipulation"
-                        >
-                          <div className="font-medium text-gray-900 text-sm">{customer.name || 'Không có tên'}</div>
-                          <div className="text-xs text-gray-600">{customer.phone}</div>
-                          {customer.total_orders > 0 && (
-                            <div className="text-[10px] text-gray-500 mt-0.5">
-                              {customer.total_orders} đơn • {new Intl.NumberFormat('vi-VN').format(customer.total_spent || 0)} đ
-                            </div>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  )}
+
+                        // Load promotions when customer phone changes
+                        await calculateTotalAndLoadPromotions(formData.items, newPhone);
+                      }}
+                      onFocus={() => {
+                        if (formData.customer_phone && formData.customer_phone.trim().length >= 2) {
+                          searchCustomers(formData.customer_phone);
+                        }
+                      }}
+                      onBlur={() => {
+                        // Delay hiding suggestions to allow click
+                        setTimeout(() => setShowCustomerSuggestions(false), 200);
+                      }}
+                      className="w-full px-4 py-3 border border-gray-300 rounded-lg text-base focus:border-blue-500 focus:ring-2 focus:ring-blue-200 transition-all"
+                      placeholder="Nhập số điện thoại"
+                    />
+                    {showCustomerSuggestions && customerSuggestions.length > 0 && (
+                      <div className="absolute z-50 w-full mt-2 bg-white border border-gray-300 rounded-lg shadow-xl max-h-64 overflow-y-auto">
+                        {customerSuggestions.map((customer) => (
+                          <div
+                            key={customer.id}
+                            onClick={() => handleCustomerSelect(customer)}
+                            className="px-4 py-3 hover:bg-blue-50 active:bg-blue-100 cursor-pointer border-b border-gray-100 last:border-b-0 touch-manipulation"
+                          >
+                            <div className="font-semibold text-gray-900">{customer.name || 'Không có tên'}</div>
+                            <div className="text-sm text-gray-600 mt-1">{customer.phone}</div>
+                            {customer.total_orders > 0 && (
+                              <div className="text-xs text-gray-500 mt-2">
+                                📊 {customer.total_orders} đơn • {new Intl.NumberFormat('vi-VN').format(customer.total_spent || 0)} đ
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
                 </div>
               </div>
 
+              {/* Admin Assignment */}
               {isAdmin() && (
-                <div>
-                  <label className="block text-[10px] sm:text-xs font-medium text-gray-700 mb-0.5">
-                    Gán cho nhân viên
+                <div className="bg-gradient-to-br from-green-50 to-green-100 p-3.5 rounded-lg border border-green-200">
+                  <label className="block text-sm font-semibold text-gray-700 mb-2 flex items-center gap-2">
+                    👥 Gán cho nhân viên
                   </label>
                   <select
                     value={formData.assigned_to}
                     onChange={(e) => setFormData({ ...formData, assigned_to: e.target.value })}
-                    className="w-full px-2 py-1.5 border border-gray-300 rounded-lg text-xs sm:text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-200 transition-all"
+                    className="w-full px-4 py-3 border border-gray-300 rounded-lg text-base focus:border-blue-500 focus:ring-2 focus:ring-blue-200 transition-all"
                   >
                     <option value="">Chưa gán</option>
                     {users
@@ -1072,130 +1086,144 @@ function Orders() {
                 </div>
               )}
 
-              <div className="min-w-0">
-                <label className="block text-[10px] sm:text-xs font-medium text-gray-700 mb-1">Sản phẩm</label>
-                <div className="space-y-1.5 min-w-0">
+              {/* Products Section */}
+              <div className="bg-gradient-to-br from-purple-50 to-purple-100 p-3.5 rounded-lg border border-purple-200">
+                <h3 className="text-sm font-semibold text-gray-700 mb-2.5 flex items-center gap-2">
+                  🧺 Sản phẩm
+                </h3>
+                <div className="space-y-1.5">
                   {formData.items.map((item, index) => (
-                    <div key={index} className="flex gap-1 min-w-0">
-                      <select
-                        value={item.product_id}
-                        onChange={(e) => handleItemChange(index, 'product_id', e.target.value)}
-                        className="flex-1 min-w-0 px-2 py-1.5 border border-gray-300 rounded-lg text-xs sm:text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-200 transition-all"
-                        required
-                      >
-                        <option value="">Chọn sản phẩm</option>
-                        {products.map((product) => (
-                          <option key={product.id} value={product.id}>
-                            {product.name} {product.store_name ? `(${product.store_name})` : ''} - {new Intl.NumberFormat('vi-VN').format(product.price)} đ/{product.unit}
-                          </option>
-                        ))}
-                      </select>
-                      <input
-                        type="number"
-                        inputMode="decimal"
-                        step="0.1"
-                        min="0.1"
-                        placeholder="SL"
-                        value={item.quantity}
-                        onChange={(e) => handleItemChange(index, 'quantity', e.target.value)}
-                        className="w-20 min-w-0 px-2 py-1.5 border border-gray-300 rounded-lg text-xs sm:text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-200 transition-all"
-                        required
-                      />
-                      {formData.items.length > 1 && (
-                        <button
-                          type="button"
-                          onClick={() => handleRemoveItem(index)}
-                          className="px-2 py-1.5 flex-shrink-0 bg-red-100 text-red-600 rounded-lg hover:bg-red-200 active:bg-red-300 text-[10px] sm:text-xs font-medium touch-manipulation"
+                    <div key={index} className="bg-white p-2.5 rounded-lg border border-gray-200 space-y-1.5">
+                      <div>
+                        <label className="block text-xs font-medium text-gray-600 mb-1">Sản phẩm</label>
+                        <select
+                          value={item.product_id}
+                          onChange={(e) => handleItemChange(index, 'product_id', e.target.value)}
+                          className="w-full px-3 py-2.5 border border-gray-300 rounded-lg text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-200 transition-all"
+                          required
                         >
-                          ✕
-                        </button>
-                      )}
+                          <option value="">-- Chọn sản phẩm --</option>
+                          {products.map((product) => (
+                            <option key={product.id} value={product.id}>
+                              {product.name} {product.store_name ? `(${product.store_name})` : ''} - {new Intl.NumberFormat('vi-VN').format(product.price)} đ/{product.unit}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="flex gap-2 items-end">
+                        <div className="flex-1">
+                          <label className="block text-xs font-medium text-gray-600 mb-1">Số lượng</label>
+                          <input
+                            type="number"
+                            inputMode="decimal"
+                            step="0.1"
+                            min="0.1"
+                            placeholder="0.5, 1, 2..."
+                            value={item.quantity}
+                            onChange={(e) => handleItemChange(index, 'quantity', e.target.value)}
+                            className="w-full px-3 py-2.5 border border-gray-300 rounded-lg text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-200 transition-all"
+                            required
+                          />
+                        </div>
+                        {formData.items.length > 1 && (
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveItem(index)}
+                            className="px-4 py-2.5 flex-shrink-0 bg-red-500 hover:bg-red-600 active:bg-red-700 text-white rounded-lg text-sm font-medium touch-manipulation"
+                          >
+                            🗑️ Xóa
+                          </button>
+                        )}
+                      </div>
                     </div>
                   ))}
                   <button
                     type="button"
                     onClick={handleAddItem}
-                    className="w-full min-w-0 px-2 py-1.5 text-xs sm:text-sm text-blue-600 hover:text-blue-700 active:text-blue-800 border border-blue-600 rounded-lg hover:bg-blue-50 active:bg-blue-100 font-medium touch-manipulation"
+                    className="w-full px-4 py-3 text-sm font-semibold text-blue-600 hover:text-blue-700 active:text-blue-800 border-2 border-blue-600 rounded-lg hover:bg-blue-50 active:bg-blue-100 transition-all touch-manipulation"
                   >
-                    + Thêm sản phẩm
+                    ➕ Thêm sản phẩm khác
                   </button>
                 </div>
               </div>
 
-              <div className="min-w-0">
-                <label className="block text-[10px] sm:text-xs font-medium text-gray-700 mb-0.5">
-                  Khuyến mãi <span className="text-gray-500 text-[9px]">(tùy chọn)</span>
-                </label>
+              {/* Promotions Section */}
+              <div className="bg-gradient-to-br from-orange-50 to-orange-100 p-3.5 rounded-lg border border-orange-200">
+                <h3 className="text-sm font-semibold text-gray-700 mb-2.5 flex items-center gap-2">
+                  🎁 Khuyến mãi (tùy chọn)
+                </h3>
                 {applicablePromotions.length > 0 ? (
                   <select
                     value={formData.promotion_id}
                     onChange={(e) => setFormData({ ...formData, promotion_id: e.target.value })}
-                    className="w-full min-w-0 px-2 py-1.5 border border-gray-300 rounded-lg text-xs sm:text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-200 transition-all"
+                    className="w-full px-4 py-3 border border-gray-300 rounded-lg text-base focus:border-blue-500 focus:ring-2 focus:ring-blue-200 transition-all bg-white"
                   >
-                    <option value="">Không áp dụng</option>
+                    <option value="">Không áp dụng khuyến mãi</option>
                     {applicablePromotions.map((promo) => (
                       <option key={promo.id} value={promo.id}>
-                        {promo.name} - {promo.discount_type === 'percentage' 
-                          ? `${promo.discount_value}%` 
+                        🌟 {promo.name} - {promo.discount_type === 'percentage'
+                          ? `${promo.discount_value}%`
                           : `${new Intl.NumberFormat('vi-VN').format(promo.discount_value)} đ`}
                         {promo.max_discount_amount && ` (Tối đa: ${new Intl.NumberFormat('vi-VN').format(promo.max_discount_amount)} đ)`}
                       </option>
                     ))}
                   </select>
                 ) : (
-                  <div className="w-full min-w-0 px-2 py-1.5 border border-gray-300 rounded-lg text-xs sm:text-sm bg-gray-50 text-gray-500 break-words">
-                    {formData.items.some(item => item.product_id && item.quantity) 
-                      ? 'Đang tải...' 
-                      : 'Thêm sản phẩm để xem khuyến mãi'}
+                  <div className="px-4 py-3 border border-orange-300 rounded-lg text-sm bg-white text-gray-600">
+                    {formData.items.some(item => item.product_id && item.quantity)
+                      ? '⏳ Đang tải khuyến mãi...'
+                      : '📝 Thêm sản phẩm để xem khuyến mãi có sẵn'}
                   </div>
                 )}
               </div>
 
-              <div className="min-w-0">
-                <label className="block text-[10px] sm:text-xs font-medium text-gray-700 mb-0.5">Ghi chú</label>
+              {/* Notes Section */}
+              <div className="bg-gradient-to-br from-cyan-50 to-cyan-100 p-3.5 rounded-lg border border-cyan-200">
+                <h3 className="text-sm font-semibold text-gray-700 mb-2 flex items-center gap-2">
+                  📝 Ghi chú (tùy chọn)
+                </h3>
                 <textarea
                   value={formData.note}
                   onChange={(e) => setFormData({ ...formData, note: e.target.value })}
-                  className="w-full min-w-0 px-2 py-1.5 border border-gray-300 rounded-lg text-xs sm:text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-200 transition-all resize-none"
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-200 transition-all resize-none bg-white"
                   rows="2"
-                  placeholder="Ghi chú (tùy chọn)"
+                  maxLength="200"
+                  placeholder="Ghi chú ngắn... (tối đa 200 ký tự)"
                 />
-              </div>
-
-              <div className="flex flex-row gap-1.5 pt-2 border-t border-gray-200 min-w-0">
-                <button
-                  type="submit"
-                  className="flex-1 min-w-0 bg-gradient-to-r from-blue-600 to-blue-700 text-white py-2 rounded-lg hover:from-blue-700 hover:to-blue-800 active:from-blue-800 active:to-blue-900 font-semibold text-xs sm:text-sm shadow-md hover:shadow-lg transition-all touch-manipulation"
-                >
-                  ✓ Tạo đơn
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowModal(false);
-                    setFormData({
-                      customer_name: '',
-                      customer_phone: '0',
-                      items: [{ product_id: '', quantity: '' }],
-                      note: '',
-                      assigned_to: '',
-                      promotion_id: '',
-                    });
-                    setApplicablePromotions([]);
-                  }}
-                  className="flex-1 min-w-0 bg-gray-200 text-gray-800 py-2 rounded-lg hover:bg-gray-300 active:bg-gray-400 font-medium text-xs sm:text-sm transition-all touch-manipulation"
-                  onClick={() => {
-                    setShowCompleteModal(false);
-                    setOrderToComplete(null);
-                    setShouldPrint(false);
-                    setPaymentMethod('cash');
-                    setCustomAmountPaid('');
-                  }}
-                >
-                  Hủy
-                </button>
+                <div className="text-xs text-gray-500 mt-1">
+                  {formData.note.length}/200
+                </div>
               </div>
               </form>
+            </div>
+
+            {/* Footer - Action Buttons */}
+            <div className="flex gap-3 p-4 sm:p-5 border-t border-gray-200 bg-gray-50 flex-shrink-0 flex-wrap">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowModal(false);
+                  setFormData({
+                    customer_name: '',
+                    customer_phone: '0',
+                    items: [{ product_id: '', quantity: '' }],
+                    note: '',
+                    assigned_to: '',
+                    promotion_id: '',
+                  });
+                  setApplicablePromotions([]);
+                }}
+                className="flex-1 px-4 py-3 text-base text-gray-700 hover:text-gray-800 border-2 border-gray-300 rounded-lg hover:bg-gray-200 active:bg-gray-300 font-semibold transition-all touch-manipulation"
+              >
+                ✕ Hủy
+              </button>
+              <button
+                form="order-form"
+                type="submit"
+                className="flex-1 px-4 py-3 text-base text-white bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 active:from-blue-800 active:to-blue-900 rounded-lg font-semibold shadow-lg hover:shadow-xl transition-all touch-manipulation"
+              >
+                ✓ Tạo đơn hàng
+              </button>
             </div>
           </div>
         </div>

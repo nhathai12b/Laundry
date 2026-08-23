@@ -42,6 +42,7 @@ function Timesheets() {
   const [checkinNote, setCheckinNote] = useState('');
   const [checkoutOutAt, setCheckoutOutAt] = useState('');
   const [closingTimesheetId, setClosingTimesheetId] = useState(null);
+  const [closingShift, setClosingShift] = useState(null);
   const [openingCashAmount, setOpeningCashAmount] = useState('');
   const [cashDrawerSummary, setCashDrawerSummary] = useState(null);
   const [showCashDrawerModal, setShowCashDrawerModal] = useState(false);
@@ -180,24 +181,32 @@ function Timesheets() {
   };
 
   const handleCheckInClick = () => {
-    // Nếu đã chọn nhân viên khi login, tự động dùng employee_id đó
     const employeeIdFromToken = getEmployeeId();
     setShowCheckinModal(true);
-    setSelectedEmployee(employeeIdFromToken || '');
+    // Check-in thêm người vào ca đang mở: bắt buộc tự chọn tên.
+    // Check-in ca đầu: dùng nhân viên đã chọn khi login (nếu có).
+    setSelectedEmployee(openShifts.length > 0 ? '' : (employeeIdFromToken || ''));
     setCheckinNote('');
     setOpeningCashAmount('');
   };
 
   const handleCheckIn = async () => {
     try {
-      // Ưu tiên dùng employee_id từ token (nếu đã chọn khi login)
-      // Nếu không có trong token, dùng từ form
       const employeeIdFromToken = getEmployeeId();
-      const employeeIdToSend = employeeIdFromToken || selectedEmployee || undefined;
-      
+      const isAdditional = openShifts.length > 0;
+      // Với ca đầu: ưu tiên nhân viên chọn trong form, fallback token.
+      // Với người vào thêm: phải chọn tên trong form (backend cũng bắt buộc).
+      const employeeIdToSend = selectedEmployee || (!isAdditional ? employeeIdFromToken : '') || undefined;
+
+      if (isAdditional && !employeeIdToSend) {
+        alert('Vui lòng chọn tên nhân viên check-in thêm vào ca.');
+        return;
+      }
+
       await api.post('/timesheets/check-in', {
         employee_id: employeeIdToSend,
-        opening_cash_amount: openingCashAmount !== '' ? parseFloat(openingCashAmount) : 0,
+        // Két tiền thuộc ca chính — người vào thêm không nhập quỹ đầu ca
+        opening_cash_amount: isAdditional ? 0 : (openingCashAmount !== '' ? parseFloat(openingCashAmount) : 0),
         note: checkinNote,
       });
       setShowCheckinModal(false);
@@ -211,12 +220,13 @@ function Timesheets() {
     }
   };
 
-  const handleCheckOutClick = async () => {
-    const ts = todayCheckIn;
+  const handleCheckOutClick = async (shift) => {
+    const ts = shift || todayCheckIn;
     if (!ts?.id) {
       alert('Không tìm thấy ca đang mở.');
       return;
     }
+    setClosingShift(ts);
     setClosingTimesheetId(ts.id);
     setCheckoutOutAt('');
     try {
@@ -283,6 +293,7 @@ function Timesheets() {
       setCheckoutWithdrawnAmount('');
       setCheckoutOutAt('');
       setClosingTimesheetId(null);
+      setClosingShift(null);
       setCashShortagePaidAmount('');
       setCashDrawerSummary(null);
       setExpectedRevenue(0);
@@ -517,12 +528,8 @@ function Timesheets() {
 
   return (
     <div className="space-y-4 sm:space-y-6">
-      <div className="mb-4 sm:mb-6 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 sm:gap-0">
-        <div className="flex-1 min-w-0">
-          <h1 className="text-2xl sm:text-3xl font-bold text-gray-900 mb-1 sm:mb-0">Chấm công</h1>
-          <p className="text-sm sm:text-base text-gray-600">Quản lý chấm công của nhân viên</p>
-        </div>
-        {isAdmin() && stores.length > 0 && (
+      {isAdmin() && stores.length > 0 && (
+        <div className="mb-4 sm:mb-6">
           <div className="w-full sm:w-auto">
             <label className="block text-xs sm:text-sm font-medium text-gray-700 mb-1">Lọc theo cửa hàng</label>
             <select
@@ -538,17 +545,12 @@ function Timesheets() {
               ))}
             </select>
           </div>
-        )}
-      </div>
+        </div>
+      )}
 
       {/* Check In/Out */}
       {!isAdmin() && (
-        <div className="bg-gradient-to-br from-white to-gray-50 rounded-xl shadow-lg border border-gray-200 p-4 sm:p-8">
-          {openShifts.length > 1 && (
-            <div className="mb-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
-              Bạn có <strong>{openShifts.length}</strong> ca chưa checkout. Hệ thống sẽ đóng <strong>từ ca cũ nhất</strong> mỗi lần bạn check-out.
-            </div>
-          )}
+        <div className="bg-gradient-to-br from-white to-gray-50 rounded-xl shadow-lg border border-gray-200 p-4 sm:p-6">
           {todayCheckIn &&
             formatLocalDateKey(todayCheckIn.check_in) !== format(new Date(), 'yyyy-MM-dd') && (
               <div className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-900">
@@ -558,20 +560,56 @@ function Timesheets() {
               </div>
             )}
           <div className="text-center mb-4">
-            <div className="text-xs sm:text-sm text-gray-600 mb-3 sm:mb-2">Hôm nay</div>
-            {todayCheckIn ? (
+            {openShifts.length > 0 ? (
               <div>
-                <div className="text-base sm:text-lg font-medium text-green-600 mb-3 sm:mb-2">
-                  Ca đang mở — vào:{' '}
-                  {formatLocalDate(todayCheckIn.check_in)}{' '}
-                  {formatLocalTime(todayCheckIn.check_in)}
-                  {todayCheckIn.employee_name && (
-                    <span className="block text-sm font-normal text-gray-600 mt-1">NV: {todayCheckIn.employee_name}</span>
-                  )}
+                <div className="text-base sm:text-lg font-medium text-green-600 mb-3">
+                  {openShifts.length > 1
+                    ? `${openShifts.length} người đang đứng ca`
+                    : 'Ca đang mở'}
                 </div>
+
+                {/* Danh sách ca đang mở — mỗi người một thẻ, check-out riêng */}
+                <div className="space-y-2 mb-4">
+                  {openShifts.map((shift, idx) => (
+                    <div
+                      key={shift.id}
+                      className={`rounded-xl border p-3 text-left ${
+                        idx === 0 ? 'border-green-300 bg-green-50' : 'border-blue-200 bg-blue-50'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="font-semibold text-gray-900 truncate">
+                            {shift.employee_name || 'Chưa chọn tên'}
+                            {idx === 0 && (
+                              <span className="ml-2 align-middle text-[10px] font-bold uppercase tracking-wide text-green-700 bg-green-100 border border-green-300 rounded px-1.5 py-0.5">
+                                Ca chính
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-xs text-gray-600 mt-0.5">
+                            Vào ca: {formatLocalDate(shift.check_in)} {formatLocalTime(shift.check_in)}
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => handleCheckOutClick(shift)}
+                          className="flex-shrink-0 bg-gradient-to-r from-red-600 to-red-700 text-white px-4 py-2 rounded-lg active:from-red-700 active:to-red-800 hover:from-red-700 hover:to-red-800 font-semibold shadow transition-all touch-manipulation text-sm"
+                        >
+                          Check-out
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
                 <div className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-left">
                   <div className="flex items-center justify-between gap-2 mb-2">
-                    <div className="font-semibold text-emerald-900">Ngăn két hiện tại</div>
+                    <div className="font-semibold text-emerald-900">
+                      Ngăn két hiện tại
+                      {openShifts.length > 1 && (
+                        <span className="block text-[11px] font-normal text-emerald-700">(két thuộc ca chính)</span>
+                      )}
+                    </div>
                     <div className="text-lg font-bold text-emerald-700">
                       {formatMoney(cashDrawerSummary?.expected_cash_amount || 0)}
                     </div>
@@ -599,11 +637,12 @@ function Timesheets() {
                     </button>
                   </div>
                 </div>
+
                 <button
-                  onClick={handleCheckOutClick}
-                  className="w-full sm:w-auto bg-gradient-to-r from-red-600 to-red-700 text-white px-8 py-4 sm:py-3 rounded-xl active:from-red-700 active:to-red-800 hover:from-red-700 hover:to-red-800 font-semibold shadow-lg hover:shadow-xl transition-all duration-300 touch-manipulation text-base sm:text-lg"
+                  onClick={handleCheckInClick}
+                  className="w-full sm:w-auto bg-white border-2 border-green-600 text-green-700 px-8 py-3 rounded-xl active:bg-green-100 hover:bg-green-50 font-semibold shadow transition-all duration-300 touch-manipulation text-base"
                 >
-                  Check-out
+                  + Check-in thêm nhân viên
                 </button>
               </div>
             ) : (
@@ -1260,10 +1299,15 @@ function Timesheets() {
           <div className="bg-white rounded-t-xl sm:rounded-xl max-w-md w-full max-h-[85vh] flex flex-col shadow-2xl">
             <div className="flex-shrink-0 p-3 sm:p-4 border-b border-gray-200">
               <h2 className="text-base sm:text-lg font-bold text-gray-900">Kết thúc ca làm việc</h2>
-              {todayCheckIn && (
+              {closingShift && (
                 <p className="text-xs text-gray-600 mt-1">
-                  Ca check-in {formatLocalDate(todayCheckIn.check_in, 'dd/MM/yyyy HH:mm')}
-                  {todayCheckIn.employee_name ? ` — ${todayCheckIn.employee_name}` : ''}
+                  Ca check-in {formatLocalDate(closingShift.check_in, 'dd/MM/yyyy HH:mm')}
+                  {closingShift.employee_name ? ` — ${closingShift.employee_name}` : ''}
+                </p>
+              )}
+              {closingShift && openShifts.length > 1 && openShifts[0]?.id !== closingShift.id && (
+                <p className="text-[11px] text-blue-700 mt-1 bg-blue-50 border border-blue-200 rounded px-2 py-1">
+                  Đây là <strong>ca phụ</strong> — chỉ chấm giờ công. Doanh thu &amp; két tiền được tính khi ca chính check-out.
                 </p>
               )}
             </div>
@@ -1491,7 +1535,9 @@ function Timesheets() {
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-2 sm:p-3 z-50 overflow-y-auto overflow-x-hidden">
           <div className="bg-white rounded-lg max-w-md w-full max-h-[90vh] flex flex-col my-auto shadow-2xl">
             <div className="flex items-center justify-between p-4 sm:p-5 pb-3 border-b border-gray-200 flex-shrink-0">
-              <h2 className="text-base sm:text-lg font-bold truncate pr-2">Mở ca làm việc</h2>
+              <h2 className="text-base sm:text-lg font-bold truncate pr-2">
+                {openShifts.length > 0 ? 'Check-in thêm nhân viên' : 'Mở ca làm việc'}
+              </h2>
               <button
                 onClick={() => {
                   setShowCheckinModal(false);
@@ -1508,10 +1554,14 @@ function Timesheets() {
               <div className="space-y-3 min-w-0 py-2">
               {(() => {
                 const employeeIdFromToken = getEmployeeId();
+                const isAdditional = openShifts.length > 0;
+                // Nhân viên đang có ca mở thì không thể check-in thêm lần nữa
+                const busyEmployeeIds = new Set(openShifts.map((s) => s.employee_id).filter(Boolean));
+                const availableEmployees = employees.filter((emp) => !busyEmployeeIds.has(emp.id));
                 const selectedEmployeeInfo = employees.find(emp => emp.id === parseInt(selectedEmployee || employeeIdFromToken || '0'));
-                
-                // Nếu đã chọn nhân viên khi login, hiển thị thông tin và ẩn dropdown
-                if (employeeIdFromToken && selectedEmployeeInfo) {
+
+                // Ca đầu tiên + đã chọn nhân viên khi login: hiển thị cố định
+                if (!isAdditional && employeeIdFromToken && selectedEmployeeInfo) {
                   return (
                     <div className="min-w-0">
                       <label className="block text-xs sm:text-sm font-medium text-gray-700 mb-1">
@@ -1526,9 +1576,8 @@ function Timesheets() {
                     </div>
                   );
                 }
-                
-                // Nếu chưa chọn nhân viên khi login, hiển thị dropdown
-                if (employees.length > 0) {
+
+                if (availableEmployees.length > 0) {
                   return (
                     <div className="min-w-0">
                       <label className="block text-xs sm:text-sm font-medium text-gray-700 mb-1">
@@ -1540,18 +1589,40 @@ function Timesheets() {
                         className="w-full min-w-0 px-3 py-2 border rounded-lg text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-200"
                       >
                         <option value="">-- Chọn tên của bạn --</option>
-                        {employees.map((emp) => (
+                        {availableEmployees.map((emp) => (
                           <option key={emp.id} value={emp.id}>
                             {emp.name} {emp.phone ? `(${emp.phone})` : ''}
                           </option>
                         ))}
                       </select>
-                      <div className="mt-2 p-2 bg-blue-50 rounded-lg border border-blue-200">
-                        <p className="text-[10px] sm:text-xs text-blue-800 font-medium mb-1">
-                          💡 Lưu ý khi nhiều người cùng làm việc:
+                      {isAdditional ? (
+                        <div className="mt-2 p-2 bg-blue-50 rounded-lg border border-blue-200">
+                          <p className="text-[10px] sm:text-xs text-blue-700">
+                            Bạn đang check-in <strong>thêm người</strong> vào ca đang mở. Giờ công được chấm riêng cho từng người; doanh thu và két tiền tính vào <strong>ca chính</strong>.
+                          </p>
+                        </div>
+                      ) : (
+                        <div className="mt-2 p-2 bg-blue-50 rounded-lg border border-blue-200">
+                          <p className="text-[10px] sm:text-xs text-blue-800 font-medium mb-1">
+                            💡 Lưu ý khi nhiều người cùng làm việc:
+                          </p>
+                          <p className="text-[10px] sm:text-xs text-blue-700">
+                            Mỗi nhân viên phải chọn <strong>tên của mình</strong> khi check-in. Sau khi mở ca, dùng nút <strong>+ Check-in thêm nhân viên</strong> để người tiếp theo vào ca.
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  );
+                }
+                if (employees.length > 0) {
+                  return (
+                    <div className="min-w-0">
+                      <div className="p-3 bg-yellow-50 rounded-lg border border-yellow-200">
+                        <p className="text-xs sm:text-sm text-yellow-800 font-medium mb-1">
+                          ⚠️ Tất cả nhân viên đều đang có ca mở
                         </p>
-                        <p className="text-[10px] sm:text-xs text-blue-700">
-                          Mỗi nhân viên phải chọn <strong>tên của mình</strong> khi check-in. Nếu không chọn, chỉ có 1 người có thể check-in/ngày.
+                        <p className="text-[10px] sm:text-xs text-yellow-700">
+                          Không còn nhân viên nào để check-in thêm. Check-out ca cũ trước, hoặc liên hệ admin để thêm nhân viên mới.
                         </p>
                       </div>
                     </div>
@@ -1570,20 +1641,22 @@ function Timesheets() {
                   </div>
                 );
               })()}
-              <div className="min-w-0">
-                <label className="block text-xs sm:text-sm font-medium text-gray-700 mb-1">
-                  Nhập quỹ đầu ca <span className="text-gray-500 text-[10px]">(tiền lẻ trong két)</span>
-                </label>
-                <input
-                  type="number"
-                  inputMode="numeric"
-                  step="1"
-                  value={openingCashAmount}
-                  onChange={(e) => setOpeningCashAmount(e.target.value)}
-                  className="w-full min-w-0 px-3 py-2 border rounded-lg text-base focus:border-blue-500 focus:ring-1 focus:ring-blue-200"
-                  placeholder="Ví dụ: 500000"
-                />
-              </div>
+              {openShifts.length === 0 && (
+                <div className="min-w-0">
+                  <label className="block text-xs sm:text-sm font-medium text-gray-700 mb-1">
+                    Nhập quỹ đầu ca <span className="text-gray-500 text-[10px]">(tiền lẻ trong két)</span>
+                  </label>
+                  <input
+                    type="number"
+                    inputMode="numeric"
+                    step="1"
+                    value={openingCashAmount}
+                    onChange={(e) => setOpeningCashAmount(e.target.value)}
+                    className="w-full min-w-0 px-3 py-2 border rounded-lg text-base focus:border-blue-500 focus:ring-1 focus:ring-blue-200"
+                    placeholder="Ví dụ: 500000"
+                  />
+                </div>
+              )}
               <div className="min-w-0">
                 <label className="block text-xs sm:text-sm font-medium text-gray-700 mb-1">
                   Ghi chú <span className="text-gray-500 text-[10px]">(tùy chọn)</span>
