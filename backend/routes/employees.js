@@ -1,24 +1,63 @@
 import express from 'express';
 import { query, queryOne, execute, transaction } from '../database/db.js';
-import { authenticate } from '../middleware/auth.js';
-import { authorize } from '../middleware/auth.js';
+import { authenticate, authorize, blockEmployeeLogin } from '../middleware/auth.js';
 import { validateRequiredString, sanitizeString } from '../utils/validators.js';
+import { hashPassword, validatePasswordStrength } from '../utils/helpers.js';
 
 const router = express.Router();
+
+// Chuẩn hóa giá trị lương (hourly_rate): null nếu bỏ trống
+const parseRate = (value, fieldName) => {
+  if (value === undefined) return { skip: true };
+  if (value === null || value === '') return { value: null };
+  const num = Number.parseFloat(value);
+  if (!Number.isFinite(num) || num < 0) {
+    return { error: `${fieldName} phải là số không âm` };
+  }
+  return { value: Math.round(num * 100) / 100 };
+};
+
+// Mật khẩu đăng nhập riêng: SĐT là định danh nên phải có và không trùng với
+// tài khoản users hay nhân viên khác đã có mật khẩu
+const validateEmployeeLoginPhone = async (phone, excludeEmployeeId = null) => {
+  if (!phone) {
+    return 'Nhân viên cần có SĐT để đăng nhập riêng. Vui lòng nhập SĐT.';
+  }
+  const userWithPhone = await queryOne('SELECT id FROM users WHERE phone = ?', [phone]);
+  if (userWithPhone) {
+    return 'SĐT này trùng với một tài khoản hệ thống. Vui lòng dùng SĐT khác.';
+  }
+  const params = [phone];
+  let sql = 'SELECT id FROM employees WHERE phone = ? AND password_hash IS NOT NULL';
+  if (excludeEmployeeId) {
+    sql += ' AND id != ?';
+    params.push(excludeEmployeeId);
+  }
+  const employeeWithPhone = await queryOne(sql, params);
+  if (employeeWithPhone) {
+    return 'SĐT này đã được nhân viên khác dùng để đăng nhập. Vui lòng dùng SĐT khác.';
+  }
+  return null;
+};
 
 // All routes require authentication
 router.use(authenticate);
 
 // Get employees for current store (employer) or selected store (admin)
-router.get('/', async (req, res) => {
+// blockEmployeeLogin: response chứa hourly_rate của mọi đồng nghiệp — token
+// nhân viên cá nhân không được đọc (UI nhân viên dùng /timesheets/store-employees
+// chỉ có tên + SĐT)
+router.get('/', blockEmployeeLogin, async (req, res) => {
   try {
     let employees;
     
+    // Không SELECT * — tránh trả password_hash về client
+    const employeeColumns = 'e.id, e.store_id, e.name, e.phone, e.hourly_rate, e.status, e.created_at, e.updated_at, (e.password_hash IS NOT NULL) AS has_login';
     if (req.user.role === 'admin' && req.user.role !== 'root') {
       // Admin can ONLY see employees from stores in their chain
       // employees.store_id references users.id, and users.store_id must be in stores with admin_id = user.id
       employees = await query(`
-        SELECT e.*, u.name as store_name, u.name as account_name, u.phone as account_phone
+        SELECT ${employeeColumns}, u.name as store_name, u.name as account_name, u.phone as account_phone
         FROM employees e
         JOIN users u ON e.store_id = u.id
         JOIN stores s ON u.store_id = s.id
@@ -32,9 +71,9 @@ router.get('/', async (req, res) => {
       // Employer can only see employees of their account
       // employees.store_id references users.id, so use req.user.id
       employees = await query(`
-        SELECT * FROM employees
-        WHERE store_id = ? AND status = ?
-        ORDER BY name
+        SELECT ${employeeColumns} FROM employees e
+        WHERE e.store_id = ? AND e.status = ?
+        ORDER BY e.name
       `, [req.user.id, 'active']);
     }
 
@@ -46,9 +85,9 @@ router.get('/', async (req, res) => {
 });
 
 // Create employee (Admin or Store owner)
-router.post('/', async (req, res) => {
+router.post('/', blockEmployeeLogin, async (req, res) => {
   try {
-    const { name, phone, user_id } = req.body;
+    const { name, phone, user_id, password, hourly_rate } = req.body;
     
     // Determine store_id (which is actually user_id in employees table)
     let storeId;
@@ -108,12 +147,36 @@ router.post('/', async (req, res) => {
       phoneValue = phoneSanitized.value || null;
     }
 
-    const result = await execute(`
-      INSERT INTO employees (store_id, name, phone)
-      VALUES (?, ?, ?)
-    `, [storeId, nameValidation.value, phoneValue]);
+    // Mật khẩu đăng nhập riêng (tùy chọn)
+    let passwordHash = null;
+    if (password !== undefined && password !== null && password !== '') {
+      const passwordValidation = validatePasswordStrength(password);
+      if (!passwordValidation.valid) {
+        return res.status(400).json({ error: passwordValidation.message });
+      }
+      const phoneError = await validateEmployeeLoginPhone(phoneValue);
+      if (phoneError) {
+        return res.status(400).json({ error: phoneError });
+      }
+      passwordHash = await hashPassword(password);
+    }
 
-    const employee = await queryOne('SELECT * FROM employees WHERE id = ?', [result.insertId]);
+    // Thiết lập lương theo giờ
+    const hourly = parseRate(hourly_rate, 'Lương theo giờ');
+    if (hourly.error) return res.status(400).json({ error: hourly.error });
+
+    const result = await execute(`
+      INSERT INTO employees (store_id, name, phone, password_hash, hourly_rate)
+      VALUES (?, ?, ?, ?, ?)
+    `, [
+      storeId,
+      nameValidation.value,
+      phoneValue,
+      passwordHash,
+      hourly.skip ? null : hourly.value,
+    ]);
+
+    const employee = await queryOne('SELECT id, store_id, name, phone, hourly_rate, status, created_at, updated_at, (password_hash IS NOT NULL) AS has_login FROM employees WHERE id = ?', [result.insertId]);
     res.status(201).json({ data: employee });
   } catch (error) {
     console.error('Create employee error:', error);
@@ -122,9 +185,9 @@ router.post('/', async (req, res) => {
 });
 
 // Update employee
-router.patch('/:id', async (req, res) => {
+router.patch('/:id', blockEmployeeLogin, async (req, res) => {
   try {
-    const { name, phone, status, user_id, store_id } = req.body;
+    const { name, phone, status, user_id, store_id, password, hourly_rate } = req.body;
 
     const employee = await queryOne('SELECT * FROM employees WHERE id = ?', [req.params.id]);
     if (!employee) {
@@ -186,6 +249,41 @@ router.patch('/:id', async (req, res) => {
       values.push(status);
     }
 
+    const hasNewPassword = password !== undefined && password !== null && password !== '';
+
+    // Nếu SĐT đăng nhập thay đổi (nhân viên ĐANG có tài khoản login) hoặc
+    // đang đặt mật khẩu mới → luôn kiểm tra SĐT không trùng users/nhân viên
+    // khác. Trước đây chỉ check khi có password → đổi riêng SĐT có thể tạo
+    // 2 login trùng số và khóa lẫn nhau.
+    const phoneIsChanging = phone !== undefined;
+    if (hasNewPassword || (phoneIsChanging && employee.password_hash)) {
+      const loginPhone = phoneIsChanging
+        ? (phone !== null && phone !== '' ? (sanitizeString(phone).value || null) : null)
+        : employee.phone;
+      const phoneError = await validateEmployeeLoginPhone(loginPhone, employee.id);
+      if (phoneError) {
+        return res.status(400).json({ error: phoneError });
+      }
+    }
+
+    // Đổi/đặt mật khẩu đăng nhập riêng
+    if (hasNewPassword) {
+      const passwordValidation = validatePasswordStrength(password);
+      if (!passwordValidation.valid) {
+        return res.status(400).json({ error: passwordValidation.message });
+      }
+      updates.push('password_hash = ?');
+      values.push(await hashPassword(password));
+    }
+
+    // Thiết lập lương theo giờ
+    const hourly = parseRate(hourly_rate, 'Lương theo giờ');
+    if (hourly.error) return res.status(400).json({ error: hourly.error });
+    if (!hourly.skip) {
+      updates.push('hourly_rate = ?');
+      values.push(hourly.value);
+    }
+
     // Handle store_id/user_id update (only for admin)
     let newStoreId = user_id || store_id;
     if (newStoreId !== undefined) {
@@ -235,7 +333,7 @@ router.patch('/:id', async (req, res) => {
 
     await execute(`UPDATE employees SET ${updates.join(', ')} WHERE id = ?`, values);
 
-    const updated = await queryOne('SELECT * FROM employees WHERE id = ?', [req.params.id]);
+    const updated = await queryOne('SELECT id, store_id, name, phone, hourly_rate, status, created_at, updated_at, (password_hash IS NOT NULL) AS has_login FROM employees WHERE id = ?', [req.params.id]);
     res.json({ data: updated });
   } catch (error) {
     console.error('Update employee error:', error);
@@ -244,7 +342,7 @@ router.patch('/:id', async (req, res) => {
 });
 
 // Delete employee
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', blockEmployeeLogin, async (req, res) => {
   try {
     // Root admin is software vendor, not store operator - cannot delete employees
     if (req.user.role === 'root') {

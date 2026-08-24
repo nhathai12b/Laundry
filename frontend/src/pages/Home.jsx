@@ -4,6 +4,7 @@ import api from '../utils/api';
 import { getAuth, isAdmin, isEmployer, getEmployeeId } from '../utils/auth';
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDaysInMonth } from 'date-fns';
 import { printBill } from '../utils/printBill';
+import MoneyInput from '../components/MoneyInput';
 import { bestApplicablePromotionId, promotionDiscountAmount } from '../utils/promotions';
 import {
   formatLocalDate,
@@ -1246,12 +1247,9 @@ function Home() {
                 <label className="block text-sm sm:text-base font-semibold text-gray-700 mb-2">
                   Số tiền nhận
                 </label>
-                <input
-                  type="number"
-                  min="1"
-                  step="1000"
+                <MoneyInput
                   value={debtPayAmount}
-                  onChange={(e) => setDebtPayAmount(e.target.value)}
+                  onChange={setDebtPayAmount}
                   className="w-full min-w-0 px-3 py-2 border rounded-xl text-sm sm:text-base focus:border-green-500 focus:ring-1 focus:ring-green-200"
                 />
               </div>
@@ -1906,12 +1904,9 @@ function Home() {
                   <label className="block text-sm sm:text-base font-semibold text-gray-700 mb-2">
                     Số tiền thực thu
                   </label>
-                  <input
-                    type="number"
-                    min="0"
-                    step="1000"
+                  <MoneyInput
                     value={amountPaid}
-                    onChange={(e) => setAmountPaid(e.target.value)}
+                    onChange={setAmountPaid}
                     className="w-full min-w-0 px-3 py-2 border rounded-xl text-sm sm:text-base focus:border-green-500 focus:ring-1 focus:ring-green-200"
                   />
                 </div>

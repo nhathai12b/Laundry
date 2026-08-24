@@ -115,8 +115,10 @@ function getUtcRangeFromQuery(req, month, year) {
 
   if (month && year) {
     const offset = getTimezoneOffsetMinutes(req);
-    const start = new Date(Date.UTC(Number(year), Number(month) - 1, 1) - offset * 60 * 1000);
-    const end = new Date(Date.UTC(Number(year), Number(month), 1) - offset * 60 * 1000);
+    // offset = getTimezoneOffset() = UTC − local (VN: -420).
+    // Mốc local 00:00 ngày 1 → UTC = local + offset  (VD: 1/8 00:00 VN = 31/7 17:00Z)
+    const start = new Date(Date.UTC(Number(year), Number(month) - 1, 1) + offset * 60 * 1000);
+    const end = new Date(Date.UTC(Number(year), Number(month), 1) + offset * 60 * 1000);
     return { startAt: formatDateTimeUTC(start), endAt: formatDateTimeUTC(end) };
   }
 

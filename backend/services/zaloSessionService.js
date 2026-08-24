@@ -29,14 +29,40 @@ function parseCredentials(raw) {
   }
 }
 
-async function upsertAccount(storeId, fields) {
-  const existing = await queryOne('SELECT id FROM store_zalo_accounts WHERE store_id = ?', [storeId]);
-  if (!existing) {
-    await execute(`
-      INSERT INTO store_zalo_accounts (store_id, status, qr_path)
-      VALUES (?, 'not_logged_in', ?)
-    `, [storeId, getQrPath(storeId)]);
+// Tự đảm bảo cột qr_image tồn tại (DB có thể được khởi tạo lại mà chưa chạy
+// migration migrate-zalo-qr). Kết quả cache trong promise — chỉ check 1 lần.
+let qrImageColumnEnsured = null;
+async function ensureQrImageColumn() {
+  if (!qrImageColumnEnsured) {
+    qrImageColumnEnsured = (async () => {
+      const row = await queryOne(`
+        SELECT COUNT(*) AS count FROM information_schema.columns
+        WHERE table_schema = DATABASE()
+          AND table_name = 'store_zalo_accounts'
+          AND column_name = 'qr_image'
+      `);
+      if (!row || Number(row.count) === 0) {
+        await execute('ALTER TABLE store_zalo_accounts ADD COLUMN qr_image LONGTEXT NULL');
+        console.log('✅ Auto-added store_zalo_accounts.qr_image column');
+      }
+    })().catch((error) => {
+      qrImageColumnEnsured = null; // cho phép thử lại ở request sau
+      throw error;
+    });
   }
+  return qrImageColumnEnsured;
+}
+
+async function upsertAccount(storeId, fields) {
+  await ensureQrImageColumn();
+
+  // INSERT ... ON DUPLICATE: an toàn khi nhiều request (status/qr/login) chạy
+  // đồng thời — trước đây SELECT-rồi-INSERT bị race gây ER_DUP_ENTRY
+  await execute(`
+    INSERT INTO store_zalo_accounts (store_id, status, qr_path)
+    VALUES (?, 'not_logged_in', ?)
+    ON DUPLICATE KEY UPDATE store_id = store_id
+  `, [storeId, getQrPath(storeId)]);
 
   const updates = [];
   const values = [];
@@ -74,6 +100,7 @@ async function saveLoggedInAccount(storeId, api, credentials) {
     last_login_at: formatDateTimeUTC(),
     last_error: null,
     qr_path: getQrPath(storeId),
+    qr_image: null, // đã đăng nhập xong, không cần giữ QR nữa
   });
 
   return { zaloUserId: ownId, zaloName };
@@ -127,6 +154,7 @@ export async function startZaloQrLogin(storeId) {
   await upsertAccount(storeId, {
     status: 'pending_qr',
     qr_path: qrPath,
+    qr_image: null, // xóa QR cũ, chờ QR mới sinh ra
     last_error: null,
   });
 
@@ -134,6 +162,13 @@ export async function startZaloQrLogin(storeId) {
     try {
       if (event.type === LoginQRCallbackEventType.QRCodeGenerated) {
         await event.actions?.saveToFile(qrPath);
+        // Lưu ảnh QR vào database (base64) để không phụ thuộc file trên đĩa
+        try {
+          const qrData = await fs.readFile(qrPath);
+          await upsertAccount(storeId, { qr_image: qrData.toString('base64') });
+        } catch (qrError) {
+          console.warn('Could not persist Zalo QR image to DB:', qrError.message);
+        }
       }
 
       if (event.type === LoginQRCallbackEventType.QRCodeDeclined) {
@@ -190,8 +225,21 @@ export async function startZaloQrLogin(storeId) {
 }
 
 export async function getZaloQrDataUrl(storeId) {
-  await ensureZaloAccountRow(storeId);
-  const qrPath = getQrPath(storeId);
+  // Đường đọc thuần — không upsert (tránh 1 write + kéo credentials_json
+  // LONGTEXT mỗi 3s khi modal đang poll). Chỉ SELECT đúng 2 cột cần.
+  await ensureQrImageColumn();
+  const account = await queryOne(
+    'SELECT qr_image, qr_path FROM store_zalo_accounts WHERE store_id = ?',
+    [storeId]
+  );
+
+  // Ưu tiên ảnh QR đã lưu trong database
+  if (account?.qr_image) {
+    return `data:image/png;base64,${account.qr_image}`;
+  }
+
+  // Fallback: file trên đĩa (dữ liệu cũ trước khi có cột qr_image)
+  const qrPath = account?.qr_path || getQrPath(storeId);
   const data = await fs.readFile(qrPath);
   return `data:image/png;base64,${data.toString('base64')}`;
 }
@@ -205,6 +253,7 @@ export async function logoutZalo(storeId) {
     status: 'not_logged_in',
     last_error: null,
     last_login_at: null,
+    qr_image: null,
   });
 }
 

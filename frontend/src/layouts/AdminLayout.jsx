@@ -56,7 +56,7 @@ function AdminLayout() {
       {/* Mobile Header with Navigation */}
       <div className="lg:hidden bg-gradient-to-r from-blue-600 to-blue-700 shadow-lg sticky top-0 z-50 pt-safe">
         <div className="flex items-center justify-between p-3 px-4">
-          <h1 className="text-lg font-bold text-white">Quản lý cửa hàng</h1>
+          <h1 className="text-lg font-bold text-white">X-Wash</h1>
           <div className="flex items-center gap-3">
             <span className="text-xs text-blue-100 truncate max-w-[80px] font-medium">{user?.name}</span>
             <button
@@ -92,7 +92,7 @@ function AdminLayout() {
         {/* Sidebar - Desktop */}
         <aside className="hidden lg:block w-72 bg-gradient-to-b from-white to-gray-50 shadow-xl min-h-screen relative border-r border-gray-200">
           <div className="p-6 border-b border-gray-200 bg-gradient-to-r from-blue-600 to-blue-700">
-            <h1 className="text-2xl font-bold text-white mb-1">Quản lý cửa hàng</h1>
+            <h1 className="text-2xl font-bold text-white mb-1">X-Wash</h1>
             <p className="text-sm text-blue-100">Hệ thống quản lý</p>
           </div>
           <nav className="p-4 space-y-1">

@@ -9,6 +9,18 @@ const router = express.Router();
 // All routes require authentication
 router.use(authenticate);
 
+// % hoa hồng nhân viên (tùy chọn, 0-100). Trả về:
+// {skip} nếu không gửi, {value} (null khi xóa) hoặc {error}
+const parseCommissionPercent = (value) => {
+  if (value === undefined) return { skip: true };
+  if (value === null || value === '') return { value: null };
+  const num = Number.parseFloat(value);
+  if (!Number.isFinite(num) || num < 0 || num > 100) {
+    return { error: 'Hoa hồng phải là số từ 0 đến 100 (%)' };
+  }
+  return { value: Math.round(num * 100) / 100 };
+};
+
 // Get all products
 router.get('/', async (req, res) => { 
   try {
@@ -120,7 +132,13 @@ router.post('/', authorize('admin'), auditLog('create', 'product'), async (req, 
       return res.status(401).json({ error: 'Tài khoản không tồn tại. Vui lòng đăng xuất và đăng nhập lại.' });
     }
 
-    const { name, unit, price, status, store_id } = req.body;
+    const { name, unit, price, status, store_id, commission_percent } = req.body;
+
+    const commission = parseCommissionPercent(commission_percent);
+    if (commission.error) {
+      return res.status(400).json({ error: commission.error });
+    }
+    const commissionValue = commission.skip ? null : commission.value;
 
     // Validate name
     const nameValidation = validateRequiredString(name, 'Tên sản phẩm');
@@ -169,12 +187,13 @@ router.post('/', authorize('admin'), auditLog('create', 'product'), async (req, 
     }
 
     const result = await execute(`
-      INSERT INTO products (name, unit, price, eta_minutes, status, created_by, updated_by, store_id)
-      VALUES (?, ?, ?, NULL, ?, ?, ?, ?)
+      INSERT INTO products (name, unit, price, commission_percent, eta_minutes, status, created_by, updated_by, store_id)
+      VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?)
     `, [
       nameValidation.value,
       unitValidation.value,
       priceValidation.value,
+      commissionValue,
       status || 'active',
       currentUser.id,
       currentUser.id,
@@ -192,7 +211,7 @@ router.post('/', authorize('admin'), auditLog('create', 'product'), async (req, 
 // Update product (Admin only)
 router.patch('/:id', authorize('admin'), auditLog('update', 'product'), async (req, res) => {
   try {
-    const { name, unit, price, status } = req.body;
+    const { name, unit, price, status, commission_percent } = req.body;
 
     const oldProduct = await queryOne(`
       SELECT p.*, s.admin_id as store_admin_id
@@ -261,6 +280,15 @@ router.patch('/:id', authorize('admin'), auditLog('update', 'product'), async (r
       }
       updates.push('status = ?');
       values.push(statusValidation.value);
+    }
+
+    const commission = parseCommissionPercent(commission_percent);
+    if (commission.error) {
+      return res.status(400).json({ error: commission.error });
+    }
+    if (!commission.skip) {
+      updates.push('commission_percent = ?');
+      values.push(commission.value);
     }
 
     updates.push('updated_by = ?');

@@ -27,8 +27,14 @@ const toIsoDateTime = (value) => {
 const LEGACY_VN_OFFSET_MS = 7 * 60 * 60 * 1000;
 const FUTURE_CLOCK_SKEW_MS = 60 * 1000;
 
+// Dữ liệu cũ từng lưu check_in theo giờ VN (sớm hơn UTC thật 7h) — đọc lên
+// sẽ "ở tương lai". Không bù lại thì ca legacy không bao giờ check-out được
+// (giờ ra luôn < giờ vào). Chỉ đụng tới timestamp vượt quá hiện tại + 60s.
 const normalizeLegacyFutureTimeMs = (ms) => {
   if (Number.isNaN(ms)) return ms;
+  if (ms > Date.now() + FUTURE_CLOCK_SKEW_MS) {
+    return ms - LEGACY_VN_OFFSET_MS;
+  }
   return ms;
 };
 
@@ -76,8 +82,10 @@ const getMonthUtcRange = (req, month, year) => {
     if (startAt && endAt) return { startAt, endAt };
   }
   const offset = getTimezoneOffsetMinutes(req);
-  const start = new Date(Date.UTC(Number(year), Number(month) - 1, 1) - offset * 60 * 1000);
-  const end = new Date(Date.UTC(Number(year), Number(month), 1) - offset * 60 * 1000);
+  // offset = getTimezoneOffset() = UTC − local (VN: -420).
+  // Mốc local 00:00 ngày 1 → UTC = local + offset  (VD: 1/8 00:00 VN = 31/7 17:00Z)
+  const start = new Date(Date.UTC(Number(year), Number(month) - 1, 1) + offset * 60 * 1000);
+  const end = new Date(Date.UTC(Number(year), Number(month), 1) + offset * 60 * 1000);
   return { startAt: formatDateTimeUTC(start), endAt: formatDateTimeUTC(end) };
 };
 
@@ -259,18 +267,22 @@ router.get('/store-employees', async (req, res) => {
       employeeQuery += ` AND store_id = ?`;
       params.push(req.user.id);
     } else if (req.user.role === 'admin') {
-      const storeIds = await query(`SELECT id FROM stores WHERE admin_id = ?`, [req.user.id]);
-      if (!storeIds || storeIds.length === 0) {
-        return res.json({ data: [] });
-      }
-      const storeIdList = storeIds.map(s => s.id);
-      employeeQuery += ` AND store_id IN (${storeIdList.map(() => '?').join(',')})`;
-      params.push(...storeIdList);
+      // employees.store_id tham chiếu users.id (tài khoản cửa hàng), KHÔNG phải
+      // stores.id — phải join qua users → stores để lọc đúng chuỗi của admin
+      employeeQuery = `
+        SELECT e.id, e.name, e.phone
+        FROM employees e
+        JOIN users u ON e.store_id = u.id
+        JOIN stores s ON u.store_id = s.id
+        WHERE e.status = 'active' AND s.admin_id = ?
+      `;
+      params.length = 0;
+      params.push(req.user.id);
     } else {
       return res.status(403).json({ error: 'Unauthorized' });
     }
 
-    employeeQuery += ` ORDER BY name`;
+    employeeQuery += req.user.role === 'admin' ? ` ORDER BY e.name` : ` ORDER BY name`;
     const employees = await query(employeeQuery, params);
 
     res.json({ data: employees });
@@ -341,10 +353,16 @@ router.post('/check-in', async (req, res) => {
     
     const storeId = user.store_id; // This is stores.id, not users.id
 
-    // Body employee_id takes precedence over the token's employee_id so a
-    // shared device/session can check in a DIFFERENT teammate onto the same
-    // shift. Either way the employee is validated against the store below.
-    let employeeId = employee_id || req.user.employee_id || null;
+    // Tài khoản cá nhân (employee_login): LUÔN dùng employee_id trong token —
+    // không cho check-in hộ người khác. Tài khoản cửa hàng dùng chung: body
+    // employee_id được ưu tiên để check-in thêm đồng nghiệp vào ca.
+    // Either way the employee is validated against the store below.
+    let employeeId;
+    if (req.user.employee_login) {
+      employeeId = req.user.employee_id;
+    } else {
+      employeeId = employee_id || req.user.employee_id || null;
+    }
 
     // Verify employee belongs to the same store
     // Note: employees.store_id references users.id (the employer user id)
@@ -522,20 +540,32 @@ router.post('/check-out', async (req, res) => {
       ? parseInt(timesheet_id, 10)
       : null;
 
+    // Tài khoản cá nhân chỉ được đóng ca mang employee_id của chính mình
+    const ownShiftFilter = req.user.employee_login ? ' AND employee_id = ?' : '';
+
     let timesheet;
     if (tsId && !Number.isNaN(tsId)) {
+      const params = [tsId, userId];
+      if (req.user.employee_login) params.push(req.user.employee_id);
       timesheet = await queryOne(`
         SELECT * FROM timesheets
-        WHERE id = ? AND user_id = ? AND check_out IS NULL
-      `, [tsId, userId]);
+        WHERE id = ? AND user_id = ? AND check_out IS NULL${ownShiftFilter}
+      `, params);
+      if (!timesheet && req.user.employee_login) {
+        return res.status(403).json({
+          error: 'Không tìm thấy ca đang mở của bạn với mã này — bạn chỉ có thể check-out ca của chính mình.',
+        });
+      }
     }
     if (!timesheet) {
+      const params = [userId];
+      if (req.user.employee_login) params.push(req.user.employee_id);
       timesheet = await queryOne(`
         SELECT * FROM timesheets
-        WHERE user_id = ? AND check_out IS NULL
+        WHERE user_id = ? AND check_out IS NULL${ownShiftFilter}
         ORDER BY check_in ASC
         LIMIT 1
-      `, [userId]);
+      `, params);
     }
 
     if (!timesheet) {
@@ -563,7 +593,9 @@ router.post('/check-out', async (req, res) => {
     }
     const shiftHours = (checkOutMs - checkInMs) / (1000 * 60 * 60);
     if (shiftHours > 16) {
-      return res.status(400).json({ error: 'Ca làm việc không được vượt quá 16 giờ.' });
+      return res.status(400).json({
+        error: 'Ca làm việc không được vượt quá 16 giờ. Nếu bạn quên check-out, hãy nhập "Giờ ra" là giờ ra thực tế của ca đó (trong vòng 16 giờ kể từ giờ vào ca) rồi bấm lại.',
+      });
     }
 
     const normalizedCheckIn = formatDateTimeUTC(new Date(checkInMs));
@@ -824,11 +856,11 @@ router.get('/payroll', authorize('admin'), async (req, res) => {
 
     // Admin can see all stores if no store_id, or filter by store_id if provided
     let querySql = `
-      SELECT 
+      SELECT
         COALESCE(t.employee_id, t.user_id) as employee_id,
         COALESCE(e.name, u.name) as employee_name,
-        u.hourly_rate as hourly_rate,
-        u.shift_rate as shift_rate,
+        MAX(t.employee_id) as real_employee_id,
+        COALESCE(e.hourly_rate, u.hourly_rate) as hourly_rate,
         COUNT(*) as total_shifts,
         SUM(t.regular_hours) as total_regular_hours,
         SUM(t.overtime_hours) as total_overtime_hours,
@@ -840,7 +872,18 @@ router.get('/payroll', authorize('admin'), async (req, res) => {
       WHERE t.check_in >= ? AND t.check_in < ?
         AND t.check_out IS NOT NULL
     `;
-    const params = [range?.startAt || startDate, range?.endAt || endDate];
+    // Biên cuối cho so sánh DATETIME với '<': nếu chỉ có ngày (period=week
+    // không kèm start_at/end_at) thì phải +1 ngày, nếu không cả NGÀY CUỐI
+    // của kỳ bị loại khỏi giờ công & hoa hồng
+    const nextDayStr = (dateStr) => {
+      const d = new Date(`${dateStr}T00:00:00Z`);
+      d.setUTCDate(d.getUTCDate() + 1);
+      return d.toISOString().slice(0, 10);
+    };
+    const periodStart = range?.startAt || startDate;
+    const periodEnd = range?.endAt || nextDayStr(endDate);
+
+    const params = [periodStart, periodEnd];
     
     const storeIdParam = req.query.store_id;
     if (req.user.role === 'admin') {
@@ -867,37 +910,32 @@ router.get('/payroll', authorize('admin'), async (req, res) => {
       params.push(user_id);
     }
 
-    querySql += ' GROUP BY COALESCE(t.employee_id, t.user_id), COALESCE(e.name, u.name), u.hourly_rate, u.shift_rate ORDER BY COALESCE(e.name, u.name)';
+    querySql += ' GROUP BY COALESCE(t.employee_id, t.user_id), COALESCE(e.name, u.name), COALESCE(e.hourly_rate, u.hourly_rate) ORDER BY COALESCE(e.name, u.name)';
 
     const timesheets = await query(querySql, params);
 
-    // Calculate salary for each employee
+    // Calculate salary for each employee — chỉ tính theo GIỜ:
+    // giờ thường × lương giờ + giờ tăng ca × lương giờ × hệ số
     const payroll = timesheets.map((ts) => {
       let salary = 0;
-      
-      // Calculate based on hourly rate if available
+
       if (ts.hourly_rate) {
         salary = (ts.total_regular_hours || 0) * ts.hourly_rate;
         // Overtime multiplier (configurable via OVERTIME_MULTIPLIER constant)
         salary += (ts.total_overtime_hours || 0) * ts.hourly_rate * OVERTIME_MULTIPLIER;
       }
-      
-      // Add shift rate if available (alternative calculation method)
-      if (ts.shift_rate) {
-        const shiftSalary = (ts.total_shifts || 0) * ts.shift_rate;
-        // Use the higher of hourly or shift rate calculation
-        if (shiftSalary > salary) {
-          salary = shiftSalary;
-        }
-      }
 
       return {
         user_id: ts.employee_id,
         employee_id: ts.employee_id,
+        // is_employee: hàng có employee_id thật (employees.id). Hàng legacy
+        // (ca không chọn tên) có key là users.id — TUYỆT ĐỐI không merge
+        // thưởng/hoa hồng vào các hàng này (users.id có thể trùng số với
+        // employees.id của người khác, thậm chí ở chuỗi khác).
+        is_employee: ts.real_employee_id != null,
         user_name: ts.employee_name,
         employee_name: ts.employee_name,
         hourly_rate: ts.hourly_rate || 0,
-        shift_rate: ts.shift_rate || 0,
         // Number(): these are SUMs of DECIMAL columns (strings from mysql2);
         // leaving them as strings makes the reduce() totals below concatenate
         total_shifts: Number(ts.total_shifts) || 0,
@@ -906,10 +944,91 @@ router.get('/payroll', authorize('admin'), async (req, res) => {
         total_hours: Number(ts.total_hours) || 0,
         total_revenue: Number(ts.total_revenue) || 0,
         salary: Math.round(salary * 100) / 100,
+        total_adjustments: 0,
+        total_commission: 0,
       };
     });
 
-    res.json({ 
+    // Map các hàng nhân viên thật để merge thưởng/hoa hồng đúng người
+    const employeeRowMap = new Map(payroll.filter(p => p.is_employee).map(p => [p.employee_id, p]));
+    // Nhân viên có thưởng/hoa hồng nhưng KHÔNG có ca trong kỳ vẫn phải hiện
+    // trong bảng lương (nếu không khoản thưởng "biến mất" khỏi tổng chi trả)
+    const extraRows = new Map();
+    const getOrCreateRow = (employeeId, employeeName) => {
+      const existing = employeeRowMap.get(employeeId);
+      if (existing) return existing;
+      if (!extraRows.has(employeeId)) {
+        extraRows.set(employeeId, {
+          user_id: employeeId,
+          employee_id: employeeId,
+          is_employee: true,
+          user_name: employeeName,
+          employee_name: employeeName,
+          hourly_rate: 0,
+          total_shifts: 0,
+          total_regular_hours: 0,
+          total_overtime_hours: 0,
+          total_hours: 0,
+          total_revenue: 0,
+          salary: 0,
+          total_adjustments: 0,
+          total_commission: 0,
+        });
+      }
+      return extraRows.get(employeeId);
+    };
+
+    // Thưởng/phạt trong kỳ — scope theo chuỗi cửa hàng của admin
+    try {
+      const adjRows = await query(`
+        SELECT a.employee_id, e.name AS employee_name, SUM(a.amount) AS total_adjustments
+        FROM salary_adjustments a
+        JOIN employees e ON a.employee_id = e.id
+        JOIN users u ON e.store_id = u.id
+        JOIN stores s ON u.store_id = s.id
+        WHERE s.admin_id = ? AND a.adjust_date >= ? AND a.adjust_date <= ?
+        GROUP BY a.employee_id, e.name
+      `, [req.user.id, startDate, endDate]);
+      for (const r of adjRows) {
+        const row = getOrCreateRow(r.employee_id, r.employee_name);
+        row.total_adjustments = Math.round((Number.parseFloat(r.total_adjustments) || 0) * 100) / 100;
+      }
+    } catch (error) {
+      // Bảng salary_adjustments chưa tồn tại (chưa chạy migration) — coi như 0
+    }
+
+    // Hoa hồng sản phẩm trong kỳ (đơn hoàn thành, theo nhân viên tạo đơn) —
+    // scope theo chuỗi cửa hàng của admin
+    try {
+      const commissionRows = await query(`
+        SELECT o.employee_id, e.name AS employee_name,
+          COALESCE(SUM(oi.quantity * oi.unit_price * (p.commission_percent / 100)), 0) AS commission
+        FROM order_items oi
+        JOIN orders o ON oi.order_id = o.id
+        JOIN products p ON oi.product_id = p.id
+        JOIN employees e ON o.employee_id = e.id
+        WHERE o.employee_id IS NOT NULL
+          AND o.status = 'completed'
+          AND o.created_at >= ? AND o.created_at < ?
+          AND p.commission_percent > 0
+          AND o.store_id IN (SELECT id FROM stores WHERE admin_id = ?)
+        GROUP BY o.employee_id, e.name
+      `, [periodStart, periodEnd, req.user.id]);
+      for (const r of commissionRows) {
+        const row = getOrCreateRow(r.employee_id, r.employee_name);
+        row.total_commission = Math.round((Number.parseFloat(r.commission) || 0) * 100) / 100;
+      }
+    } catch (error) {
+      // Cột commission_percent/employee_id chưa migrate — coi như 0
+    }
+
+    payroll.push(...extraRows.values());
+    payroll.sort((a, b) => String(a.employee_name || '').localeCompare(String(b.employee_name || ''), 'vi'));
+    payroll.forEach(p => {
+      p.final_salary = Math.round((p.salary + (p.total_commission || 0) + (p.total_adjustments || 0)) * 100) / 100;
+    });
+
+    res.json({
       data: payroll,
       period,
       start_date: startDate,

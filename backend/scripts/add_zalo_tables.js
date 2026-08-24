@@ -10,6 +10,7 @@ async function migrate() {
       credentials_json LONGTEXT NULL,
       status ENUM('not_logged_in', 'pending_qr', 'logged_in', 'expired', 'error') NOT NULL DEFAULT 'not_logged_in',
       qr_path VARCHAR(500) NULL,
+      qr_image LONGTEXT NULL,
       last_login_at DATETIME NULL,
       last_error TEXT NULL,
       created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,

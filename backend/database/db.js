@@ -128,15 +128,48 @@ async function initializeDatabase() {
       }
       
       // Now create indexes separately, checking if they exist first
+      // Các cột thêm sau này qua migration — đảm bảo tồn tại trên DB CŨ
+      // (CREATE TABLE IF NOT EXISTS trong schema.sql là no-op với bảng có sẵn,
+      // nên thiếu bước này thì deploy lên DB cũ sẽ 500 hàng loạt)
+      const ensureColumns = [
+        { table: 'employees', column: 'password_hash', ddl: 'VARCHAR(255) NULL' },
+        { table: 'employees', column: 'hourly_rate', ddl: 'DECIMAL(12, 2) NULL' },
+        { table: 'employees', column: 'shift_rate', ddl: 'DECIMAL(12, 2) NULL' },
+        { table: 'employees', column: 'failed_login_attempts', ddl: 'INT NOT NULL DEFAULT 0' },
+        { table: 'employees', column: 'locked_until', ddl: 'DATETIME NULL' },
+        { table: 'products', column: 'commission_percent', ddl: 'DECIMAL(5, 2) NULL' },
+        { table: 'orders', column: 'employee_id', ddl: 'INT NULL' },
+        { table: 'store_zalo_accounts', column: 'qr_image', ddl: 'LONGTEXT NULL' },
+      ];
+      for (const col of ensureColumns) {
+        try {
+          const [existing] = await connection.query(`
+            SELECT COUNT(*) AS count FROM information_schema.columns
+            WHERE table_schema = ? AND table_name = ? AND column_name = ?
+          `, [dbName, col.table, col.column]);
+          if (existing[0].count === 0) {
+            await connection.query(`ALTER TABLE \`${col.table}\` ADD COLUMN \`${col.column}\` ${col.ddl}`);
+            console.log(`✅ Added missing column ${col.table}.${col.column}`);
+          }
+        } catch (error) {
+          if (error.code !== 'ER_NO_SUCH_TABLE') {
+            console.warn(`Warning ensuring column ${col.table}.${col.column}: ${error.message}`);
+          }
+        }
+      }
+
       const indexStatements = [
         { name: 'idx_orders_status', table: 'orders', columns: 'status' },
         { name: 'idx_orders_assigned_to', table: 'orders', columns: 'assigned_to' },
         { name: 'idx_orders_customer_id', table: 'orders', columns: 'customer_id' },
         { name: 'idx_orders_created_at', table: 'orders', columns: 'created_at' },
+        { name: 'idx_orders_employee_id', table: 'orders', columns: 'employee_id' },
         { name: 'idx_timesheets_user_id', table: 'timesheets', columns: 'user_id' },
         { name: 'idx_timesheets_check_in', table: 'timesheets', columns: 'check_in' },
         { name: 'idx_audit_logs_user_id', table: 'audit_logs', columns: 'user_id' },
-        { name: 'idx_audit_logs_entity', table: 'audit_logs', columns: 'entity, entity_id' }
+        { name: 'idx_audit_logs_entity', table: 'audit_logs', columns: 'entity, entity_id' },
+        { name: 'idx_employees_phone', table: 'employees', columns: 'phone' },
+        { name: 'idx_salary_adjustments_employee', table: 'salary_adjustments', columns: 'employee_id, adjust_date' }
       ];
       
       for (const idx of indexStatements) {

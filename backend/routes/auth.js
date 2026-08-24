@@ -121,12 +121,112 @@ router.post('/login', loginRateLimiter(), async (req, res) => {
     }
 
     if (!user) {
-      // Don't reveal if user exists or not: burn one bcrypt verification so this
-      // branch costs the same as a real password check, plus the standard delay
-      await comparePassword(password, DUMMY_PASSWORD_HASH);
-      await logLoginAttempt(phone, ip, false, 'Invalid credentials', userAgent);
-      await new Promise(resolve => setTimeout(resolve, TIMING_ATTACK_DELAY_MS));
-      return res.status(401).json({ error: INVALID_CREDENTIALS_MESSAGE });
+      // Không có trong users — thử tài khoản nhân viên (employees có mật khẩu riêng).
+      // Đăng nhập thành công sẽ cấp token của tài khoản cửa hàng kèm employee_id
+      // cố định, nên mọi cơ chế hiện có (chấm công, két, đơn hàng) dùng lại được.
+      const employee = await queryOne(`
+        SELECT e.*, u.id AS account_id, u.status AS account_status,
+               u.store_id AS account_store_id, u.role AS account_role
+        FROM employees e
+        JOIN users u ON e.store_id = u.id
+        WHERE e.phone = ? AND e.password_hash IS NOT NULL
+        LIMIT 1
+      `, [phone]);
+
+      if (!employee) {
+        // Don't reveal if user exists or not: burn one bcrypt verification so this
+        // branch costs the same as a real password check, plus the standard delay
+        await comparePassword(password, DUMMY_PASSWORD_HASH);
+        await logLoginAttempt(phone, ip, false, 'Invalid credentials', userAgent);
+        await new Promise(resolve => setTimeout(resolve, TIMING_ATTACK_DELAY_MS));
+        return res.status(401).json({ error: INVALID_CREDENTIALS_MESSAGE });
+      }
+
+      // Khóa tài khoản nhân viên sau MAX_LOGIN_ATTEMPTS lần sai — cùng cơ chế
+      // với users; thiếu bước này thì login nhân viên bị brute-force vô hạn
+      // (rate limiter chỉ theo IP, xoay IP là né được)
+      if (employee.locked_until && new Date(employee.locked_until) > new Date()) {
+        const minutesRemaining = Math.ceil((new Date(employee.locked_until) - new Date()) / 1000 / 60);
+        await logLoginAttempt(phone, ip, false, 'Employee account locked', userAgent);
+        return res.status(423).json({
+          error: `Tài khoản đã bị khóa do quá nhiều lần đăng nhập sai. Vui lòng thử lại sau ${minutesRemaining} phút.`,
+          minutesRemaining,
+        });
+      }
+
+      const employeePasswordValid = await comparePassword(password, employee.password_hash);
+      if (!employeePasswordValid) {
+        try {
+          // Tăng đếm sai nguyên tử; đạt ngưỡng thì khóa ACCOUNT_LOCKOUT_MINUTES phút
+          await execute(`
+            UPDATE employees
+            SET failed_login_attempts = failed_login_attempts + 1,
+                locked_until = IF(failed_login_attempts >= ?, DATE_ADD(NOW(), INTERVAL ? MINUTE), locked_until)
+            WHERE id = ?
+          `, [MAX_LOGIN_ATTEMPTS, ACCOUNT_LOCKOUT_MINUTES, employee.id]);
+        } catch (lockError) {
+          // Cột chưa migrate — bỏ qua, vẫn trả 401
+        }
+        await logLoginAttempt(phone, ip, false, 'Invalid password (employee)', userAgent);
+        await new Promise(resolve => setTimeout(resolve, TIMING_ATTACK_DELAY_MS));
+        return res.status(401).json({ error: INVALID_CREDENTIALS_MESSAGE });
+      }
+
+      // Đăng nhập đúng — reset đếm sai
+      try {
+        await execute(
+          'UPDATE employees SET failed_login_attempts = 0, locked_until = NULL WHERE id = ?',
+          [employee.id]
+        );
+      } catch (resetError) {
+        // Cột chưa migrate — bỏ qua
+      }
+
+      if (employee.status !== 'active') {
+        return res.status(401).json({ error: 'Tài khoản nhân viên đã bị vô hiệu hóa. Vui lòng liên hệ quản lý.' });
+      }
+      if (employee.account_role !== 'employer' || employee.account_status !== 'active') {
+        return res.status(401).json({ error: 'Tài khoản cửa hàng không hoạt động. Vui lòng liên hệ admin.' });
+      }
+
+      await logLoginAttempt(phone, ip, true, null, userAgent);
+      resetLoginRateLimit(req);
+
+      const token = jwt.sign(
+        {
+          id: employee.account_id,          // tài khoản cửa hàng (users.id)
+          role: 'employer',
+          name: employee.name,
+          store_id: employee.account_store_id, // stores.id
+          employee_id: employee.id,          // khóa cứng nhân viên này
+          employee_login: true,              // token cá nhân: không được thao tác hộ người khác
+        },
+        process.env.JWT_SECRET,
+        { expiresIn: process.env.JWT_EXPIRE || '7d' }
+      );
+
+      try {
+        await execute(`
+          INSERT INTO audit_logs (user_id, action, entity, entity_id)
+          VALUES (?, 'login', 'employee', ?)
+        `, [employee.account_id, employee.id]);
+      } catch (error) {
+        // Ignore audit log errors
+      }
+
+      return res.json({
+        token,
+        user: {
+          id: employee.account_id,
+          name: employee.name,
+          phone: employee.phone,
+          role: 'employer',
+          status: 'active',
+          store_id: employee.account_store_id,
+          employee_id: employee.id,
+          employee_name: employee.name,
+        },
+      });
     }
 
     // Check if account is locked (must come before password check so a locked

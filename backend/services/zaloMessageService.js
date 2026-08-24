@@ -151,8 +151,26 @@ async function getOrderNotificationData(orderId) {
     ORDER BY oi.id
   `, [orderId]);
 
+  // Tên thương hiệu trong tin nhắn: ưu tiên "Tên cửa hàng" trong Cài đặt
+  // (settings.bill_store_name), fallback tên cửa hàng trong hệ thống
+  let brandName = order.store_name || 'Cửa hàng';
+  if (order.store_id) {
+    try {
+      const setting = await queryOne(
+        "SELECT value FROM settings WHERE `key` = 'bill_store_name' AND store_id = ?",
+        [order.store_id]
+      );
+      if (setting?.value && String(setting.value).trim()) {
+        brandName = String(setting.value).trim();
+      }
+    } catch (error) {
+      // Bảng settings chưa sẵn sàng — dùng fallback
+    }
+  }
+
   return {
     ...order,
+    brand_name: brandName,
     service_list: items.length
       ? items.map((item) => `${item.product_name || 'Dịch vụ'} x${item.quantity} ${item.product_unit || ''}`.trim()).join(', ')
       : 'Dịch vụ giặt ủi',
@@ -163,24 +181,27 @@ function buildMessage(order, eventType) {
   const customerName = order.customer_name || 'quý khách';
   const code = order.code || `#${order.id}`;
 
+  // Tin 1/2 — gửi khi shop NHẬN ĐƠN: ngắn gọn, chỉ thông tin cần thiết
   if (eventType === EVENT_TYPES.ORDER_CREATED) {
-    return [
-      `Chào anh/chị ${customerName} ***${last3Phone(order.customer_phone)},`,
-      `XWASH đã ghi nhận đơn hàng ${code}.`,
-      `Dịch vụ: ${order.service_list}.`,
-      `Thời gian hẹn trả: ${formatVnDateTime(order.expected_return_at)}.`,
-      'Cảm ơn anh/chị đã sử dụng dịch vụ.',
-    ].join('\n');
+    const lines = [
+      `${order.brand_name || 'Cửa hàng'} đã nhận đơn ${code} của anh/chị ${customerName}.`,
+      `Dịch vụ: ${order.service_list}`,
+      `Tổng tiền: ${formatMoney(order.final_amount || order.total_amount)}`,
+    ];
+    if (order.expected_return_at) {
+      lines.push(`Hẹn trả: ${formatVnDateTime(order.expected_return_at)}`);
+    }
+    lines.push('Cảm ơn anh/chị!');
+    return lines.join('\n');
   }
 
+  // Tin 2/2 — gửi khi nhân viên bấm CHỜ NHẬN: đồ đã xong, mời đến lấy
   if (eventType === EVENT_TYPES.READY_FOR_PICKUP) {
     return [
-      `Đơn hàng ${code} của anh/chị đã được xử lý xong.`,
-      'Anh/chị có thể đến nhận đồ trong khung giờ 07:00-22:00.',
-      'Nếu cần nhận ngoài giờ, vui lòng liên hệ shop để được hỗ trợ.',
-      'Đơn hàng được lưu tối đa 30 ngày. Sau 30 ngày shop không chịu trách nhiệm.',
-      `Tổng giá trị đơn hàng: ${formatMoney(order.final_amount || order.total_amount)}.`,
-      'Cảm ơn anh/chị.',
+      `Đơn ${code} đã giặt xong, mời anh/chị đến nhận đồ.`,
+      `Tổng tiền: ${formatMoney(order.final_amount || order.total_amount)}`,
+      'Giờ nhận: 07:00–22:00 (ngoài giờ vui lòng liên hệ shop).',
+      'Đơn được lưu tối đa 30 ngày. Cảm ơn anh/chị!',
     ].join('\n');
   }
 

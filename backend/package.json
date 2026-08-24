@@ -18,6 +18,9 @@
     "migrate-zalo": "node scripts/add_zalo_tables.js",
     "migrate-payments": "node scripts/add_payment_ledger.js",
     "migrate-cash-drawer": "node scripts/add_cash_drawer_ledger.js",
+    "migrate-employee-accounts": "node scripts/add_employee_accounts.js",
+    "migrate-zalo-qr": "node scripts/add_zalo_qr_image.js",
+    "migrate-commission": "node scripts/add_product_commission.js",
     "update-to-root": "node scripts/update_user_to_root.js"
   },
   "keywords": [

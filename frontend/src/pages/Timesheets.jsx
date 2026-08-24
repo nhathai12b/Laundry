@@ -3,6 +3,8 @@ import api from '../utils/api';
 import { isAdmin, getEmployeeId, getAuth } from '../utils/auth';
 import { format, getDaysInMonth } from 'date-fns';
 import { getSavedFilters, saveFilters } from '../utils/filterStorage';
+import SalaryAdjustModal from '../components/SalaryAdjustModal';
+import MoneyInput from '../components/MoneyInput';
 import {
   formatLocalDate,
   formatLocalDateKey,
@@ -50,6 +52,9 @@ function Timesheets() {
   const [cashDrawerAmount, setCashDrawerAmount] = useState('');
   const [cashDrawerReason, setCashDrawerReason] = useState('');
   const [cashShortagePaidAmount, setCashShortagePaidAmount] = useState('');
+  const [mySalary, setMySalary] = useState(null);
+  const [adjustEmployee, setAdjustEmployee] = useState(null);
+  const [adminEmployees, setAdminEmployees] = useState([]);
   const [payroll, setPayroll] = useState([]);
   const [payrollLoading, setPayrollLoading] = useState(false);
   const [payrollPeriod, setPayrollPeriod] = useState('month');
@@ -69,10 +74,16 @@ function Timesheets() {
     if (isAdmin() && viewMode === 'payroll') {
       loadPayroll();
     }
+  }, [selectedDate, selectedMonth, selectedYear, viewMode, periodViewMode, payrollPeriod, payrollMonth, payrollYear, payrollWeek, selectedStoreId]);
+
+  // Chỉ chạy 1 lần khi mount — 2 hàm này không phụ thuộc filter nào,
+  // để trong effect trên sẽ gọi API thừa mỗi lần đổi ngày/tháng
+  useEffect(() => {
     if (!isAdmin()) {
       loadStoreEmployees();
+      loadMySalary();
     }
-  }, [selectedDate, selectedMonth, selectedYear, viewMode, periodViewMode, payrollPeriod, payrollMonth, payrollYear, payrollWeek, selectedStoreId]);
+  }, []);
 
   // Save filters whenever they change
   useEffect(() => {
@@ -95,6 +106,17 @@ function Timesheets() {
       setPayrollWeek(getWeekNumber(new Date()));
     }
   }, []);
+
+  // Admin: tải danh sách nhân viên để thưởng/phạt nhanh — chỉ khi mở tab
+  // Bảng lương (tránh gọi API thừa ở view chấm công mặc định)
+  useEffect(() => {
+    if (isAdmin() && viewMode === 'payroll' && adminEmployees.length === 0) {
+      api.get('/employees')
+        .then((r) => setAdminEmployees(r.data.data || []))
+        .catch(() => setAdminEmployees([]));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewMode]);
 
   const formatMoney = (value) => `${new Intl.NumberFormat('vi-VN').format(parseFloat(value) || 0)} đ`;
 
@@ -171,6 +193,24 @@ function Timesheets() {
     }
   };
 
+  // Lương tháng hiện tại của nhân viên đang đăng nhập (tài khoản riêng)
+  const loadMySalary = async () => {
+    if (isAdmin() || !getEmployeeId()) {
+      setMySalary(null);
+      return;
+    }
+    try {
+      const now = new Date();
+      const response = await api.get(
+        `/salary/my-summary?month=${now.getMonth() + 1}&year=${now.getFullYear()}&timezone_offset_minutes=${now.getTimezoneOffset()}`
+      );
+      setMySalary(response.data.data || null);
+    } catch (error) {
+      console.error('Error loading my salary:', error);
+      setMySalary(null);
+    }
+  };
+
   const loadStoreEmployees = async () => {
     try {
       const response = await api.get('/timesheets/store-employees');
@@ -183,9 +223,9 @@ function Timesheets() {
   const handleCheckInClick = () => {
     const employeeIdFromToken = getEmployeeId();
     setShowCheckinModal(true);
-    // Check-in thêm người vào ca đang mở: bắt buộc tự chọn tên.
-    // Check-in ca đầu: dùng nhân viên đã chọn khi login (nếu có).
-    setSelectedEmployee(openShifts.length > 0 ? '' : (employeeIdFromToken || ''));
+    // Tài khoản cá nhân: luôn là chính mình. Tài khoản cửa hàng dùng chung:
+    // ca đầu dùng nhân viên đã chọn khi login (nếu có), người vào thêm tự chọn tên.
+    setSelectedEmployee(employeeIdFromToken || '');
     setCheckinNote('');
     setOpeningCashAmount('');
   };
@@ -194,11 +234,11 @@ function Timesheets() {
     try {
       const employeeIdFromToken = getEmployeeId();
       const isAdditional = openShifts.length > 0;
-      // Với ca đầu: ưu tiên nhân viên chọn trong form, fallback token.
-      // Với người vào thêm: phải chọn tên trong form (backend cũng bắt buộc).
-      const employeeIdToSend = selectedEmployee || (!isAdditional ? employeeIdFromToken : '') || undefined;
+      // Tài khoản cá nhân: luôn gửi employee_id của chính mình (backend cũng khóa cứng).
+      // Tài khoản dùng chung: người vào thêm phải chọn tên trong form.
+      const employeeIdToSend = employeeIdFromToken || selectedEmployee || undefined;
 
-      if (isAdditional && !employeeIdToSend) {
+      if (!employeeIdFromToken && isAdditional && !employeeIdToSend) {
         alert('Vui lòng chọn tên nhân viên check-in thêm vào ca.');
         return;
       }
@@ -301,6 +341,7 @@ function Timesheets() {
       setTotalWithdrawn(0);
       checkTodayStatus();
       loadTimesheets();
+      loadMySalary();
       if (isAdmin() && viewMode === 'daily') {
         loadDailyHours();
       }
@@ -591,12 +632,18 @@ function Timesheets() {
                             Vào ca: {formatLocalDate(shift.check_in)} {formatLocalTime(shift.check_in)}
                           </div>
                         </div>
-                        <button
-                          onClick={() => handleCheckOutClick(shift)}
-                          className="flex-shrink-0 bg-gradient-to-r from-red-600 to-red-700 text-white px-4 py-2 rounded-lg active:from-red-700 active:to-red-800 hover:from-red-700 hover:to-red-800 font-semibold shadow transition-all touch-manipulation text-sm"
-                        >
-                          Check-out
-                        </button>
+                        {(!getEmployeeId() || shift.employee_id === Number(getEmployeeId())) ? (
+                          <button
+                            onClick={() => handleCheckOutClick(shift)}
+                            className="flex-shrink-0 bg-gradient-to-r from-red-600 to-red-700 text-white px-4 py-2 rounded-lg active:from-red-700 active:to-red-800 hover:from-red-700 hover:to-red-800 font-semibold shadow transition-all touch-manipulation text-sm"
+                          >
+                            Check-out
+                          </button>
+                        ) : (
+                          <span className="flex-shrink-0 text-xs text-gray-400 italic px-2">
+                            Ca của đồng nghiệp
+                          </span>
+                        )}
                       </div>
                     </div>
                   ))}
@@ -638,12 +685,14 @@ function Timesheets() {
                   </div>
                 </div>
 
-                <button
-                  onClick={handleCheckInClick}
-                  className="w-full sm:w-auto bg-white border-2 border-green-600 text-green-700 px-8 py-3 rounded-xl active:bg-green-100 hover:bg-green-50 font-semibold shadow transition-all duration-300 touch-manipulation text-base"
-                >
-                  + Check-in thêm nhân viên
-                </button>
+                {(!getEmployeeId() || !openShifts.some((s) => s.employee_id === Number(getEmployeeId()))) && (
+                  <button
+                    onClick={handleCheckInClick}
+                    className="w-full sm:w-auto bg-white border-2 border-green-600 text-green-700 px-8 py-3 rounded-xl active:bg-green-100 hover:bg-green-50 font-semibold shadow transition-all duration-300 touch-manipulation text-base"
+                  >
+                    {getEmployeeId() ? '+ Check-in ca của tôi' : '+ Check-in thêm nhân viên'}
+                  </button>
+                )}
               </div>
             ) : (
               <div>
@@ -657,6 +706,58 @@ function Timesheets() {
               </div>
             )}
           </div>
+        </div>
+      )}
+
+      {/* Lương tháng này — nhân viên đăng nhập tài khoản riêng */}
+      {!isAdmin() && mySalary && (
+        <div className="bg-white rounded-xl shadow-lg border border-gray-200 p-4">
+          <div className="flex items-center justify-between mb-3">
+            <div className="font-semibold text-gray-900">
+              💰 Lương tháng {mySalary.month}/{mySalary.year}
+              <span className="block text-xs font-normal text-gray-500">{mySalary.employee?.name}</span>
+            </div>
+            <div className="text-2xl font-bold text-emerald-600">
+              {formatMoney(mySalary.total_salary)}
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-2 text-sm text-gray-700">
+            <div className="rounded-lg bg-gray-50 px-3 py-2">
+              Số ca: <strong>{mySalary.total_shifts}</strong>
+            </div>
+            <div className="rounded-lg bg-gray-50 px-3 py-2">
+              Tổng giờ: <strong>{Number(mySalary.total_hours || 0).toFixed(1)}h</strong>
+            </div>
+            <div className="rounded-lg bg-gray-50 px-3 py-2">
+              Lương công: <strong>{formatMoney(mySalary.work_salary)}</strong>
+            </div>
+            <div className="rounded-lg bg-amber-50 px-3 py-2">
+              🎁 Hoa hồng:{' '}
+              <strong className="text-amber-700">
+                +{formatMoney(mySalary.total_commission || 0)}
+              </strong>
+            </div>
+            <div className="rounded-lg bg-gray-50 px-3 py-2 col-span-2">
+              Thưởng/Phạt:{' '}
+              <strong className={mySalary.total_adjustments < 0 ? 'text-red-600' : 'text-emerald-700'}>
+                {mySalary.total_adjustments >= 0 ? '+' : ''}{formatMoney(mySalary.total_adjustments)}
+              </strong>
+            </div>
+          </div>
+          {mySalary.adjustments?.length > 0 && (
+            <div className="mt-3 space-y-1">
+              {mySalary.adjustments.map((adj) => (
+                <div key={adj.id} className="flex items-center justify-between text-xs text-gray-600 border-t border-gray-100 pt-1.5">
+                  <span className="truncate">
+                    {String(adj.adjust_date).slice(0, 10)}{adj.reason ? ` — ${adj.reason}` : ''}
+                  </span>
+                  <span className={`font-semibold flex-shrink-0 ml-2 ${adj.amount < 0 ? 'text-red-600' : 'text-emerald-700'}`}>
+                    {adj.amount >= 0 ? '+' : ''}{formatMoney(adj.amount)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
@@ -725,7 +826,7 @@ function Timesheets() {
                     : 'bg-gray-100 text-gray-700 active:bg-gray-200 hover:bg-gray-200'
                 }`}
               >
-                Tính lương
+                💰 Lương & Thưởng/Phạt
               </button>
               <button
                 onClick={handleExportExcel}
@@ -920,9 +1021,9 @@ function Timesheets() {
       {/* Daily Hours Table - Admin only */}
       {isAdmin() && viewMode === 'daily' && (
         <div className="bg-white rounded-xl shadow-lg border border-gray-200 overflow-hidden">
-          <div className="bg-gradient-to-r from-cyan-500 to-blue-600 p-6">
-            <h2 className="text-xl font-bold text-white">
-              Chấm công theo ngày - Tháng {selectedMonth}/{selectedYear}
+          <div className="bg-gradient-to-r from-cyan-500 to-blue-600 p-4">
+            <h2 className="text-lg font-bold text-white">
+              📅 Chấm công theo ngày — Tháng {selectedMonth}/{selectedYear}
             </h2>
           </div>
           {dailyHoursLoading ? (
@@ -1026,11 +1127,31 @@ function Timesheets() {
       {/* Payroll Table - Admin only */}
       {isAdmin() && viewMode === 'payroll' && (
         <div className="bg-white rounded-xl shadow-lg border border-gray-200 overflow-hidden">
-          <div className="bg-gradient-to-r from-purple-500 to-pink-600 p-6">
-            <h2 className="text-xl font-bold text-white mb-4">Tính giờ chấm công & Lương nhân viên</h2>
-            
+          <div className="bg-gradient-to-r from-purple-500 to-pink-600 p-4">
+            <h2 className="text-lg font-bold text-white mb-3">💰 Bảng lương & Thưởng/Phạt</h2>
+
+            {/* Thưởng/phạt nhanh — luôn hiện, kể cả khi bảng lương trống */}
+            <div className="mb-3 bg-white/15 border border-white/30 rounded-lg p-2.5 flex flex-wrap items-center gap-2">
+              <span className="text-sm font-semibold text-white">± Thưởng / Phạt:</span>
+              <select
+                value=""
+                onChange={(e) => {
+                  const emp = adminEmployees.find((x) => x.id === parseInt(e.target.value));
+                  if (emp) setAdjustEmployee({ id: emp.id, name: emp.name });
+                }}
+                className="flex-1 min-w-[180px] px-3 py-2 border-0 rounded-lg text-sm text-gray-800"
+              >
+                <option value="">-- Chọn nhân viên để cộng/trừ tiền --</option>
+                {adminEmployees.map((emp) => (
+                  <option key={emp.id} value={emp.id}>
+                    {emp.name}{emp.store_name ? ` (${emp.store_name})` : ''}
+                  </option>
+                ))}
+              </select>
+            </div>
+
             {/* Filters */}
-            <div className="flex flex-wrap gap-3 mb-4">
+            <div className="flex flex-wrap gap-2">
               <select
                 value={payrollPeriod}
                 onChange={(e) => {
@@ -1098,57 +1219,101 @@ function Timesheets() {
             {payrollLoading ? (
               <div className="p-8 text-center text-gray-500">Đang tải...</div>
             ) : payroll.length === 0 ? (
-              <div className="p-8 text-center text-gray-500">Chưa có dữ liệu</div>
+              <div className="p-8 text-center text-gray-500">
+                Chưa có ca hoàn thành trong kỳ này.
+                <span className="block text-sm mt-1">
+                  Vẫn có thể thưởng/phạt nhân viên bằng ô <strong>"± Thưởng / Phạt"</strong> phía trên.
+                </span>
+              </div>
             ) : (
               <>
                 <table className="w-full">
                   <thead className="bg-gray-50">
                     <tr>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase">Nhân viên</th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-700 uppercase">Người đứng ca</th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-700 uppercase">Số ca</th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-700 uppercase">Giờ</th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-700 uppercase">Lương/giờ</th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-700 uppercase">Lương/ca</th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-700 uppercase">Tổng lương</th>
+                      <th className="px-3 py-3 text-left text-xs font-medium text-gray-700 uppercase">Nhân viên</th>
+                      <th className="px-3 py-3 text-right text-xs font-medium text-gray-700 uppercase">Số ca</th>
+                      <th className="px-3 py-3 text-right text-xs font-medium text-gray-700 uppercase">Giờ</th>
+                      <th className="px-3 py-3 text-right text-xs font-medium text-gray-700 uppercase">Lương/giờ</th>
+                      <th className="px-3 py-3 text-right text-xs font-medium text-gray-700 uppercase">Lương công</th>
+                      <th className="px-3 py-3 text-right text-xs font-medium text-gray-700 uppercase">Hoa hồng</th>
+                      <th className="px-3 py-3 text-right text-xs font-medium text-gray-700 uppercase">Thưởng/Phạt</th>
+                      <th className="px-3 py-3 text-right text-xs font-medium text-gray-700 uppercase">Thực nhận</th>
+                      <th className="px-3 py-3 text-center text-xs font-medium text-gray-700 uppercase"></th>
                     </tr>
                   </thead>
                   <tbody className="divide-y">
                     {payroll.map((emp) => (
-                      <tr key={emp.user_id} className="hover:bg-gray-50">
-                        <td className="px-4 py-3 text-sm font-medium text-gray-800">
+                      <tr key={emp.user_id} className="odd:bg-white even:bg-gray-50 hover:bg-blue-50 transition-colors">
+                        <td className="px-3 py-3 text-sm font-medium text-gray-800">
                           {emp.employee_name || '-'}
+                          {emp.user_name && emp.user_name !== emp.employee_name && (
+                            <span className="block text-xs font-normal text-gray-500">{emp.user_name}</span>
+                          )}
                         </td>
-                        <td className="px-4 py-3 text-sm text-gray-600">
-                          {emp.user_name || '-'}
-                        </td>
-                        <td className="px-4 py-3 text-sm text-gray-600 text-right">{emp.total_shifts}</td>
-                        <td className="px-4 py-3 text-sm font-medium text-gray-800 text-right">{(parseFloat(emp.total_hours) || 0).toFixed(2)}h</td>
-                        <td className="px-4 py-3 text-sm text-gray-600 text-right">
+                        <td className="px-3 py-3 text-sm text-gray-600 text-right">{emp.total_shifts}</td>
+                        <td className="px-3 py-3 text-sm font-medium text-gray-800 text-right">{(parseFloat(emp.total_hours) || 0).toFixed(2)}h</td>
+                        <td className="px-3 py-3 text-sm text-gray-600 text-right">
                           {emp.hourly_rate > 0 ? new Intl.NumberFormat('vi-VN').format(emp.hourly_rate) + ' đ/h' : '-'}
                         </td>
-                        <td className="px-4 py-3 text-sm text-gray-600 text-right">
-                          {emp.shift_rate > 0 ? new Intl.NumberFormat('vi-VN').format(emp.shift_rate) + ' đ/ca' : '-'}
-                        </td>
-                        <td className="px-4 py-3 text-sm font-bold text-green-600 text-right">
+                        <td className="px-3 py-3 text-sm text-gray-700 text-right">
                           {new Intl.NumberFormat('vi-VN').format(emp.salary)} đ
+                        </td>
+                        <td className={`px-3 py-3 text-sm font-medium text-right ${(emp.total_commission || 0) > 0 ? 'text-amber-600' : 'text-gray-400'}`}>
+                          {(emp.total_commission || 0) > 0
+                            ? `+${new Intl.NumberFormat('vi-VN').format(emp.total_commission)} đ`
+                            : '-'}
+                        </td>
+                        <td className={`px-3 py-3 text-sm font-medium text-right ${
+                          (emp.total_adjustments || 0) < 0 ? 'text-red-600' : (emp.total_adjustments || 0) > 0 ? 'text-green-600' : 'text-gray-400'
+                        }`}>
+                          {(emp.total_adjustments || 0) !== 0
+                            ? `${emp.total_adjustments > 0 ? '+' : ''}${new Intl.NumberFormat('vi-VN').format(emp.total_adjustments)} đ`
+                            : '-'}
+                        </td>
+                        <td className="px-3 py-3 text-sm font-bold text-green-600 text-right">
+                          {new Intl.NumberFormat('vi-VN').format(emp.final_salary ?? emp.salary)} đ
+                        </td>
+                        <td className="px-3 py-3 text-center">
+                          {emp.is_employee ? (
+                            <button
+                              onClick={() => setAdjustEmployee({ id: emp.employee_id, name: emp.employee_name })}
+                              className="px-2.5 py-1 bg-emerald-100 text-emerald-700 rounded-lg hover:bg-emerald-200 text-xs font-semibold whitespace-nowrap touch-manipulation"
+                              title="Thưởng / phạt nhân viên này"
+                            >
+                              ± Tiền
+                            </button>
+                          ) : (
+                            // Hàng ca không chọn tên (key là tài khoản cửa hàng) —
+                            // không thể thưởng/phạt vì không biết là ai
+                            <span className="text-xs text-gray-400 italic" title="Ca không chọn tên nhân viên">—</span>
+                          )}
                         </td>
                       </tr>
                     ))}
                   </tbody>
                   <tfoot className="bg-gray-50 font-semibold">
                     <tr>
-                      <td colSpan="2" className="px-4 py-3 text-sm text-gray-800">Tổng cộng</td>
-                      <td className="px-4 py-3 text-sm text-gray-600 text-right">
+                      <td className="px-3 py-3 text-sm text-gray-800">Tổng cộng</td>
+                      <td className="px-3 py-3 text-sm text-gray-600 text-right">
                         {payroll.reduce((sum, emp) => sum + emp.total_shifts, 0)}
                       </td>
-                      <td className="px-4 py-3 text-sm text-gray-800 text-right">
+                      <td className="px-3 py-3 text-sm text-gray-800 text-right">
                         {payroll.reduce((sum, emp) => sum + (parseFloat(emp.total_hours) || 0), 0).toFixed(2)}h
                       </td>
-                      <td colSpan="2" className="px-4 py-3 text-sm text-gray-600 text-right"></td>
-                      <td className="px-4 py-3 text-sm text-green-600 text-right">
+                      <td className="px-3 py-3"></td>
+                      <td className="px-3 py-3 text-sm text-gray-700 text-right">
                         {new Intl.NumberFormat('vi-VN').format(payroll.reduce((sum, emp) => sum + emp.salary, 0))} đ
                       </td>
+                      <td className="px-3 py-3 text-sm text-amber-600 text-right">
+                        {new Intl.NumberFormat('vi-VN').format(payroll.reduce((sum, emp) => sum + (emp.total_commission || 0), 0))} đ
+                      </td>
+                      <td className="px-3 py-3 text-sm text-right">
+                        {new Intl.NumberFormat('vi-VN').format(payroll.reduce((sum, emp) => sum + (emp.total_adjustments || 0), 0))} đ
+                      </td>
+                      <td className="px-3 py-3 text-sm text-green-600 text-right">
+                        {new Intl.NumberFormat('vi-VN').format(payroll.reduce((sum, emp) => sum + (emp.final_salary ?? emp.salary), 0))} đ
+                      </td>
+                      <td className="px-3 py-3"></td>
                     </tr>
                   </tfoot>
                 </table>
@@ -1352,12 +1517,9 @@ function Timesheets() {
                   <label className="block text-xs sm:text-sm font-medium text-gray-700 mb-1">
                     Số tiền rút (khi checkout) <span className="text-gray-500 font-normal">(tùy chọn)</span>
                   </label>
-                  <input
-                    type="number"
-                    inputMode="numeric"
-                    step="1"
+                  <MoneyInput
                     value={checkoutWithdrawnAmount}
-                    onChange={(e) => setCheckoutWithdrawnAmount(e.target.value)}
+                    onChange={setCheckoutWithdrawnAmount}
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base focus:border-amber-500 focus:ring-1 focus:ring-amber-200 transition-all touch-manipulation"
                     placeholder="Nhập số tiền rút khi kết thúc ca"
                   />
@@ -1367,12 +1529,9 @@ function Timesheets() {
                   <label className="block text-xs sm:text-sm font-medium text-gray-700 mb-1">
                     Tiền mặt thực đếm trong két (đ) *
                   </label>
-                  <input
-                    type="number"
-                    inputMode="numeric"
-                    step="1"
+                  <MoneyInput
                     value={revenueAmount}
-                    onChange={(e) => setRevenueAmount(e.target.value)}
+                    onChange={setRevenueAmount}
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base focus:border-blue-500 focus:ring-1 focus:ring-blue-200 transition-all touch-manipulation"
                     placeholder="Nhập số tiền mặt đang có trong két"
                     required
@@ -1419,12 +1578,9 @@ function Timesheets() {
                   <label className="block text-xs sm:text-sm font-medium text-gray-700 mb-1">
                     Nhân viên bù tiền thiếu <span className="text-gray-500 font-normal">(nếu có)</span>
                   </label>
-                  <input
-                    type="number"
-                    inputMode="numeric"
-                    step="1"
+                  <MoneyInput
                     value={cashShortagePaidAmount}
-                    onChange={(e) => setCashShortagePaidAmount(e.target.value)}
+                    onChange={setCashShortagePaidAmount}
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base focus:border-red-500 focus:ring-1 focus:ring-red-200 transition-all touch-manipulation"
                     placeholder="Nhập số tiền nhân viên bù"
                   />
@@ -1484,12 +1640,9 @@ function Timesheets() {
             <div className="p-4 space-y-3">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Số tiền *</label>
-                <input
-                  type="number"
-                  inputMode="numeric"
-                  step="1"
+                <MoneyInput
                   value={cashDrawerAmount}
-                  onChange={(e) => setCashDrawerAmount(e.target.value)}
+                  onChange={setCashDrawerAmount}
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base focus:border-blue-500 focus:ring-1 focus:ring-blue-200"
                   placeholder="Nhập số tiền"
                   autoFocus
@@ -1530,6 +1683,15 @@ function Timesheets() {
         </div>
       )}
 
+      {/* Salary Adjust Modal (± thưởng/phạt) */}
+      {adjustEmployee && (
+        <SalaryAdjustModal
+          employee={adjustEmployee}
+          onClose={() => setAdjustEmployee(null)}
+          onChanged={loadPayroll}
+        />
+      )}
+
       {/* Check-in Modal */}
       {showCheckinModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-2 sm:p-3 z-50 overflow-y-auto overflow-x-hidden">
@@ -1560,8 +1722,9 @@ function Timesheets() {
                 const availableEmployees = employees.filter((emp) => !busyEmployeeIds.has(emp.id));
                 const selectedEmployeeInfo = employees.find(emp => emp.id === parseInt(selectedEmployee || employeeIdFromToken || '0'));
 
-                // Ca đầu tiên + đã chọn nhân viên khi login: hiển thị cố định
-                if (!isAdditional && employeeIdFromToken && selectedEmployeeInfo) {
+                // Tài khoản cá nhân (hoặc đã chọn nhân viên khi login): hiển thị
+                // cố định — không được check-in hộ người khác
+                if (employeeIdFromToken && selectedEmployeeInfo) {
                   return (
                     <div className="min-w-0">
                       <label className="block text-xs sm:text-sm font-medium text-gray-700 mb-1">
@@ -1571,7 +1734,7 @@ function Timesheets() {
                         {selectedEmployeeInfo.name} {selectedEmployeeInfo.phone ? `(${selectedEmployeeInfo.phone})` : ''}
                       </div>
                       <p className="text-[10px] sm:text-xs text-gray-500 mt-0.5">
-                        Đã chọn khi đăng nhập
+                        Tài khoản của bạn — check-in cho chính mình
                       </p>
                     </div>
                   );
@@ -1646,14 +1809,11 @@ function Timesheets() {
                   <label className="block text-xs sm:text-sm font-medium text-gray-700 mb-1">
                     Nhập quỹ đầu ca <span className="text-gray-500 text-[10px]">(tiền lẻ trong két)</span>
                   </label>
-                  <input
-                    type="number"
-                    inputMode="numeric"
-                    step="1"
+                  <MoneyInput
                     value={openingCashAmount}
-                    onChange={(e) => setOpeningCashAmount(e.target.value)}
+                    onChange={setOpeningCashAmount}
                     className="w-full min-w-0 px-3 py-2 border rounded-lg text-base focus:border-blue-500 focus:ring-1 focus:ring-blue-200"
-                    placeholder="Ví dụ: 500000"
+                    placeholder="Ví dụ: 500.000"
                   />
                 </div>
               )}

@@ -20,6 +20,7 @@ import promotionRoutes from './routes/promotions.js';
 import zaloRoutes from './routes/zalo.js';
 import cashDrawerRoutes from './routes/cashDrawer.js';
 import sheetsRoutes from './routes/sheets.js';
+import salaryRoutes from './routes/salary.js';
 import { getMemoryUsageFormatted } from './utils/memoryMonitor.js';
 import { duplicateRequestGuard } from './middleware/duplicateRequestGuard.js';
 
@@ -130,6 +131,7 @@ app.use('/api/promotions', promotionRoutes);
 app.use('/api/zalo', zaloRoutes);
 app.use('/api/cash-drawer', cashDrawerRoutes);
 app.use('/api/integrations/sheets', sheetsRoutes);
+app.use('/api/salary', salaryRoutes);
 
 // Health check
 app.get('/api/health', (req, res) => {

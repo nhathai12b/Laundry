@@ -14,16 +14,15 @@ const router = express.Router();
 
 router.use(authenticate);
 
+// Zalo chỉ được quản lý bởi ADMIN (trang Cửa hàng & Nhân sự) — không mở
+// cho tài khoản nhân viên/cửa hàng để tránh nhân viên đăng nhập/đăng xuất
+// nhầm phiên Zalo của shop.
 async function resolveUserStoreId(req) {
-  if (req.user.role === 'root') {
-    throw Object.assign(new Error('Root admin cannot operate store Zalo sessions'), { statusCode: 403 });
-  }
-
-  if (req.user.role === 'employer') {
-    if (req.user.store_id) return req.user.store_id;
-    const user = await queryOne('SELECT store_id FROM users WHERE id = ?', [req.user.id]);
-    if (user?.store_id) return user.store_id;
-    throw Object.assign(new Error('Account is not assigned to a store'), { statusCode: 400 });
+  if (req.user.role !== 'admin') {
+    throw Object.assign(
+      new Error('Zalo được quản lý bởi admin trong mục Cửa hàng & Nhân sự.'),
+      { statusCode: 403 }
+    );
   }
 
   const requestedStoreId = req.query.store_id || req.body?.store_id || req.user.store_id;

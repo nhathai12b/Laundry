@@ -4,6 +4,7 @@ import { isAdmin, isEmployer, getAuth, isRoot } from '../utils/auth';
 import { format, getDaysInMonth } from 'date-fns';
 import { getSavedFilters, saveFilters } from '../utils/filterStorage';
 import { printBill } from '../utils/printBill';
+import MoneyInput from '../components/MoneyInput';
 import { bestApplicablePromotionId } from '../utils/promotions';
 import {
   formatLocalDateKey,
@@ -1305,14 +1306,10 @@ function Orders() {
                 <label className="block text-xs sm:text-sm font-medium text-gray-700 mb-2">
                   Số tiền thanh toán
                 </label>
-                <input
-                  type="number"
-                  placeholder={`${parseFloat(orderToComplete.final_amount || orderToComplete.total_amount || 0).toLocaleString('vi-VN')} đ`}
+                <MoneyInput
+                  placeholder={parseFloat(orderToComplete.final_amount || orderToComplete.total_amount || 0).toLocaleString('vi-VN')}
                   value={customAmountPaid}
-                  onChange={(e) => setCustomAmountPaid(e.target.value)}
-                  step="100"
-                  min="0"
-                  max={parseFloat(orderToComplete.final_amount || orderToComplete.total_amount || 0)}
+                  onChange={setCustomAmountPaid}
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
                 />
                 <p className="text-xs text-gray-500 mt-1">Để trống = toàn bộ số tiền hoặc nhập 0 để ghi nợ</p>

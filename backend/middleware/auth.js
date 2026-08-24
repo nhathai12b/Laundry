@@ -16,6 +16,19 @@ export const authenticate = (req, res, next) => {
   }
 };
 
+// Token đăng nhập cá nhân của nhân viên (employee_login=true) vẫn mang role
+// 'employer' của tài khoản cửa hàng — middleware này chặn các endpoint quản
+// trị (quản lý nhân viên, cài đặt...) khỏi loại token đó. Nguồn duy nhất của
+// quy tắc; đừng inline lại check này ở từng route.
+export const blockEmployeeLogin = (req, res, next) => {
+  if (req.user?.employee_login) {
+    return res.status(403).json({
+      error: 'Tài khoản nhân viên không có quyền thực hiện thao tác này. Vui lòng liên hệ quản lý.',
+    });
+  }
+  next();
+};
+
 export const authorize = (...roles) => {
   return (req, res, next) => {
     if (!req.user) {

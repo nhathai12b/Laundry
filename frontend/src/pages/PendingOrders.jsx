@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import api from '../utils/api';
 import { format } from 'date-fns';
+import MoneyInput from '../components/MoneyInput';
 
 function PendingOrders() {
   const [orders, setOrders] = useState([]);
@@ -386,14 +387,10 @@ function PendingOrders() {
                 <label className="block text-sm sm:text-base font-semibold text-gray-700 mb-2.5">
                   Số tiền thanh toán
                 </label>
-                <input
-                  type="number"
-                  placeholder={`${parseFloat(orderToComplete.final_amount || orderToComplete.total_amount || 0).toLocaleString('vi-VN')} đ`}
+                <MoneyInput
+                  placeholder={parseFloat(orderToComplete.final_amount || orderToComplete.total_amount || 0).toLocaleString('vi-VN')}
                   value={customAmountPaid}
-                  onChange={(e) => setCustomAmountPaid(e.target.value)}
-                  step="100"
-                  min="0"
-                  max={parseFloat(orderToComplete.final_amount || orderToComplete.total_amount || 0)}
+                  onChange={setCustomAmountPaid}
                   className="w-full px-3 py-2.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
                 />
                 <p className="text-xs text-gray-500 mt-1.5">Để trống = toàn bộ số tiền hoặc nhập 0 để ghi nợ</p>

@@ -39,10 +39,28 @@ CREATE TABLE IF NOT EXISTS employees (
     store_id INT NOT NULL,
     name VARCHAR(255) NOT NULL,
     phone VARCHAR(50),
+    password_hash VARCHAR(255) NULL,
+    hourly_rate DECIMAL(12, 2) NULL,
+    shift_rate DECIMAL(12, 2) NULL,
+    failed_login_attempts INT NOT NULL DEFAULT 0,
+    locked_until DATETIME NULL,
     status ENUM('active', 'inactive') NOT NULL DEFAULT 'active',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     FOREIGN KEY (store_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Salary adjustments: admin cong/tru tien cho nhan vien theo ngay
+CREATE TABLE IF NOT EXISTS salary_adjustments (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    employee_id INT NOT NULL,
+    store_id INT NOT NULL,
+    amount DECIMAL(12, 2) NOT NULL,
+    reason VARCHAR(255),
+    adjust_date DATE NOT NULL,
+    created_by INT,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Products table
@@ -51,6 +69,7 @@ CREATE TABLE IF NOT EXISTS products (
     name VARCHAR(255) NOT NULL,
     unit ENUM('kg', 'cai', 'don') NOT NULL,
     price DECIMAL(10, 2) NOT NULL,
+    commission_percent DECIMAL(5, 2) NULL,
     eta_minutes INT,
     status ENUM('active', 'inactive') NOT NULL DEFAULT 'active',
     created_by INT,
@@ -103,6 +122,7 @@ CREATE TABLE IF NOT EXISTS orders (
     code VARCHAR(50) UNIQUE NOT NULL,
     status ENUM('created', 'washing', 'drying', 'waiting_pickup', 'completed', 'cancelled') NOT NULL DEFAULT 'created',
     assigned_to INT,
+    employee_id INT NULL,
     note TEXT,
     total_amount DECIMAL(10, 2) DEFAULT 0,
     discount_amount DECIMAL(10, 2) DEFAULT 0,
@@ -281,6 +301,7 @@ CREATE TABLE IF NOT EXISTS store_zalo_accounts (
     credentials_json LONGTEXT NULL,
     status ENUM('not_logged_in', 'pending_qr', 'logged_in', 'expired', 'error') NOT NULL DEFAULT 'not_logged_in',
     qr_path VARCHAR(500) NULL,
+    qr_image LONGTEXT NULL,
     last_login_at DATETIME NULL,
     last_error TEXT NULL,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,

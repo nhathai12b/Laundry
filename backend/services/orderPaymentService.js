@@ -36,7 +36,11 @@ async function findOpenTimesheet(db, actor, storeId) {
     params.push(storeId);
   }
 
-  sql += ' ORDER BY check_in DESC LIMIT 1';
+  // Ca CŨ NHẤT đang mở = "ca chính" giữ két tiền — phải khớp với
+  // getCurrentDrawer (cashDrawerService) và logic chia doanh thu ca
+  // (getShiftPaymentSummaryDeduped). DESC ở đây từng ghi tiền mặt vào
+  // két ca phụ khi 2 người cùng đứng ca → lệch két.
+  sql += ' ORDER BY check_in ASC LIMIT 1';
   return db.queryOne(sql, params);
 }
 

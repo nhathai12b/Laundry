@@ -1,7 +1,6 @@
 import express from 'express';
 import { query, queryOne, execute, transaction } from '../database/db.js';
-import { authenticate } from '../middleware/auth.js';
-import { authorize } from '../middleware/auth.js';
+import { authenticate, authorize, blockEmployeeLogin } from '../middleware/auth.js';
 import { validateEnum, sanitizeString } from '../utils/validators.js';
 import { isValidIP, isValidPort } from '../utils/ipValidator.js';
 
@@ -72,7 +71,7 @@ router.get('/', async (req, res) => {
 });
 
 // Update settings (Admin or Employer)
-router.put('/', async (req, res) => {
+router.put('/', blockEmployeeLogin, async (req, res) => {
   try {
     const { printer_ip, printer_port, printer_com_port, paper_size, print_method, bill_store_name, bill_store_address, bill_store_phone, bill_footer_message, bill_qr_image, bill_qr_content, bill_bottom_padding_mm, store_id } = req.body;
 

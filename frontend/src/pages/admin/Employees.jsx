@@ -1,6 +1,11 @@
-import { useEffect, useState } from 'react';
+﻿import { useEffect, useState } from 'react';
 import api from '../../utils/api';
 import { isAdmin } from '../../utils/auth';
+import SalaryAdjustModal from '../../components/SalaryAdjustModal';
+import MoneyInput from '../../components/MoneyInput';
+import { getPasswordError } from '../../utils/passwordValidation';
+
+const formatMoney = (value) => `${new Intl.NumberFormat('vi-VN').format(parseFloat(value) || 0)} đ`;
 
 function Employees() {
   const [employees, setEmployees] = useState([]);
@@ -12,7 +17,12 @@ function Employees() {
     name: '',
     phone: '',
     store_id: '',
+    password: '',
+    hourly_rate: '',
   });
+
+  // Modal lương & cộng/trừ tiền (component dùng chung)
+  const [salaryEmployee, setSalaryEmployee] = useState(null);
 
   useEffect(() => {
     loadEmployees();
@@ -50,22 +60,39 @@ function Employees() {
   const handleSubmit = async (e) => {
     e.preventDefault();
     try {
-      // Validate required fields
       if (!formData.name || formData.name.trim() === '') {
         alert('Vui lòng nhập tên nhân viên');
         return;
       }
-      
+
       if (isAdmin() && !editingEmployee && !formData.store_id) {
         alert('Vui lòng chọn cửa hàng');
         return;
       }
-      
-      // Prepare data - for employer, don't send store_id (backend will use user.id)
-      const submitData = isAdmin() 
-        ? { name: formData.name.trim(), phone: formData.phone?.trim() || '', store_id: formData.store_id }
-        : { name: formData.name.trim(), phone: formData.phone?.trim() || '' };
-      
+
+      const passwordError = getPasswordError(formData.password);
+      if (passwordError) {
+        alert(`⚠️ Mật khẩu chưa đủ điều kiện: ${passwordError}`);
+        return;
+      }
+
+      if (formData.password && !formData.phone?.trim()) {
+        alert('Nhân viên cần có SĐT để đăng nhập riêng. Vui lòng nhập SĐT.');
+        return;
+      }
+
+      const submitData = {
+        name: formData.name.trim(),
+        phone: formData.phone?.trim() || '',
+        hourly_rate: formData.hourly_rate === '' ? null : formData.hourly_rate,
+      };
+      if (formData.password) {
+        submitData.password = formData.password;
+      }
+      if (isAdmin() && !editingEmployee) {
+        submitData.store_id = formData.store_id;
+      }
+
       if (editingEmployee) {
         await api.patch(`/employees/${editingEmployee.id}`, submitData);
       } else {
@@ -73,7 +100,7 @@ function Employees() {
       }
       setShowModal(false);
       setEditingEmployee(null);
-      setFormData({ name: '', phone: '', store_id: '' });
+      setFormData({ name: '', phone: '', store_id: '', password: '', hourly_rate: '' });
       loadEmployees();
     } catch (error) {
       console.error('Submit error:', error);
@@ -88,6 +115,8 @@ function Employees() {
       name: employee.name,
       phone: employee.phone || '',
       store_id: employee.store_id,
+      password: '',
+      hourly_rate: employee.hourly_rate ?? '',
     });
     setShowModal(true);
   };
@@ -102,6 +131,10 @@ function Employees() {
     }
   };
 
+  const openSalaryModal = (employee) => {
+    setSalaryEmployee({ id: employee.id, name: employee.name });
+  };
+
   if (loading) {
     return <div className="text-center py-8">Đang tải...</div>;
   }
@@ -111,12 +144,12 @@ function Employees() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-gray-800">Quản lý nhân viên</h1>
-          <p className="text-gray-600">Thêm và quản lý nhân viên cho từng cửa hàng</p>
+          <p className="text-gray-600">Tài khoản riêng, lương và điều chỉnh tiền cho từng nhân viên</p>
         </div>
         <button
           onClick={() => {
             setEditingEmployee(null);
-            setFormData({ name: '', phone: '', store_id: '' });
+            setFormData({ name: '', phone: '', store_id: '', password: '', hourly_rate: '' });
             setShowModal(true);
           }}
           className="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700"
@@ -138,20 +171,38 @@ function Employees() {
           ) : (
             employees.map((employee) => (
               <div key={employee.id} className="p-4 hover:bg-gray-50">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <div className="font-medium text-gray-800">{employee.name}</div>
+                <div className="flex items-center justify-between gap-3 flex-wrap">
+                  <div className="min-w-0">
+                    <div className="font-medium text-gray-800 flex items-center gap-2 flex-wrap">
+                      {employee.name}
+                      {Boolean(employee.has_login) && (
+                        <span className="text-[10px] font-bold uppercase tracking-wide text-green-700 bg-green-100 border border-green-300 rounded px-1.5 py-0.5">
+                          Có tài khoản
+                        </span>
+                      )}
+                    </div>
                     {employee.phone && (
                       <div className="text-sm text-gray-600">SĐT: {employee.phone}</div>
                     )}
                     {isAdmin() && employee.store_name && (
                       <div className="text-sm text-gray-600">Cửa hàng: {employee.store_name}</div>
                     )}
-                    <div className="text-xs text-gray-500 mt-1">
-                      Trạng thái: {employee.status === 'active' ? 'Hoạt động' : 'Ngừng hoạt động'}
+                    <div className="text-xs text-gray-500 mt-1 space-x-3">
+                      <span>{employee.status === 'active' ? '🟢 Hoạt động' : '⚪ Ngừng'}</span>
+                      {employee.hourly_rate != null && Number(employee.hourly_rate) > 0 && (
+                        <span>Lương giờ: <strong>{formatMoney(employee.hourly_rate)}</strong></span>
+                      )}
                     </div>
                   </div>
-                  <div className="flex gap-2">
+                  <div className="flex gap-2 flex-wrap">
+                    {isAdmin() && (
+                      <button
+                        onClick={() => openSalaryModal(employee)}
+                        className="px-3 py-1 bg-emerald-100 text-emerald-700 rounded-lg hover:bg-emerald-200 text-sm font-medium"
+                      >
+                        ± Tiền / Lương
+                      </button>
+                    )}
                     <button
                       onClick={() => handleEdit(employee)}
                       className="px-3 py-1 bg-blue-100 text-blue-600 rounded-lg hover:bg-blue-200 text-sm"
@@ -174,8 +225,8 @@ function Employees() {
 
       {/* Add/Edit Modal */}
       {showModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-lg max-w-md w-full p-6">
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50 overflow-y-auto">
+          <div className="bg-white rounded-lg max-w-md w-full p-6 my-auto max-h-[92vh] overflow-y-auto">
             <h2 className="text-xl font-bold mb-4">
               {editingEmployee ? 'Sửa nhân viên' : 'Thêm nhân viên'}
             </h2>
@@ -215,16 +266,61 @@ function Employees() {
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
-                  SĐT (tùy chọn)
+                  SĐT {formData.password ? '*' : '(tùy chọn)'}
                 </label>
                 <input
                   type="text"
                   value={formData.phone}
                   onChange={(e) => setFormData({ ...formData, phone: e.target.value })}
                   className="w-full px-3 py-2.5 border rounded-lg text-base"
+                  placeholder="Dùng làm tên đăng nhập nếu có mật khẩu"
                 />
               </div>
-              <div className="flex flex-col sm:flex-row gap-3 pt-4">
+
+              <div className="rounded-lg border border-blue-200 bg-blue-50 p-3 space-y-3">
+                <div className="text-sm font-semibold text-blue-900">🔐 Tài khoản đăng nhập riêng</div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Mật khẩu {editingEmployee?.has_login ? '(để trống nếu không đổi)' : '(để trống nếu chưa cấp tài khoản)'}
+                  </label>
+                  <input
+                    type="password"
+                    value={formData.password ?? ''}
+                    onChange={(e) => setFormData({ ...formData, password: e.target.value })}
+                    className={`w-full px-3 py-2.5 border rounded-lg text-base ${getPasswordError(formData.password) ? 'border-red-400 focus:border-red-500' : ''}`}
+                    placeholder="VD: Nhanvien123"
+                    autoComplete="new-password"
+                  />
+                  {getPasswordError(formData.password) ? (
+                    <p className="text-xs text-red-600 font-medium mt-1">
+                      ⚠️ {getPasswordError(formData.password)}
+                    </p>
+                  ) : formData.password ? (
+                    <p className="text-xs text-green-600 font-medium mt-1">✓ Mật khẩu hợp lệ</p>
+                  ) : null}
+                  <p className="text-xs text-gray-500 mt-1">
+                    Yêu cầu: tối thiểu 8 ký tự, có chữ HOA, chữ thường và số. Nhân viên đăng nhập bằng SĐT + mật khẩu này, tự check-in/check-out và xem lương tháng của mình.
+                  </p>
+                </div>
+              </div>
+
+              <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 space-y-3">
+                <div className="text-sm font-semibold text-emerald-900">💰 Thiết lập lương</div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Lương theo giờ (đ)</label>
+                  <MoneyInput
+                    value={formData.hourly_rate}
+                    onChange={(v) => setFormData({ ...formData, hourly_rate: v })}
+                    className="w-full px-3 py-2.5 border rounded-lg text-base"
+                    placeholder="VD: 25.000"
+                  />
+                </div>
+                <p className="text-xs text-gray-600">
+                  Lương tháng = tổng giờ làm × lương giờ (giờ tăng ca nhân hệ số), cộng/trừ các khoản điều chỉnh.
+                </p>
+              </div>
+
+              <div className="flex flex-col sm:flex-row gap-3 pt-2">
                 <button
                   type="submit"
                   className="flex-1 bg-blue-600 text-white py-3 rounded-lg hover:bg-blue-700 font-medium text-base"
@@ -236,7 +332,7 @@ function Employees() {
                   onClick={() => {
                     setShowModal(false);
                     setEditingEmployee(null);
-                    setFormData({ name: '', phone: '', store_id: '' });
+                    setFormData({ name: '', phone: '', store_id: '', password: '', hourly_rate: '' });
                   }}
                   className="flex-1 bg-gray-200 text-gray-800 py-3 rounded-lg hover:bg-gray-300 font-medium text-base"
                 >
@@ -247,9 +343,16 @@ function Employees() {
           </div>
         </div>
       )}
+
+      {/* Salary / Adjustment Modal (component dùng chung) */}
+      {salaryEmployee && (
+        <SalaryAdjustModal
+          employee={salaryEmployee}
+          onClose={() => setSalaryEmployee(null)}
+        />
+      )}
     </div>
   );
 }
 
 export default Employees;
-

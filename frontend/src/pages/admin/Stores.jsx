@@ -2,6 +2,10 @@ import { useEffect, useState } from 'react';
 import api from '../../utils/api';
 import { isAdmin } from '../../utils/auth';
 import PasswordRequirements from '../../components/PasswordRequirements';
+import SalaryAdjustModal from '../../components/SalaryAdjustModal';
+import ZaloConnectModal from '../../components/ZaloConnectModal';
+import MoneyInput from '../../components/MoneyInput';
+import { getPasswordError } from '../../utils/passwordValidation';
 
 function Stores() {
   const [activeTab, setActiveTab] = useState('stores'); // 'stores', 'employees'
@@ -43,8 +47,12 @@ function Stores() {
     name: '',
     phone: '',
     user_id: '',
+    password: '',
+    hourly_rate: '',
   });
   const [employerUsers, setEmployerUsers] = useState([]);
+  const [adjustEmployee, setAdjustEmployee] = useState(null);
+  const [zaloStore, setZaloStore] = useState(null);
 
   useEffect(() => {
     if (activeTab === 'stores') {
@@ -177,18 +185,33 @@ function Stores() {
         alert('Vui lòng nhập tên nhân viên');
         return;
       }
+
+      const passwordError = getPasswordError(employeeFormData.password);
+      if (passwordError) {
+        alert(`⚠️ Mật khẩu chưa đủ điều kiện: ${passwordError}`);
+        return;
+      }
       
       if (isAdmin() && !editingEmployee && !employeeFormData.user_id) {
         alert('Vui lòng chọn account cho nhân viên');
         return;
       }
       
-      const submitData = { 
-        name: employeeFormData.name.trim(), 
+      if (employeeFormData.password && !employeeFormData.phone?.trim()) {
+        alert('Nhân viên cần có SĐT để đăng nhập riêng. Vui lòng nhập SĐT.');
+        return;
+      }
+
+      const submitData = {
+        name: employeeFormData.name.trim(),
         phone: employeeFormData.phone?.trim() || '',
-        user_id: isAdmin() ? employeeFormData.user_id : undefined
+        user_id: isAdmin() ? employeeFormData.user_id : undefined,
+        hourly_rate: employeeFormData.hourly_rate === '' ? null : employeeFormData.hourly_rate,
       };
-      
+      if (employeeFormData.password) {
+        submitData.password = employeeFormData.password;
+      }
+
       if (editingEmployee) {
         await api.patch(`/employees/${editingEmployee.id}`, submitData);
         alert('Cập nhật nhân viên thành công!');
@@ -197,7 +220,7 @@ function Stores() {
       }
       setShowEmployeeModal(false);
       setEditingEmployee(null);
-      setEmployeeFormData({ name: '', phone: '', user_id: '' });
+      setEmployeeFormData({ name: '', phone: '', user_id: '', password: '', hourly_rate: '' });
       loadEmployees();
     } catch (error) {
       console.error('Submit error:', error);
@@ -211,6 +234,8 @@ function Stores() {
       name: employee.name,
       phone: employee.phone || '',
       user_id: employee.store_id,
+      password: '',
+      hourly_rate: employee.hourly_rate ?? '',
     });
     setShowEmployeeModal(true);
   };
@@ -546,7 +571,14 @@ function Stores() {
                             </span>
                           </td>
                           <td className="px-4 py-3 text-sm">
-                            <div className="flex items-center gap-2">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <button
+                                onClick={() => setZaloStore({ id: store.id, name: store.name })}
+                                className="px-3 py-1.5 bg-gradient-to-r from-blue-500 to-cyan-500 text-white rounded-lg hover:from-blue-600 hover:to-cyan-600 active:scale-95 text-xs font-bold whitespace-nowrap shadow-md hover:shadow-lg transition-all"
+                                title="Kết nối / quản lý Zalo của cửa hàng"
+                              >
+                                💬 Kết nối Zalo
+                              </button>
                               <button
                                 onClick={() => handleEdit(store)}
                                 className="text-blue-600 hover:text-blue-700 font-medium text-sm"
@@ -618,7 +650,14 @@ function Stores() {
                           </span>
                         </td>
                         <td className="px-4 py-3 text-sm">
-                          <div className="flex gap-2">
+                          <div className="flex gap-2 items-center">
+                            <button
+                              onClick={() => setAdjustEmployee({ id: employee.id, name: employee.name })}
+                              className="px-2 py-0.5 bg-emerald-100 text-emerald-700 rounded hover:bg-emerald-200 text-xs font-semibold whitespace-nowrap"
+                              title="Xem lương / thưởng / phạt"
+                            >
+                              ± Tiền
+                            </button>
                             <button
                               onClick={() => handleEmployeeEdit(employee)}
                               className="text-blue-600 hover:text-blue-700"
@@ -826,20 +865,10 @@ function Stores() {
                 )}
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Lương/giờ (đ)</label>
-                <input
-                  type="number"
+                <label className="block text-sm font-medium text-gray-700 mb-1">Lương/giờ</label>
+                <MoneyInput
                   value={userFormData.hourly_rate}
-                  onChange={(e) => setUserFormData({ ...userFormData, hourly_rate: e.target.value })}
-                  className="w-full px-3 py-2 border rounded-lg"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Lương/ca (đ)</label>
-                <input
-                  type="number"
-                  value={userFormData.shift_rate}
-                  onChange={(e) => setUserFormData({ ...userFormData, shift_rate: e.target.value })}
+                  onChange={(v) => setUserFormData({ ...userFormData, hourly_rate: v })}
                   className="w-full px-3 py-2 border rounded-lg"
                 />
               </div>
@@ -919,15 +948,56 @@ function Stores() {
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
-                  SĐT (tùy chọn)
+                  SĐT {employeeFormData.password ? '*' : '(tùy chọn)'}
                 </label>
                 <input
                   type="text"
                   value={employeeFormData.phone}
                   onChange={(e) => setEmployeeFormData({ ...employeeFormData, phone: e.target.value })}
                   className="w-full px-3 py-2.5 border rounded-lg text-base"
+                  placeholder="Dùng làm tên đăng nhập nếu có mật khẩu"
                 />
               </div>
+
+              <div className="rounded-lg border border-blue-200 bg-blue-50 p-3">
+                <div className="text-sm font-semibold text-blue-900 mb-2">🔐 Tài khoản đăng nhập riêng</div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Mật khẩu {editingEmployee?.has_login ? '(để trống nếu không đổi)' : '(để trống nếu chưa cấp)'}
+                </label>
+                <input
+                  type="password"
+                  value={employeeFormData.password ?? ''}
+                  onChange={(e) => setEmployeeFormData({ ...employeeFormData, password: e.target.value })}
+                  className={`w-full px-3 py-2.5 border rounded-lg text-base ${getPasswordError(employeeFormData.password) ? 'border-red-400 focus:border-red-500' : ''}`}
+                  placeholder="VD: Nhanvien123"
+                  autoComplete="new-password"
+                />
+                {getPasswordError(employeeFormData.password) ? (
+                  <p className="text-xs text-red-600 font-medium mt-1">
+                    ⚠️ {getPasswordError(employeeFormData.password)}
+                  </p>
+                ) : employeeFormData.password ? (
+                  <p className="text-xs text-green-600 font-medium mt-1">✓ Mật khẩu hợp lệ</p>
+                ) : null}
+                <p className="text-xs text-gray-500 mt-1">
+                  Yêu cầu: tối thiểu 8 ký tự, có chữ HOA, chữ thường và số. Nhân viên đăng nhập bằng SĐT + mật khẩu này để tự chấm công và xem lương tháng.
+                </p>
+              </div>
+
+              <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3">
+                <div className="text-sm font-semibold text-emerald-900 mb-2">💰 Thiết lập lương</div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Lương theo giờ (đ)</label>
+                <MoneyInput
+                  value={employeeFormData.hourly_rate ?? ''}
+                  onChange={(v) => setEmployeeFormData({ ...employeeFormData, hourly_rate: v })}
+                  className="w-full px-3 py-2.5 border rounded-lg text-base"
+                  placeholder="VD: 25.000"
+                />
+                <p className="text-xs text-gray-600 mt-1">
+                  Lương tháng = tổng giờ làm × lương giờ (giờ tăng ca nhân hệ số), cộng/trừ các khoản điều chỉnh.
+                </p>
+              </div>
+
               <div className="flex flex-col sm:flex-row gap-3 pt-4">
                 <button
                   type="submit"
@@ -940,7 +1010,7 @@ function Stores() {
                   onClick={() => {
                     setShowEmployeeModal(false);
                     setEditingEmployee(null);
-                    setEmployeeFormData({ name: '', phone: '', user_id: '' });
+                    setEmployeeFormData({ name: '', phone: '', user_id: '', password: '', hourly_rate: '' });
                   }}
                   className="flex-1 bg-gray-200 text-gray-800 py-3 rounded-lg hover:bg-gray-300 font-medium text-base"
                 >
@@ -950,6 +1020,22 @@ function Stores() {
             </form>
           </div>
         </div>
+      )}
+
+      {/* Salary Adjust Modal (± thưởng/phạt) */}
+      {adjustEmployee && (
+        <SalaryAdjustModal
+          employee={adjustEmployee}
+          onClose={() => setAdjustEmployee(null)}
+        />
+      )}
+
+      {/* Zalo Connect Modal — quản lý phiên Zalo của từng cửa hàng */}
+      {zaloStore && (
+        <ZaloConnectModal
+          store={zaloStore}
+          onClose={() => setZaloStore(null)}
+        />
       )}
     </div>
   );

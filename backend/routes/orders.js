@@ -5,8 +5,6 @@ import { authenticate } from '../middleware/auth.js';
 import { authorize } from '../middleware/auth.js';
 import { auditLog } from '../middleware/audit.js';
 import {
-  sendDebtReminderNotification,
-  sendDeliveredNotification,
   sendOrderCreatedNotification,
   sendReadyForPickupNotification,
 } from '../services/zaloMessageService.js';
@@ -474,15 +472,18 @@ router.post('/', auditLog('create', 'order'), async (req, res) => {
 
       const orderResult = await db.execute(`
         INSERT INTO orders (
-          customer_id, code, status, assigned_to, note,
+          customer_id, code, status, assigned_to, employee_id, note,
           total_amount, discount_amount, final_amount, promotion_id, store_id,
           created_by, is_debt, expected_return_at, payment_status, paid_amount, debt_amount
         )
-        VALUES (?, ?, 'created', ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 'unpaid', 0, 0)
+        VALUES (?, ?, 'created', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 'unpaid', 0, 0)
       `, [
         customer.id,
         code,
         finalAssignedTo || null,
+        // Nhân viên tạo đơn (từ token đăng nhập cá nhân / chọn khi login) —
+        // dùng để tính hoa hồng sản phẩm cho đúng người
+        req.user.employee_id || null,
         note || null,
         total,
         discountAmount,
@@ -908,23 +909,13 @@ router.post('/:id/status', auditLog('update', 'order'), async (req, res) => {
       }
     });
 
+    // Chính sách Zalo: khách chỉ nhận đúng 2 tin — (1) khi shop nhận đơn,
+    // (2) khi nhân viên bấm "Chờ nhận" (đồ giặt xong). Không gửi tin khi
+    // hoàn thành/giao hàng hay nhắc nợ để tránh làm phiền khách.
     if (status === 'waiting_pickup' && order.status !== 'waiting_pickup') {
       sendReadyForPickupNotification(req.params.id).catch((error) => {
         console.error('Ready for pickup Zalo notification failed:', error.message);
       });
-    }
-
-    if (isNewlyCompleted) {
-      sendDeliveredNotification(req.params.id).catch((error) => {
-        console.error('Delivered Zalo notification failed:', error.message);
-      });
-
-      const balance = await getOrderPaymentBalance(req.params.id);
-      if ((Number.parseFloat(balance?.debt_amount || 0) || 0) > 0) {
-        sendDebtReminderNotification(req.params.id).catch((error) => {
-          console.error('Debt reminder Zalo notification failed:', error.message);
-        });
-      }
     }
 
     const updatedOrder = await queryOne(`

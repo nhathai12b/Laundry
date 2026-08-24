@@ -193,7 +193,7 @@ function Login() {
 
           .login-container {
             width: 100%;
-            maxWidth: 420px;
+            max-width: 420px;
           }
 
           .login-card {
@@ -282,7 +282,7 @@ function Login() {
 
           .login-container {
             width: 100%;
-            maxWidth: 420px;
+            max-width: 420px;
             position: relative;
             z-index: 10;
           }
@@ -460,8 +460,8 @@ function Login() {
         {/* Desktop Branding Section */}
         <div className="login-branding">
           <div className="brand-section">
-            <h1>Quản lý Giặt Ủi</h1>
-            <p>Giải pháp quản lý cửa hàng hiện đại dành cho bạn</p>
+            <h1>X-Wash</h1>
+            <p>Giải pháp quản lý cửa hàng giặt ủi hiện đại dành cho bạn</p>
 
             <div className="brand-features">
               <div className="feature-item">
@@ -495,7 +495,7 @@ function Login() {
             <div className="login-card">
               <div className="login-header">
                 <div className="login-icon">🏪</div>
-                <h1 className="login-title">Quản lý Giặt Ủi</h1>
+                <h1 className="login-title">X-Wash</h1>
                 <p className="login-subtitle">Hệ thống quản lý cửa hàng giặt ủi hiện đại</p>
               </div>
 

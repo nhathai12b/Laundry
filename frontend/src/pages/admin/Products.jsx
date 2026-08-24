@@ -24,6 +24,7 @@ function Products() {
     name: '',
     unit: 'kg',
     price: '',
+    commission_percent: '',
     status: 'active',
     store_id: '',
   });
@@ -76,6 +77,7 @@ function Products() {
         name: formData.name,
         unit: formData.unit,
         price: formData.price,
+        commission_percent: formData.commission_percent === '' ? null : formData.commission_percent,
         status: formData.status,
       };
       
@@ -102,6 +104,7 @@ function Products() {
       name: product.name,
       unit: product.unit,
       price: product.price,
+      commission_percent: product.commission_percent ?? '',
       status: product.status,
       store_id: product.store_id || '',
     });
@@ -128,6 +131,7 @@ function Products() {
       name: '',
       unit: 'kg',
       price: '',
+      commission_percent: '',
       status: 'active',
       store_id: selectedStoreId && selectedStoreId !== 'all' ? selectedStoreId : (stores[0]?.id ? String(stores[0].id) : ''),
     });
@@ -206,6 +210,13 @@ function Products() {
                     <span className="font-medium">Giá:</span>{' '}
                     {new Intl.NumberFormat('vi-VN').format(product.price)} đ
                   </p>
+                  {Number(product.commission_percent) > 0 && (
+                    <p>
+                      <span className="inline-block px-2 py-0.5 bg-amber-100 text-amber-800 border border-amber-300 rounded text-xs font-semibold">
+                        🎁 Hoa hồng NV: {Number(product.commission_percent)}%
+                      </span>
+                    </p>
+                  )}
                 </div>
               </div>
               <span
@@ -296,6 +307,28 @@ function Products() {
                   className="w-full px-3 py-2 border rounded-lg"
                   required
                 />
+              </div>
+              <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">
+                <label className="block text-sm font-semibold text-amber-900 mb-1">
+                  🎁 Hoa hồng nhân viên (%)
+                </label>
+                <div className="relative">
+                  <input
+                    type="number"
+                    inputMode="decimal"
+                    min="0"
+                    max="100"
+                    step="any"
+                    value={formData.commission_percent}
+                    onChange={(e) => setFormData({ ...formData, commission_percent: e.target.value })}
+                    className="w-full px-3 py-2 pr-10 border rounded-lg"
+                    placeholder="VD: 5"
+                  />
+                  <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm font-semibold pointer-events-none">%</span>
+                </div>
+                <p className="text-xs text-amber-800 mt-1">
+                  Nhân viên xử lý đơn chứa sản phẩm này được cộng bonus = % × giá trị dòng hàng (tính khi đơn hoàn thành). Để trống = không có hoa hồng.
+                </p>
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Trạng thái</label>

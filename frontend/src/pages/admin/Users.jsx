@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import api from '../../utils/api';
 import { isAdmin, isRoot } from '../../utils/auth';
 import PasswordRequirements from '../../components/PasswordRequirements';
+import MoneyInput from '../../components/MoneyInput';
 
 function Users() {
   const [activeTab, setActiveTab] = useState('users'); // 'users', 'employees', or 'pending'
@@ -349,7 +350,6 @@ function Users() {
                     <th className="px-4 py-3 text-left text-sm font-medium text-gray-700">Vai trò</th>
                     <th className="px-4 py-3 text-left text-sm font-medium text-gray-700">Trạng thái</th>
                     <th className="px-4 py-3 text-left text-sm font-medium text-gray-700">Lương/giờ</th>
-                    <th className="px-4 py-3 text-left text-sm font-medium text-gray-700">Lương/ca</th>
                     <th className="px-4 py-3 text-left text-sm font-medium text-gray-700">Thao tác</th>
                   </tr>
                 </thead>
@@ -382,9 +382,6 @@ function Users() {
                         </td>
                         <td className="px-4 py-3 text-sm text-gray-600">
                           {user.hourly_rate ? new Intl.NumberFormat('vi-VN').format(user.hourly_rate) + ' đ' : '-'}
-                        </td>
-                        <td className="px-4 py-3 text-sm text-gray-600">
-                          {user.shift_rate ? new Intl.NumberFormat('vi-VN').format(user.shift_rate) + ' đ' : '-'}
                         </td>
                         <td className="px-4 py-3 text-sm">
                           <div className="flex gap-2">
@@ -583,20 +580,10 @@ function Users() {
                 </select>
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Lương/giờ (đ)</label>
-                <input
-                  type="number"
+                <label className="block text-sm font-medium text-gray-700 mb-1">Lương/giờ</label>
+                <MoneyInput
                   value={userFormData.hourly_rate}
-                  onChange={(e) => setUserFormData({ ...userFormData, hourly_rate: e.target.value })}
-                  className="w-full px-3 py-2 border rounded-lg"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Lương/ca (đ)</label>
-                <input
-                  type="number"
-                  value={userFormData.shift_rate}
-                  onChange={(e) => setUserFormData({ ...userFormData, shift_rate: e.target.value })}
+                  onChange={(v) => setUserFormData({ ...userFormData, hourly_rate: v })}
                   className="w-full px-3 py-2 border rounded-lg"
                 />
               </div>

@@ -167,7 +167,7 @@ const printViaBluetooth = async (escPosDataBase64) => {
     if (error.name === 'SecurityError') return new Error('Lỗi bảo mật. Vui lòng cho phép truy cập Bluetooth.');
     if (error.name === 'NetworkError') {
       return new Error(
-        'Không kết nối được với máy in. Nguyên nhân thường gặp: máy in dùng Bluetooth Classic (SPP) — trình duyệt chỉ kết nối được máy in BLE. Với máy in Xprinter/Gprinter Bluetooth: ghép nối máy in với máy chủ Windows rồi chuyển Cài đặt → Phương thức in sang "Cổng COM".'
+        'Không kết nối được với máy in. Nguyên nhân thường gặp: máy in dùng Bluetooth Classic (SPP) — trình duyệt chỉ kết nối được máy in BLE. Hãy thử tắt/bật lại máy in, xóa ghép nối cũ trên điện thoại rồi in lại, hoặc dùng máy in hỗ trợ BLE.'
       );
     }
     return new Error(`Lỗi kết nối Bluetooth: ${error.message || 'Lỗi không xác định'}`);
@@ -180,7 +180,7 @@ const printViaBluetooth = async (escPosDataBase64) => {
       return true;
     } catch (error) {
       clearGattCache();
-      if (error.message.includes('không tìm thấy đặc tính')) {
+      if (String(error?.message || '').toLowerCase().includes('không tìm thấy đặc tính')) {
         throw error;
       }
     }
@@ -217,62 +217,22 @@ const printViaBluetooth = async (escPosDataBase64) => {
 };
 
 /**
- * Get print settings from server.
- * Cache 30s: bỏ một round-trip mỗi lần in; admin đổi cài đặt in sẽ có hiệu lực sau tối đa 30s.
- */
-let cachedPrintSettings = null;
-let cachedPrintSettingsAt = 0;
-const PRINT_SETTINGS_CACHE_MS = 30 * 1000;
-
-const getPrintSettings = async () => {
-  if (cachedPrintSettings && Date.now() - cachedPrintSettingsAt < PRINT_SETTINGS_CACHE_MS) {
-    return cachedPrintSettings;
-  }
-  try {
-    const response = await api.get('/settings');
-    cachedPrintSettings = response.data.data || {};
-    cachedPrintSettingsAt = Date.now();
-    return cachedPrintSettings;
-  } catch (error) {
-    console.error('Error loading print settings:', error);
-    return {
-      print_method: 'server'
-    };
-  }
-};
-
-/**
- * Print bill using the method set in settings
- * This function enforces the print method set by admin
+ * In bill — luôn qua Bluetooth. Các phương thức server/COM đã bị gỡ khỏi
+ * Cài đặt; cửa hàng còn lưu print_method cũ trong DB vẫn in được bình thường.
  */
 export const printBill = async (orderId) => {
   try {
-    // In bill luôn qua Bluetooth — các phương thức khác đã bị bỏ khỏi Cài đặt.
-    // Ép cứng ở đây để cửa hàng còn lưu print_method='server'/'com' cũ trong DB
-    // vẫn in được mà không cần lưu lại Cài đặt.
-    const printMethod = 'bluetooth';
-
-    // Enforce the print method from settings
-    if (printMethod === 'bluetooth') {
-      // Must use Bluetooth
-      if (!isBluetoothSupported()) {
-        throw new Error('Thiết bị này không hỗ trợ in Bluetooth qua trình duyệt (chỉ hoạt động trên Chrome ở Android). Vui lòng mở ứng dụng bằng Chrome trên điện thoại Android để in bill.');
-      }
-      
-      // Get bill data from server
-      const response = await api.get(`/print/bill-data/${orderId}`);
-      if (response.data.success && response.data.data) {
-        // Print via Bluetooth
-        await printViaBluetooth(response.data.data);
-        return { success: true, method: 'bluetooth' };
-      } else {
-        throw new Error('Không thể lấy dữ liệu bill để in');
-      }
-    } else {
-      // Must use Server (default)
-      await api.post(`/print/bill/${orderId}`);
-      return { success: true, method: 'server' };
+    if (!isBluetoothSupported()) {
+      throw new Error('Thiết bị này không hỗ trợ in Bluetooth qua trình duyệt (chỉ hoạt động trên Chrome ở Android). Vui lòng mở ứng dụng bằng Chrome trên điện thoại Android để in bill.');
     }
+
+    // Get bill data from server
+    const response = await api.get(`/print/bill-data/${orderId}`);
+    if (response.data.success && response.data.data) {
+      await printViaBluetooth(response.data.data);
+      return { success: true, method: 'bluetooth' };
+    }
+    throw new Error('Không thể lấy dữ liệu bill để in');
   } catch (error) {
     // Re-throw with better error message
     if (error.response?.data?.error) {
