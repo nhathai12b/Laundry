@@ -1106,7 +1106,43 @@ router.get('/daily-hours', authorize('admin'), async (req, res) => {
 
     // Group by employee and date
     const employeeMap = {};
-    
+
+    // Seed TẤT CẢ nhân viên active của chuỗi (kể cả người chưa có ca nào) để
+    // bảng lưới luôn hiển thị đủ cột nhân viên, ngày chưa làm = 0
+    try {
+      let empSql = `
+        SELECT e.id, e.name
+        FROM employees e
+        JOIN users u ON e.store_id = u.id
+        JOIN stores s ON u.store_id = s.id
+        WHERE e.status = 'active'
+      `;
+      const empParams = [];
+      if (req.user.role === 'admin') {
+        empSql += ' AND s.admin_id = ?';
+        empParams.push(req.user.id);
+        if (storeIdParam && storeIdParam !== 'all') {
+          empSql += ' AND s.id = ?';
+          empParams.push(storeIdParam);
+        }
+      } else if (req.user.role === 'employer') {
+        empSql += ' AND u.id = ?';
+        empParams.push(req.user.id);
+      }
+      const activeEmployees = await query(empSql, empParams);
+      activeEmployees.forEach((emp) => {
+        employeeMap[emp.id] = {
+          user_id: emp.id,
+          employee_id: emp.id,
+          user_name: emp.name,
+          employee_name: emp.name,
+          daily_hours: {},
+        };
+      });
+    } catch (error) {
+      // Nếu lỗi (bảng chưa sẵn sàng) — vẫn build từ timesheets như cũ
+    }
+
     timesheets.forEach((ts) => {
       const empId = ts.employee_id;
       if (!employeeMap[empId]) {
@@ -1151,7 +1187,34 @@ router.get('/daily-hours', authorize('admin'), async (req, res) => {
       };
     });
 
-    res.json({ 
+    // Tổng thưởng/phạt trong tháng cho từng nhân viên (để hiện ở khối tổng
+    // kết cuối bảng). adjust_date là DATE nên so theo khoảng ngày local.
+    result.forEach((emp) => { emp.total_adjustments = 0; });
+    try {
+      const adjMonthStart = `${year}-${monthStr}-01`;
+      const adjNextMonth = Number(month) === 12
+        ? `${Number(year) + 1}-01-01`
+        : `${year}-${String(Number(month) + 1).padStart(2, '0')}-01`;
+      const adjRows = await query(`
+        SELECT a.employee_id, SUM(a.amount) AS total_adjustments
+        FROM salary_adjustments a
+        JOIN employees e ON a.employee_id = e.id
+        JOIN users u ON e.store_id = u.id
+        JOIN stores s ON u.store_id = s.id
+        WHERE s.admin_id = ? AND a.adjust_date >= ? AND a.adjust_date < ?
+        GROUP BY a.employee_id
+      `, [req.user.id, adjMonthStart, adjNextMonth]);
+      const adjMap = new Map(adjRows.map(r => [r.employee_id, Number.parseFloat(r.total_adjustments) || 0]));
+      result.forEach((emp) => {
+        emp.total_adjustments = Math.round((adjMap.get(emp.employee_id) || 0) * 100) / 100;
+      });
+    } catch (error) {
+      // Bảng salary_adjustments chưa tồn tại (chưa migrate) — coi như 0
+    }
+
+    result.sort((a, b) => String(a.employee_name || '').localeCompare(String(b.employee_name || ''), 'vi'));
+
+    res.json({
       data: result,
       month: parseInt(month),
       year: parseInt(year),

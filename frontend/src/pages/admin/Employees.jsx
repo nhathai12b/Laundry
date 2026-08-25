@@ -122,9 +122,12 @@ function Employees() {
   };
 
   const handleDelete = async (id) => {
-    if (!confirm('Bạn có chắc muốn xóa nhân viên này?')) return;
+    if (!confirm('Bạn có chắc muốn xóa nhân viên này? (Nhân viên đã có chấm công/thưởng phạt sẽ được chuyển sang Ngừng hoạt động để giữ lịch sử lương)')) return;
     try {
-      await api.delete(`/employees/${id}`);
+      const res = await api.delete(`/employees/${id}`);
+      if (res.data?.action === 'deactivated') {
+        alert(res.data.message);
+      }
       loadEmployees();
     } catch (error) {
       alert(error.response?.data?.error || 'Xóa thất bại');

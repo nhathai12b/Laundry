@@ -624,6 +624,16 @@ router.post('/select-employee', authenticate, async (req, res) => {
   try {
     const { employeeId } = req.body;
 
+    // Token đăng nhập cá nhân của nhân viên KHÔNG được đổi sang nhân viên
+    // khác — nếu cho phép, nhân viên tự đúc token mới không mang cờ
+    // employee_login: vừa mạo danh đồng nghiệp, vừa thoát mọi giới hạn
+    // quản trị (blockEmployeeLogin không còn tác dụng).
+    if (req.user.employee_login) {
+      return res.status(403).json({
+        error: 'Tài khoản nhân viên không thể chuyển sang nhân viên khác. Vui lòng đăng xuất và đăng nhập lại.',
+      });
+    }
+
     const user = await queryOne('SELECT * FROM users WHERE id = ?', [req.user.id]);
     if (!user || user.role !== 'employer' || user.status !== 'active') {
       return res.status(403).json({ error: 'Invalid user or not an active employer' });

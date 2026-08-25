@@ -1818,6 +1818,43 @@ router.get('/revenue-daily', authorize('admin', 'employer'), async (req, res) =>
       withdrawnMap[dateKey] = parseFloat(row.total_withdrawn) || 0;
     });
 
+    // Thêm tiền vào két (cash_in) và trừ tiền khỏi két (cash_out) mà nhân viên
+    // thao tác trong ca — trước đây báo cáo bỏ sót, chỉ có phần rút (withdrawn)
+    const cashDrawerDateExpr = localDateSql('cdt.occurred_at', timezoneOffset);
+    const cashInMap = {};
+    const cashOutMap = {};
+    try {
+      let cashDrawerSql = `
+        SELECT
+          ${cashDrawerDateExpr} as date,
+          COALESCE(SUM(CASE WHEN cdt.type = 'cash_in' THEN cdt.amount ELSE 0 END), 0) as total_cash_in,
+          COALESCE(SUM(CASE WHEN cdt.type = 'cash_out' THEN cdt.amount ELSE 0 END), 0) as total_cash_out
+        FROM cash_drawer_transactions cdt
+        WHERE cdt.occurred_at >= ?
+          AND cdt.occurred_at < ?
+      `;
+      const cashDrawerParams = [monthRange.startAt, monthRange.endAt];
+      if (storeId) {
+        cashDrawerSql += ' AND cdt.store_id = ?';
+        cashDrawerParams.push(storeId);
+      } else if (req.user.role === 'employer') {
+        cashDrawerSql += ' AND cdt.user_id = ?';
+        cashDrawerParams.push(req.user.id);
+      } else if (req.user.role === 'admin') {
+        cashDrawerSql += ' AND cdt.store_id IN (SELECT id FROM stores WHERE admin_id = ?)';
+        cashDrawerParams.push(req.user.id);
+      }
+      cashDrawerSql += ` GROUP BY ${cashDrawerDateExpr}`;
+      const cashDrawerData = await query(cashDrawerSql, cashDrawerParams);
+      cashDrawerData.forEach((row) => {
+        const dateKey = row.date instanceof Date ? row.date.toISOString().split('T')[0] : String(row.date).split(' ')[0];
+        cashInMap[dateKey] = parseFloat(row.total_cash_in) || 0;
+        cashOutMap[dateKey] = parseFloat(row.total_cash_out) || 0;
+      });
+    } catch (error) {
+      // Bảng cash_drawer_transactions chưa tồn tại (chưa migrate) — coi như 0
+    }
+
     let notesSql = `
       SELECT 
         ${timesheetDateExpr} as date,
@@ -1871,6 +1908,8 @@ router.get('/revenue-daily', authorize('admin', 'employer'), async (req, res) =>
         cash_revenue: revenueInfo.cash_revenue,
         transfer_revenue: revenueInfo.transfer_revenue,
         total_withdrawn: withdrawnMap[dateStr] ?? 0,
+        total_cash_in: cashInMap[dateStr] ?? 0,
+        total_cash_out: cashOutMap[dateStr] ?? 0,
         total_orders: revenueInfo.total_orders,
         day_notes: notesMap[dateStr] ?? null,
       });
@@ -1881,6 +1920,8 @@ router.get('/revenue-daily', authorize('admin', 'employer'), async (req, res) =>
     const totalCash = result.reduce((sum, day) => sum + day.cash_revenue, 0);
     const totalTransfer = result.reduce((sum, day) => sum + day.transfer_revenue, 0);
     const totalWithdrawn = result.reduce((sum, day) => sum + day.total_withdrawn, 0);
+    const totalCashIn = result.reduce((sum, day) => sum + day.total_cash_in, 0);
+    const totalCashOut = result.reduce((sum, day) => sum + day.total_cash_out, 0);
     const totalOrders = result.reduce((sum, day) => sum + day.total_orders, 0);
 
     res.json({
@@ -1890,6 +1931,8 @@ router.get('/revenue-daily', authorize('admin', 'employer'), async (req, res) =>
         total_cash: totalCash,
         total_transfer: totalTransfer,
         total_withdrawn: totalWithdrawn,
+        total_cash_in: totalCashIn,
+        total_cash_out: totalCashOut,
         total_orders: totalOrders,
         average_daily_revenue: totalRevenue / lastDay,
       },

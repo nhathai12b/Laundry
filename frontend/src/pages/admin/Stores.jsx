@@ -241,10 +241,10 @@ function Stores() {
   };
 
   const handleEmployeeDelete = async (id) => {
-    if (!confirm('Bạn có chắc muốn xóa nhân viên này?')) return;
+    if (!confirm('Bạn có chắc muốn xóa nhân viên này? (Nhân viên đã có chấm công/thưởng phạt sẽ được chuyển sang Ngừng hoạt động để giữ lịch sử lương)')) return;
     try {
-      await api.delete(`/employees/${id}`);
-      alert('Xóa nhân viên thành công!');
+      const res = await api.delete(`/employees/${id}`);
+      alert(res.data?.message || 'Xóa nhân viên thành công!');
       loadEmployees();
     } catch (error) {
       alert(error.response?.data?.error || 'Xóa thất bại');

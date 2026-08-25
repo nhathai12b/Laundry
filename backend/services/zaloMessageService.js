@@ -248,6 +248,19 @@ async function sendOrderEvent(orderId, eventType) {
   let message = '';
 
   try {
+    // Mỗi đơn chỉ gửi 1 tin cho mỗi loại sự kiện — nhân viên chuyển trạng
+    // thái qua lại (chờ nhận → giặt → chờ nhận) không được spam khách
+    try {
+      const alreadySent = await queryOne(`
+        SELECT id FROM order_notifications
+        WHERE order_id = ? AND event_type = ? AND status = 'sent'
+        LIMIT 1
+      `, [orderId, eventType]);
+      if (alreadySent) return;
+    } catch (dedupeError) {
+      // Bảng order_notifications chưa tồn tại — tiếp tục gửi bình thường
+    }
+
     order = await getOrderNotificationData(orderId);
     if (!order) return;
 

@@ -55,6 +55,8 @@ function Timesheets() {
   const [mySalary, setMySalary] = useState(null);
   const [adjustEmployee, setAdjustEmployee] = useState(null);
   const [adminEmployees, setAdminEmployees] = useState([]);
+  const [adjustmentsGrid, setAdjustmentsGrid] = useState([]);
+  const [adjustmentsGridDays, setAdjustmentsGridDays] = useState(31);
   const [payroll, setPayroll] = useState([]);
   const [payrollLoading, setPayrollLoading] = useState(false);
   const [payrollPeriod, setPayrollPeriod] = useState('month');
@@ -73,6 +75,7 @@ function Timesheets() {
     }
     if (isAdmin() && viewMode === 'payroll') {
       loadPayroll();
+      loadAdjustmentsGrid();
     }
   }, [selectedDate, selectedMonth, selectedYear, viewMode, periodViewMode, payrollPeriod, payrollMonth, payrollYear, payrollWeek, selectedStoreId]);
 
@@ -422,9 +425,31 @@ function Timesheets() {
   };
 
 
+  // Lưới thưởng/phạt theo ngày trong tháng (chỉ khi lọc theo tháng)
+  const loadAdjustmentsGrid = async () => {
+    if (!isAdmin() || payrollPeriod !== 'month') {
+      setAdjustmentsGrid([]);
+      return;
+    }
+    try {
+      const params = new URLSearchParams();
+      params.append('month', payrollMonth);
+      params.append('year', payrollYear);
+      if (selectedStoreId && selectedStoreId !== 'all') {
+        params.append('store_id', selectedStoreId);
+      }
+      const response = await api.get(`/salary/adjustments-grid?${params.toString()}`);
+      setAdjustmentsGrid(response.data.data || []);
+      setAdjustmentsGridDays(response.data.days_in_month || 31);
+    } catch (error) {
+      console.error('Error loading adjustments grid:', error);
+      setAdjustmentsGrid([]);
+    }
+  };
+
   const loadPayroll = async () => {
     if (!isAdmin()) return;
-    
+
     setPayrollLoading(true);
     try {
       const params = new URLSearchParams();
@@ -766,10 +791,12 @@ function Timesheets() {
         <div className="bg-white rounded-xl shadow-lg border border-gray-200 p-3 sm:p-4">
           <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 mb-3">
             <div className="flex items-center gap-2 flex-wrap">
+              {/* Theo ngày = danh sách chấm công của ngày; Theo tháng = bảng
+                  lưới 30 ngày × tất cả nhân viên. Bỏ filter "Theo năm". */}
               <button
-                onClick={() => setPeriodViewMode('day')}
+                onClick={() => { setPeriodViewMode('day'); setViewMode('list'); }}
                 className={`px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm font-medium transition-all duration-300 touch-manipulation ${
-                  periodViewMode === 'day'
+                  periodViewMode === 'day' && viewMode !== 'payroll'
                     ? 'bg-gradient-to-r from-blue-600 to-blue-700 text-white shadow-lg'
                     : 'bg-gray-100 text-gray-700 active:bg-gray-200 hover:bg-gray-200'
                 }`}
@@ -777,47 +804,17 @@ function Timesheets() {
                 Theo ngày
               </button>
               <button
-                onClick={() => setPeriodViewMode('month')}
+                onClick={() => { setPeriodViewMode('month'); setViewMode('daily'); }}
                 className={`px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm font-medium transition-all duration-300 touch-manipulation ${
-                  periodViewMode === 'month'
+                  periodViewMode === 'month' && viewMode !== 'payroll'
                     ? 'bg-gradient-to-r from-blue-600 to-blue-700 text-white shadow-lg'
                     : 'bg-gray-100 text-gray-700 active:bg-gray-200 hover:bg-gray-200'
                 }`}
               >
                 Theo tháng
               </button>
-              <button
-                onClick={() => setPeriodViewMode('year')}
-                className={`px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm font-medium transition-all duration-300 touch-manipulation ${
-                  periodViewMode === 'year'
-                    ? 'bg-gradient-to-r from-blue-600 to-blue-700 text-white shadow-lg'
-                    : 'bg-gray-100 text-gray-700 active:bg-gray-200 hover:bg-gray-200'
-                }`}
-              >
-                Theo năm
-              </button>
             </div>
             <div className="flex gap-2 flex-wrap">
-              <button
-                onClick={() => setViewMode('list')}
-                className={`px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm font-medium transition-all duration-300 touch-manipulation ${
-                  viewMode === 'list'
-                    ? 'bg-gradient-to-r from-indigo-600 to-indigo-700 text-white shadow-lg'
-                    : 'bg-gray-100 text-gray-700 active:bg-gray-200 hover:bg-gray-200'
-                }`}
-              >
-                Danh sách
-              </button>
-              <button
-                onClick={() => setViewMode('daily')}
-                className={`px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm font-medium transition-all duration-300 touch-manipulation ${
-                  viewMode === 'daily'
-                    ? 'bg-gradient-to-r from-indigo-600 to-indigo-700 text-white shadow-lg'
-                    : 'bg-gray-100 text-gray-700 active:bg-gray-200 hover:bg-gray-200'
-                }`}
-              >
-                Bảng giờ
-              </button>
               <button
                 onClick={() => setViewMode('payroll')}
                 className={`px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm font-medium transition-all duration-300 touch-manipulation ${
@@ -1029,7 +1026,7 @@ function Timesheets() {
           {dailyHoursLoading ? (
             <div className="p-8 text-center text-gray-500">Đang tải...</div>
           ) : dailyHours.length === 0 ? (
-            <div className="p-8 text-center text-gray-500">Chưa có dữ liệu</div>
+            <div className="p-8 text-center text-gray-500">Chưa có nhân viên nào trong cửa hàng. Thêm nhân viên ở mục Cửa hàng &amp; Nhân sự.</div>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-xs border-collapse">
@@ -1104,7 +1101,7 @@ function Timesheets() {
                 <tfoot className="bg-gray-50 font-semibold">
                   <tr>
                     <td className="px-1.5 py-1 text-[11px] text-gray-800 border border-gray-300 sticky left-0 bg-gray-50 z-10">
-                      Tổng
+                      Tổng giờ
                     </td>
                     {dailyHours.map((emp) => (
                       <td key={emp.user_id} className="px-1 py-1 text-[11px] text-center font-bold text-gray-800 border border-gray-300">
@@ -1115,6 +1112,29 @@ function Timesheets() {
                       {dailyHours
                         .reduce((sum, emp) => sum + (parseFloat(emp.total_month_hours) || 0), 0)
                         .toFixed(1)}
+                    </td>
+                  </tr>
+                  <tr>
+                    <td className="px-1.5 py-1 text-[11px] text-gray-800 border border-gray-300 sticky left-0 bg-gray-50 z-10 whitespace-nowrap">
+                      Thưởng/Phạt (đ)
+                    </td>
+                    {dailyHours.map((emp) => {
+                      const adj = parseFloat(emp.total_adjustments) || 0;
+                      return (
+                        <td
+                          key={emp.user_id}
+                          className={`px-1 py-1 text-[10px] text-center font-bold border border-gray-300 ${
+                            adj < 0 ? 'text-red-600' : adj > 0 ? 'text-green-600' : 'text-gray-400'
+                          }`}
+                        >
+                          {adj !== 0 ? `${adj > 0 ? '+' : ''}${new Intl.NumberFormat('vi-VN').format(adj)}` : '-'}
+                        </td>
+                      );
+                    })}
+                    <td className="px-1.5 py-1 text-[10px] text-center font-bold bg-gray-100 border border-gray-300">
+                      {new Intl.NumberFormat('vi-VN').format(
+                        dailyHours.reduce((sum, emp) => sum + (parseFloat(emp.total_adjustments) || 0), 0)
+                      )}
                     </td>
                   </tr>
                 </tfoot>
@@ -1320,6 +1340,85 @@ function Timesheets() {
               </>
             )}
           </div>
+
+          {/* Bảng lưới THƯỞNG/PHẠT theo ngày trong tháng (giống bảng chấm công) */}
+          {payrollPeriod === 'month' && (
+            <div className="border-t border-gray-200">
+              <div className="bg-gradient-to-r from-amber-500 to-orange-500 p-4">
+                <h2 className="text-lg font-bold text-white">
+                  🎁 Thưởng / Phạt theo ngày — Tháng {payrollMonth}/{payrollYear}
+                </h2>
+              </div>
+              {adjustmentsGrid.length === 0 ? (
+                <div className="p-8 text-center text-gray-500">Chưa có nhân viên nào trong cửa hàng.</div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs border-collapse">
+                    <thead className="bg-gray-50 sticky top-0">
+                      <tr>
+                        <th className="px-1.5 py-1 text-left text-[10px] font-medium text-gray-700 uppercase border border-gray-300 sticky left-0 bg-gray-50 z-10 min-w-[60px]">
+                          Ngày
+                        </th>
+                        {adjustmentsGrid.map((emp) => (
+                          <th key={emp.employee_id} className="px-1 py-1 text-center text-[10px] font-medium text-gray-700 uppercase border border-gray-300 min-w-[64px]">
+                            {emp.employee_name}
+                          </th>
+                        ))}
+                        <th className="px-1.5 py-1 text-center text-[10px] font-medium text-gray-700 uppercase bg-gray-100 font-bold border border-gray-300 min-w-[64px]">
+                          Tổng
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {Array.from({ length: adjustmentsGridDays }, (_, i) => i + 1).map((day) => {
+                        const dateKey = `${payrollYear}-${String(payrollMonth).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+                        const date = new Date(dateKey);
+                        const isWeekend = date.getDay() === 0 || date.getDay() === 6;
+                        const dayTotal = adjustmentsGrid.reduce((sum, emp) => sum + (emp.daily_amounts[dateKey] || 0), 0);
+                        return (
+                          <tr key={day} className="hover:bg-gray-50">
+                            <td className={`px-1.5 py-1 text-[11px] font-medium text-gray-800 border border-gray-300 sticky left-0 bg-white z-10 ${isWeekend ? 'bg-red-50' : ''}`}>
+                              <div>{day}/{payrollMonth}</div>
+                              <div className="text-[9px] text-gray-500">{date.toLocaleDateString('vi-VN', { weekday: 'short' })}</div>
+                            </td>
+                            {adjustmentsGrid.map((emp) => {
+                              const amt = emp.daily_amounts[dateKey] || 0;
+                              return (
+                                <td
+                                  key={emp.employee_id}
+                                  className={`px-1 py-1 text-[10px] text-center border border-gray-300 ${isWeekend ? 'bg-red-50' : ''} ${
+                                    amt < 0 ? 'text-red-600 font-medium' : amt > 0 ? 'text-green-600 font-medium' : 'text-gray-300'
+                                  }`}
+                                >
+                                  {amt !== 0 ? `${amt > 0 ? '+' : ''}${new Intl.NumberFormat('vi-VN').format(amt)}` : '-'}
+                                </td>
+                              );
+                            })}
+                            <td className={`px-1.5 py-1 text-[10px] text-center font-bold bg-gray-100 border border-gray-300 ${dayTotal < 0 ? 'text-red-600' : dayTotal > 0 ? 'text-green-600' : 'text-gray-400'}`}>
+                              {dayTotal !== 0 ? new Intl.NumberFormat('vi-VN').format(dayTotal) : '-'}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                    <tfoot className="bg-gray-50 font-semibold">
+                      <tr>
+                        <td className="px-1.5 py-1 text-[11px] text-gray-800 border border-gray-300 sticky left-0 bg-gray-50 z-10">Tổng</td>
+                        {adjustmentsGrid.map((emp) => (
+                          <td key={emp.employee_id} className={`px-1 py-1 text-[10px] text-center font-bold border border-gray-300 ${emp.total < 0 ? 'text-red-600' : emp.total > 0 ? 'text-green-600' : 'text-gray-400'}`}>
+                            {emp.total !== 0 ? new Intl.NumberFormat('vi-VN').format(emp.total) : '-'}
+                          </td>
+                        ))}
+                        <td className="px-1.5 py-1 text-[10px] text-center bg-gray-100 border border-gray-300">
+                          {new Intl.NumberFormat('vi-VN').format(adjustmentsGrid.reduce((sum, emp) => sum + (emp.total || 0), 0))}
+                        </td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 

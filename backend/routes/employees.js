@@ -1,5 +1,5 @@
 import express from 'express';
-import { query, queryOne, execute, transaction } from '../database/db.js';
+import { query, queryOne, execute } from '../database/db.js';
 import { authenticate, authorize, blockEmployeeLogin } from '../middleware/auth.js';
 import { validateRequiredString, sanitizeString } from '../utils/validators.js';
 import { hashPassword, validatePasswordStrength } from '../utils/helpers.js';
@@ -373,21 +373,50 @@ router.delete('/:id', blockEmployeeLogin, async (req, res) => {
       }
     }
 
-    // Use transaction to ensure atomicity
-    await transaction(async (db) => {
-      // Delete related records first to avoid foreign key constraints
+    // Không xóa nhân viên đang đứng ca — ca mở giữ két tiền, xóa sẽ kéo
+    // theo CASCADE toàn bộ cash_drawer_transactions của ca đó
+    const openShift = await queryOne(
+      'SELECT id FROM timesheets WHERE employee_id = ? AND check_out IS NULL LIMIT 1',
+      [req.params.id]
+    );
+    if (openShift) {
+      return res.status(400).json({
+        error: 'Nhân viên đang có ca mở. Vui lòng check-out ca trước khi xóa.',
+      });
+    }
+
+    // Có lịch sử (chấm công / thưởng phạt / đơn hàng) thì KHÔNG hard-delete:
+    // - xóa timesheets sẽ CASCADE mất cash_drawer_transactions (sổ quỹ két)
+    // - employees bị xóa sẽ CASCADE mất salary_adjustments (lịch sử thưởng/phạt)
+    // - payroll các tháng trước thay đổi ngược
+    // → theo quy ước của products/stores/promotions: chuyển inactive + khóa login
+    const hasHistory = async (sql, params) => {
       try {
-        await db.execute('DELETE FROM timesheets WHERE employee_id = ?', [req.params.id]);
+        return Boolean(await queryOne(sql, params));
       } catch (error) {
-        // Warning log removed for security
-        // Continue even if timesheets deletion fails (might not exist)
+        return false; // bảng/cột chưa tồn tại (chưa migrate) = không có dữ liệu
       }
+    };
+    const [hasTimesheets, hasAdjustments, hasOrders] = await Promise.all([
+      hasHistory('SELECT 1 FROM timesheets WHERE employee_id = ? LIMIT 1', [req.params.id]),
+      hasHistory('SELECT 1 FROM salary_adjustments WHERE employee_id = ? LIMIT 1', [req.params.id]),
+      hasHistory('SELECT 1 FROM orders WHERE employee_id = ? LIMIT 1', [req.params.id]),
+    ]);
 
-      // Delete employee
-      await db.execute('DELETE FROM employees WHERE id = ?', [req.params.id]);
-    });
+    if (hasTimesheets || hasAdjustments || hasOrders) {
+      await execute(
+        "UPDATE employees SET status = 'inactive', password_hash = NULL WHERE id = ?",
+        [req.params.id]
+      );
+      return res.json({
+        message: 'Nhân viên đã có dữ liệu chấm công/thưởng phạt/đơn hàng nên được chuyển sang Ngừng hoạt động (giữ nguyên lịch sử lương và sổ quỹ). Tài khoản đăng nhập riêng đã bị vô hiệu.',
+        action: 'deactivated',
+      });
+    }
 
-    res.json({ message: 'Employee deleted successfully' });
+    // Chưa có bất kỳ lịch sử nào → xóa hẳn được, an toàn
+    await execute('DELETE FROM employees WHERE id = ?', [req.params.id]);
+    res.json({ message: 'Employee deleted successfully', action: 'deleted' });
   } catch (error) {
     console.error('Delete employee error:', error);
     res.status(500).json({ error: 'Lỗi máy chủ. Vui lòng thử lại.' });

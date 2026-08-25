@@ -176,6 +176,79 @@ router.get('/summary/:employeeId', authorize('admin'), async (req, res) => {
   }
 });
 
+// Admin: lưới thưởng/phạt theo ngày trong tháng — hàng = ngày, cột = nhân viên
+// (giống bảng chấm công theo tháng). Seed tất cả nhân viên active của chuỗi.
+router.get('/adjustments-grid', authorize('admin'), async (req, res) => {
+  try {
+    const now = new Date();
+    const month = Number.parseInt(req.query.month, 10) || now.getMonth() + 1;
+    const year = Number.parseInt(req.query.year, 10) || now.getFullYear();
+    const monthStr = String(month).padStart(2, '0');
+    const lastDay = new Date(year, month, 0).getDate();
+    const storeIdParam = req.query.store_id;
+
+    // Danh sách nhân viên active trong chuỗi (cột của bảng)
+    let empSql = `
+      SELECT e.id, e.name
+      FROM employees e
+      JOIN users u ON e.store_id = u.id
+      JOIN stores s ON u.store_id = s.id
+      WHERE e.status = 'active' AND s.admin_id = ?
+    `;
+    const empParams = [req.user.id];
+    if (storeIdParam && storeIdParam !== 'all') {
+      empSql += ' AND s.id = ?';
+      empParams.push(storeIdParam);
+    }
+    empSql += ' ORDER BY e.name';
+    const employees = await query(empSql, empParams);
+
+    // Các khoản thưởng/phạt trong tháng (adjust_date là DATE)
+    const monthStart = `${year}-${monthStr}-01`;
+    const nextMonth = Number(month) === 12
+      ? `${Number(year) + 1}-01-01`
+      : `${year}-${String(Number(month) + 1).padStart(2, '0')}-01`;
+    let adjRows = [];
+    try {
+      adjRows = await query(`
+        SELECT a.employee_id, a.adjust_date, SUM(a.amount) AS amount
+        FROM salary_adjustments a
+        JOIN employees e ON a.employee_id = e.id
+        JOIN users u ON e.store_id = u.id
+        JOIN stores s ON u.store_id = s.id
+        WHERE s.admin_id = ? AND a.adjust_date >= ? AND a.adjust_date < ?
+        GROUP BY a.employee_id, a.adjust_date
+      `, [req.user.id, monthStart, nextMonth]);
+    } catch (error) {
+      // Bảng chưa migrate — coi như không có khoản nào
+    }
+
+    // Build map: employee_id -> { dateKey -> amount }
+    const byEmployee = new Map(employees.map((e) => [e.id, {}]));
+    for (const r of adjRows) {
+      const key = String(r.adjust_date).slice(0, 10);
+      const map = byEmployee.get(r.employee_id);
+      if (map) map[key] = Number.parseFloat(r.amount) || 0;
+    }
+
+    const data = employees.map((e) => {
+      const daily = byEmployee.get(e.id) || {};
+      const total = Object.values(daily).reduce((s, v) => s + v, 0);
+      return {
+        employee_id: e.id,
+        employee_name: e.name,
+        daily_amounts: daily,
+        total: Math.round(total * 100) / 100,
+      };
+    });
+
+    res.json({ data, month, year, days_in_month: lastDay });
+  } catch (error) {
+    console.error('Get adjustments grid error:', error);
+    res.status(500).json({ error: 'Lỗi máy chủ. Vui lòng thử lại.' });
+  }
+});
+
 // Admin cộng/trừ tiền cho nhân viên theo ngày (amount dương = cộng, âm = trừ)
 router.post('/adjustments', authorize('admin'), async (req, res) => {
   try {

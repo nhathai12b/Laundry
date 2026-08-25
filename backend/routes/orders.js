@@ -883,6 +883,8 @@ router.post('/:id/status', auditLog('update', 'order'), async (req, res) => {
     values.push(req.params.id);
 
     const isNewlyCompleted = status === 'completed' && order.status !== 'completed';
+    // Hủy đơn lần đầu (chưa từng hủy): hoàn tác thống kê khách đã cộng lúc tạo
+    const isNewlyCancelled = status === 'cancelled' && order.status !== 'cancelled';
 
     await transaction(async (db) => {
       await db.execute(`
@@ -906,6 +908,18 @@ router.post('/:id/status', auditLog('update', 'order'), async (req, res) => {
         } else {
           await syncOrderPaymentStateTx(db, req.params.id, req.user, { markDebtIfUnpaid: true });
         }
+      }
+
+      // Hoàn tác total_orders/total_spent (đã cộng khi tạo đơn) khi hủy đơn —
+      // nếu không, khách bị tính tiền & số đơn cho đơn không bao giờ giặt
+      if (isNewlyCancelled && order.customer_id) {
+        const orderAmount = Number.parseFloat(order.final_amount || order.total_amount || 0) || 0;
+        await db.execute(`
+          UPDATE customers
+          SET total_orders = GREATEST(total_orders - 1, 0),
+              total_spent = GREATEST(total_spent - ?, 0)
+          WHERE id = ?
+        `, [orderAmount, order.customer_id]);
       }
     });
 
@@ -954,13 +968,44 @@ router.delete('/:id', authorize('admin'), auditLog('delete', 'order'), async (re
       return res.status(403).json({ error: 'Root admin không thể xóa đơn hàng' });
     }
 
-    const order = await queryOne('SELECT id FROM orders WHERE id = ?', [req.params.id]);
-    
+    // Lấy đủ thông tin để (1) kiểm tra chủ quyền chuỗi, (2) hoàn tác thống kê khách
+    const order = await queryOne(`
+      SELECT o.id, o.customer_id, o.final_amount, o.total_amount,
+        s.admin_id AS store_admin_id,
+        cs.admin_id AS creator_admin_id
+      FROM orders o
+      LEFT JOIN stores s ON o.store_id = s.id
+      LEFT JOIN users cu ON o.created_by = cu.id
+      LEFT JOIN stores cs ON cu.store_id = cs.id
+      WHERE o.id = ?
+    `, [req.params.id]);
+
     if (!order) {
       return res.status(404).json({ error: 'Order not found' });
     }
 
-    await execute('DELETE FROM orders WHERE id = ?', [req.params.id]);
+    // Chặn xóa chéo tenant: đơn phải thuộc chuỗi cửa hàng của admin này
+    // (theo store của đơn, fallback theo store của người tạo đơn)
+    const ownerAdminId = order.store_admin_id || order.creator_admin_id;
+    if (ownerAdminId !== req.user.id) {
+      return res.status(403).json({ error: 'Bạn chỉ có thể xóa đơn hàng trong chuỗi cửa hàng của mình' });
+    }
+
+    await transaction(async (db) => {
+      // Hoàn tác thống kê khách hàng (tạo đơn đã +1 và +tiền) — nếu không,
+      // xóa đơn để lại total_orders/total_spent bị thổi phồng vĩnh viễn
+      if (order.customer_id) {
+        const orderAmount = Number.parseFloat(order.final_amount || order.total_amount || 0) || 0;
+        await db.execute(`
+          UPDATE customers
+          SET total_orders = GREATEST(total_orders - 1, 0),
+              total_spent = GREATEST(total_spent - ?, 0)
+          WHERE id = ?
+        `, [orderAmount, order.customer_id]);
+      }
+      await db.execute('DELETE FROM orders WHERE id = ?', [req.params.id]);
+    });
+
     res.json({ message: 'Order deleted successfully' });
   } catch (error) {
     console.error('Delete order error:', error);

@@ -500,6 +500,36 @@ router.delete('/:id', authorize('admin'), auditLog('delete', 'user'), async (req
       });
     }
 
+    // Chặn khi có chấm công: DELETE timesheets sẽ CASCADE xóa toàn bộ
+    // cash_drawer_transactions (sổ quỹ két) gắn với các ca đó
+    const timesheetRef = await queryOne(
+      'SELECT 1 FROM timesheets WHERE user_id = ? LIMIT 1',
+      [user.id]
+    );
+    if (timesheetRef) {
+      return res.status(400).json({
+        error: 'Không thể xóa tài khoản đã có dữ liệu chấm công (sổ quỹ két gắn với các ca làm việc). Hãy vô hiệu hóa tài khoản thay vì xóa.'
+      });
+    }
+
+    // Chặn khi nhân viên của tài khoản có lịch sử thưởng/phạt: xóa tài khoản
+    // sẽ CASCADE employees → CASCADE salary_adjustments (mất lịch sử lương)
+    try {
+      const adjustmentRef = await queryOne(`
+        SELECT 1 FROM salary_adjustments a
+        JOIN employees e ON a.employee_id = e.id
+        WHERE e.store_id = ?
+        LIMIT 1
+      `, [user.id]);
+      if (adjustmentRef) {
+        return res.status(400).json({
+          error: 'Không thể xóa tài khoản: nhân viên của tài khoản này có lịch sử thưởng/phạt. Hãy vô hiệu hóa tài khoản thay vì xóa.'
+        });
+      }
+    } catch (error) {
+      // Bảng salary_adjustments chưa tồn tại (chưa migrate) — không có dữ liệu để mất
+    }
+
     // Cascade related rows atomically so a mid-way failure rolls back
     await transaction(async (db) => {
       await db.execute('DELETE FROM employees WHERE store_id = ?', [user.id]);
