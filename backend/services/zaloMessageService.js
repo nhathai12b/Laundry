@@ -225,7 +225,7 @@ function buildMessage(order, eventType) {
 }
 
 async function logOrderNotification({ order, eventType, message, status, error = null }) {
-  await execute(`
+  return execute(`
     INSERT INTO order_notifications (
       order_id, store_id, channel, provider, event_type,
       recipient_phone, message, status, error, sent_at
@@ -246,21 +246,9 @@ async function logOrderNotification({ order, eventType, message, status, error =
 async function sendOrderEvent(orderId, eventType) {
   let order = null;
   let message = '';
+  let claimedId = null;
 
   try {
-    // Mỗi đơn chỉ gửi 1 tin cho mỗi loại sự kiện — nhân viên chuyển trạng
-    // thái qua lại (chờ nhận → giặt → chờ nhận) không được spam khách
-    try {
-      const alreadySent = await queryOne(`
-        SELECT id FROM order_notifications
-        WHERE order_id = ? AND event_type = ? AND status = 'sent'
-        LIMIT 1
-      `, [orderId, eventType]);
-      if (alreadySent) return;
-    } catch (dedupeError) {
-      // Bảng order_notifications chưa tồn tại — tiếp tục gửi bình thường
-    }
-
     order = await getOrderNotificationData(orderId);
     if (!order) return;
 
@@ -270,22 +258,41 @@ async function sendOrderEvent(orderId, eventType) {
       throw new Error('Order does not have a store_id');
     }
 
+    // CLAIM-FIRST: ghi row 'sent' TRƯỚC khi gửi. Unique index
+    // uq_order_notifications_sent (order_id, event_type, sent_flag) chặn 2
+    // request đồng thời cùng gửi 1 sự kiện — kiểu cũ SELECT-rồi-gửi có khe hở
+    // race (double-tap "chờ nhận" → khách nhận tin trùng). Gửi lỗi thì row
+    // được hạ xuống 'failed' (sent_flag về NULL) để lần chuyển trạng thái sau thử lại.
+    try {
+      const result = await logOrderNotification({ order, eventType, message, status: 'sent' });
+      claimedId = result?.insertId || null;
+    } catch (claimError) {
+      if (claimError?.code === 'ER_DUP_ENTRY') return; // sự kiện này đã gửi rồi
+      if (claimError?.code !== 'ER_NO_SUCH_TABLE') throw claimError;
+      // Bảng chưa migrate — gửi không có dedupe (hành vi legacy)
+    }
+
     await sendZaloMessageByPhone({
       storeId: order.store_id,
       phone: order.customer_phone,
       message,
     });
-
-    await logOrderNotification({ order, eventType, message, status: 'sent' });
   } catch (error) {
     console.error(`Send Zalo notification failed (${eventType}):`, error.message);
 
-    if (order) {
-      try {
+    try {
+      if (claimedId) {
+        // Hạ claim xuống 'failed' để có thể gửi lại lần sau
+        await execute(`
+          UPDATE order_notifications
+          SET status = 'failed', error = ?, sent_at = NULL
+          WHERE id = ?
+        `, [String(error.message || error).slice(0, 2000), claimedId]);
+      } else if (order) {
         await logOrderNotification({ order, eventType, message, status: 'failed', error });
-      } catch (logError) {
-        console.error('Failed to log Zalo notification error:', logError.message);
       }
+    } catch (logError) {
+      console.error('Failed to log Zalo notification error:', logError.message);
     }
   }
 }

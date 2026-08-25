@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+﻿import { useEffect, useState } from 'react';
+import PageSkeleton from '../components/PageSkeleton';
 import api from '../utils/api';
 import { isAdmin } from '../utils/auth';
 import { format, getDaysInMonth } from 'date-fns';
@@ -47,7 +48,7 @@ function Customers() {
 
   const loadCustomers = async () => {
     try {
-      setLoading(true);
+      // Không bật spinner khi refresh — giữ dữ liệu cũ trên màn hình (lần đầu đã có useState(true))
       const params = new URLSearchParams();
       if (search) {
         params.append('search', search);
@@ -102,14 +103,7 @@ function Customers() {
   };
 
   if (loading) {
-    return (
-      <div className="flex items-center justify-center min-h-[400px]">
-        <div className="text-center">
-          <div className="inline-block animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mb-4"></div>
-          <div className="text-gray-600">Đang tải...</div>
-        </div>
-      </div>
-    );
+    return <PageSkeleton />;
   }
 
   return (

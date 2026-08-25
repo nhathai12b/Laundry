@@ -563,7 +563,12 @@ router.post('/select-store', authenticate, async (req, res) => {
         return res.status(403).json({ error: 'Cửa hàng không tồn tại hoặc không thuộc quyền quản lý của bạn' });
       }
     } catch (error) {
-      // If stores table doesn't exist, allow using storeId as user.id (backward compatibility)
+      // Fallback CHỈ khi bảng stores chưa tồn tại (DB legacy). Các lỗi khác phải
+      // ném tiếp — nếu fallback chạy cho lỗi transient thì admin có thể nhận token
+      // scoped vào employer của chuỗi khác (nhánh này không check được ownership)
+      if (error?.code !== 'ER_NO_SUCH_TABLE') {
+        throw error;
+      }
       const userStore = await queryOne('SELECT * FROM users WHERE id = ? AND role = ?', [storeId, 'employer']);
       if (!userStore) {
         return res.status(404).json({ error: 'Store not found' });

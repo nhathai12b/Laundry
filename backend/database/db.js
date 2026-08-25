@@ -140,6 +140,17 @@ async function initializeDatabase() {
         { table: 'products', column: 'commission_percent', ddl: 'DECIMAL(5, 2) NULL' },
         { table: 'orders', column: 'employee_id', ddl: 'INT NULL' },
         { table: 'store_zalo_accounts', column: 'qr_image', ddl: 'LONGTEXT NULL' },
+        { table: 'timesheets', column: 'check_in_ip', ddl: 'VARCHAR(45) NULL' },
+        { table: 'timesheets', column: 'auto_closed', ddl: 'TINYINT(1) NOT NULL DEFAULT 0' },
+        { table: 'stores', column: 'latitude', ddl: 'DECIMAL(10, 7) NULL' },
+        { table: 'stores', column: 'longitude', ddl: 'DECIMAL(10, 7) NULL' },
+        // Cột generated cho unique index chống double check-in: ca mở = 1,
+        // ca đã đóng = NULL (NULL không tính vào unique) — hai request check-in
+        // đồng thời cùng (store, employee) thì request sau fail ER_DUP_ENTRY
+        { table: 'timesheets', column: 'open_slot_flag', ddl: 'TINYINT AS (IF(check_out IS NULL, 1, NULL)) STORED' },
+        // Cột generated cho unique index chống gửi Zalo trùng: row 'sent' = 1,
+        // row 'failed' = NULL (không ràng buộc, cho phép thử lại)
+        { table: 'order_notifications', column: 'sent_flag', ddl: "TINYINT AS (IF(status = 'sent', 1, NULL)) STORED" },
       ];
       for (const col of ensureColumns) {
         try {
@@ -166,10 +177,23 @@ async function initializeDatabase() {
         { name: 'idx_orders_employee_id', table: 'orders', columns: 'employee_id' },
         { name: 'idx_timesheets_user_id', table: 'timesheets', columns: 'user_id' },
         { name: 'idx_timesheets_check_in', table: 'timesheets', columns: 'check_in' },
+        // Composite cho các query "ca đang mở" (user_id = ? AND check_out IS NULL)
+        // chạy trên mọi lượt /open-shifts, check-in, check-out
+        { name: 'idx_timesheets_user_checkout', table: 'timesheets', columns: 'user_id, check_out' },
         { name: 'idx_audit_logs_user_id', table: 'audit_logs', columns: 'user_id' },
         { name: 'idx_audit_logs_entity', table: 'audit_logs', columns: 'entity, entity_id' },
         { name: 'idx_employees_phone', table: 'employees', columns: 'phone' },
-        { name: 'idx_salary_adjustments_employee', table: 'salary_adjustments', columns: 'employee_id, adjust_date' }
+        { name: 'idx_salary_adjustments_employee', table: 'salary_adjustments', columns: 'employee_id, adjust_date' },
+        // Đường nóng báo cáo & hoa hồng: lọc theo cửa hàng + khoảng thời gian
+        { name: 'idx_orders_store_created', table: 'orders', columns: 'store_id, created_at' },
+        { name: 'idx_order_payments_paid_at', table: 'order_payments', columns: 'paid_at' },
+        { name: 'idx_cash_drawer_store_occurred', table: 'cash_drawer_transactions', columns: 'store_id, occurred_at' },
+        // UNIQUE: chặn 2 ca mở cùng lúc cho cùng 1 nhân viên tại 1 tiệm (race
+        // double check-in từ 2 thiết bị). employee_id NULL không bị ràng buộc.
+        { name: 'uq_timesheets_open_slot', table: 'timesheets', columns: 'store_id, employee_id, open_slot_flag', unique: true },
+        // UNIQUE: mỗi đơn chỉ có 1 row 'sent' cho mỗi loại sự kiện Zalo —
+        // 2 request đồng thời thì request sau fail ER_DUP_ENTRY, khách không nhận tin trùng
+        { name: 'uq_order_notifications_sent', table: 'order_notifications', columns: 'order_id, event_type, sent_flag', unique: true }
       ];
       
       for (const idx of indexStatements) {
@@ -182,7 +206,7 @@ async function initializeDatabase() {
           `, [dbName, idx.table, idx.name]);
           
           if (existing[0].count === 0) {
-            await connection.query(`CREATE INDEX ${idx.name} ON ${idx.table}(${idx.columns})`);
+            await connection.query(`CREATE ${idx.unique ? 'UNIQUE ' : ''}INDEX ${idx.name} ON ${idx.table}(${idx.columns})`);
           }
         } catch (error) {
           // Ignore if table doesn't exist yet or index creation fails

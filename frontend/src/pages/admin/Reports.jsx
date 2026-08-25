@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+﻿import { useEffect, useState } from 'react';
+import { showToast } from '../../utils/toast';
 import api from '../../utils/api';
 import { isAdmin, isRoot } from '../../utils/auth';
 import { getSavedFilters, saveFilters } from '../../utils/filterStorage';
@@ -141,7 +142,7 @@ function Reports() {
     } catch (error) {
       console.error('Error loading report data:', error);
       const errorMessage = error.response?.data?.error || error.message || 'Không thể tải dữ liệu báo cáo';
-      alert(`Lỗi: ${errorMessage}`);
+      showToast(`Lỗi: ${errorMessage}`);
       setData([]);
       setPagination({
         page: 1,
@@ -216,10 +217,10 @@ function Reports() {
       link.remove();
       window.URL.revokeObjectURL(url);
       
-      alert('Xuất Excel thành công!');
+      showToast('Xuất Excel thành công!');
     } catch (error) {
       console.error('Error exporting Excel:', error);
-      alert(error.response?.data?.error || 'Có lỗi xảy ra khi xuất Excel');
+      showToast(error.response?.data?.error || 'Có lỗi xảy ra khi xuất Excel');
     }
   };
 

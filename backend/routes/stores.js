@@ -211,27 +211,49 @@ router.post('/', authorize('admin'), async (req, res) => {
       if (!account_phone || !account_password) {
         return res.status(400).json({ error: 'Vui lòng nhập đầy đủ thông tin tài khoản (SĐT đăng nhập, Mật khẩu) hoặc chọn tài khoản chung' });
       }
+      // Validate mật khẩu TRƯỚC khi insert store — validate sau insert rồi
+      // return 400 sớm sẽ để lại store mồ côi (không có tài khoản), mỗi lần
+      // retry lại tạo thêm một bản
+      const passwordCheck = validatePasswordStrength(account_password);
+      if (!passwordCheck.valid) {
+        return res.status(400).json({ error: passwordCheck.errors.join(' ') });
+      }
     } else {
-      // Verify shared account exists and is an employer
-      const sharedAccount = await queryOne('SELECT id, role FROM users WHERE id = ?', [shared_account_id]);
+      // Verify shared account exists, is an employer, VÀ thuộc chuỗi của admin này —
+      // thiếu check admin_id thì admin A tham chiếu được employer của admin B
+      // (lộ tên/SĐT qua GET /stores và đếm nhầm nhân viên ở setup-status)
+      const sharedAccount = await queryOne(`
+        SELECT u.id, u.role, s.admin_id
+        FROM users u
+        LEFT JOIN stores s ON u.store_id = s.id
+        WHERE u.id = ?
+      `, [shared_account_id]);
       if (!sharedAccount) {
         return res.status(400).json({ error: 'Tài khoản chung không tồn tại' });
       }
       if (sharedAccount.role !== 'employer') {
         return res.status(400).json({ error: 'Tài khoản chung phải là tài khoản employer' });
       }
+      if (sharedAccount.admin_id !== req.user.id) {
+        return res.status(400).json({ error: 'Tài khoản chung không thuộc quyền quản lý của bạn' });
+      }
     }
 
     // Admin can only create stores for their chain
     let adminId = req.user.id;
 
-    // Check if phone exists
-    const trimmedPhone = account_phone.trim();
-    const existing = await queryOne('SELECT id FROM users WHERE phone = ?', [trimmedPhone]);
-    if (existing) {
-      return res.status(400).json({ 
-        error: `Số điện thoại "${trimmedPhone}" đã được sử dụng` 
-      });
+    // Check if phone exists — chỉ khi tạo tài khoản mới (nhánh shared_account_id
+    // không gửi account_phone, gọi .trim() trên undefined sẽ crash 500)
+    // trimmedPhone khai báo ở scope ngoài — còn được dùng ở bước tạo tài
+    // khoản bên dưới (nhánh shared_account_id thì không có/không cần)
+    const trimmedPhone = shared_account_id ? null : String(account_phone).trim();
+    if (!shared_account_id) {
+      const existing = await queryOne('SELECT id FROM users WHERE phone = ?', [trimmedPhone]);
+      if (existing) {
+        return res.status(400).json({
+          error: `Số điện thoại "${trimmedPhone}" đã được sử dụng`
+        });
+      }
     }
 
     // Create store first
@@ -284,8 +306,7 @@ router.post('/', authorize('admin'), async (req, res) => {
     // Create user account for the store only if not using shared account
     if (!shared_account_id) {
       try {
-        // Password validation removed - no requirements
-
+        // (Mật khẩu đã được validate TRƯỚC khi insert store — xem đầu route)
         const password_hash = await hashPassword(account_password);
         const employerDisplayName =
           (account_name && String(account_name).trim()) || name.trim() || 'Chủ cửa hàng';
@@ -361,7 +382,7 @@ router.patch('/:id', authorize('admin'), async (req, res) => {
       return res.status(403).json({ error: 'Root admin không thể sửa cửa hàng' });
     }
 
-    const { name, address, phone, status, shared_account_id } = req.body;
+    const { name, address, phone, status, shared_account_id, latitude, longitude } = req.body;
 
     const store = await queryOne('SELECT * FROM stores WHERE id = ?', [req.params.id]);
     if (!store) {
@@ -396,18 +417,44 @@ router.patch('/:id', authorize('admin'), async (req, res) => {
       values.push(status);
     }
     if (shared_account_id !== undefined) {
-      // Verify shared account exists if provided
+      // Verify shared account exists, is an employer, VÀ thuộc chuỗi của admin này
+      // (cùng lý do với check ở POST — chặn tham chiếu chéo tenant)
       if (shared_account_id) {
-        const sharedAccount = await queryOne('SELECT id, role FROM users WHERE id = ?', [shared_account_id]);
+        const sharedAccount = await queryOne(`
+          SELECT u.id, u.role, s.admin_id
+          FROM users u
+          LEFT JOIN stores s ON u.store_id = s.id
+          WHERE u.id = ?
+        `, [shared_account_id]);
         if (!sharedAccount) {
           return res.status(400).json({ error: 'Tài khoản chung không tồn tại' });
         }
         if (sharedAccount.role !== 'employer') {
           return res.status(400).json({ error: 'Tài khoản chung phải là tài khoản employer' });
         }
+        if (sharedAccount.admin_id !== req.user.id) {
+          return res.status(400).json({ error: 'Tài khoản chung không thuộc quyền quản lý của bạn' });
+        }
       }
       updates.push('shared_account_id = ?');
       values.push(shared_account_id || null);
+    }
+
+    // Tọa độ tiệm cho kiểm soát check-in/check-out bằng GPS
+    // (gửi null/'' để xóa — tắt kiểm soát vị trí cho cửa hàng này)
+    if (latitude !== undefined && longitude !== undefined) {
+      if (latitude === null || latitude === '' || longitude === null || longitude === '') {
+        updates.push('latitude = ?', 'longitude = ?');
+        values.push(null, null);
+      } else {
+        const lat = Number.parseFloat(latitude);
+        const lng = Number.parseFloat(longitude);
+        if (!Number.isFinite(lat) || lat < -90 || lat > 90 || !Number.isFinite(lng) || lng < -180 || lng > 180) {
+          return res.status(400).json({ error: 'Tọa độ không hợp lệ' });
+        }
+        updates.push('latitude = ?', 'longitude = ?');
+        values.push(lat, lng);
+      }
     }
 
     if (updates.length === 0) {

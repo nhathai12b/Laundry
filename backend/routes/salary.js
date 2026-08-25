@@ -8,6 +8,13 @@ const router = express.Router();
 
 router.use(authenticate);
 
+// Chỉ nuốt lỗi thiếu bảng/cột (DB chưa migrate) — lỗi thật (deadlock, timeout)
+// phải ném ra, nếu không lương/hoa hồng trả về 0 im lặng
+const swallowMissingSchema = (fallback) => (error) => {
+  if (error?.code === 'ER_NO_SUCH_TABLE' || error?.code === 'ER_BAD_FIELD_ERROR') return fallback;
+  throw error;
+};
+
 const getTimezoneOffsetMinutes = (req) => {
   const offset = Number.parseInt(req.query.timezone_offset_minutes ?? '0', 10);
   if (Number.isNaN(offset) || offset < -840 || offset > 840) return 0;
@@ -68,7 +75,7 @@ const buildSalarySummary = async (req, employee, month, year) => {
   const [totalsRow, adjustments, commissionRow] = await Promise.all([
     queryOne(`
       SELECT
-        COUNT(*) AS total_shifts,
+        SUM(CASE WHEN auto_closed = 0 THEN 1 ELSE 0 END) AS total_shifts,
         COALESCE(SUM(regular_hours), 0) AS total_regular_hours,
         COALESCE(SUM(overtime_hours), 0) AS total_overtime_hours
       FROM timesheets
@@ -81,7 +88,7 @@ const buildSalarySummary = async (req, employee, month, year) => {
       LEFT JOIN users u ON a.created_by = u.id
       WHERE a.employee_id = ? AND a.adjust_date >= ? AND a.adjust_date < ?
       ORDER BY a.adjust_date DESC, a.id DESC
-    `, [employee.id, monthStart, nextMonth]).catch(() => []),
+    `, [employee.id, monthStart, nextMonth]).catch(swallowMissingSchema([])),
     // Hoa hồng sản phẩm: % (admin đặt trên từng sản phẩm) × giá trị dòng hàng,
     // tính trên các đơn ĐÃ HOÀN THÀNH mà nhân viên này tạo/xử lý trong tháng.
     // .catch: cột commission_percent/employee_id chưa migrate — coi như 0
@@ -94,7 +101,7 @@ const buildSalarySummary = async (req, employee, month, year) => {
         AND o.status = 'completed'
         AND o.created_at >= ? AND o.created_at < ?
         AND p.commission_percent > 0
-    `, [employee.id, range.startAt, range.endAt]).catch(() => null),
+    `, [employee.id, range.startAt, range.endAt]).catch(swallowMissingSchema(null)),
   ]);
 
   const totals = {
@@ -220,13 +227,18 @@ router.get('/adjustments-grid', authorize('admin'), async (req, res) => {
         GROUP BY a.employee_id, a.adjust_date
       `, [req.user.id, monthStart, nextMonth]);
     } catch (error) {
-      // Bảng chưa migrate — coi như không có khoản nào
+      // Bảng chưa migrate — coi như không có khoản nào; lỗi thật thì ném ra
+      if (error?.code !== 'ER_NO_SUCH_TABLE' && error?.code !== 'ER_BAD_FIELD_ERROR') throw error;
     }
 
     // Build map: employee_id -> { dateKey -> amount }
     const byEmployee = new Map(employees.map((e) => [e.id, {}]));
     for (const r of adjRows) {
-      const key = String(r.adjust_date).slice(0, 10);
+      // mysql2 trả DATE về Date object — String() sẽ ra "Tue Aug 25 2026 ..."
+      // thay vì "2026-08-25" khiến ô ngày trong lưới không khớp key
+      const key = r.adjust_date instanceof Date
+        ? r.adjust_date.toISOString().slice(0, 10)
+        : String(r.adjust_date).slice(0, 10);
       const map = byEmployee.get(r.employee_id);
       if (map) map[key] = Number.parseFloat(r.amount) || 0;
     }

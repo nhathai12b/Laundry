@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+﻿import { useEffect, useState } from 'react';
+import { showToast } from '../../utils/toast';
 import api from '../../utils/api';
 import { isRoot, getAuth } from '../../utils/auth';
 import PasswordRequirements from '../../components/PasswordRequirements';
@@ -59,7 +60,7 @@ function AdminManagement() {
       setPendingAdmins(pending);
     } catch (error) {
       console.error('Error loading pending admins:', error);
-      alert('Không thể tải danh sách admin chờ phê duyệt');
+      showToast('Không thể tải danh sách admin chờ phê duyệt');
     } finally {
       setLoading(false);
     }
@@ -74,7 +75,7 @@ function AdminManagement() {
       setAllAdmins(admins);
     } catch (error) {
       console.error('Error loading admins:', error);
-      alert('Không thể tải danh sách admin');
+      showToast('Không thể tải danh sách admin');
     } finally {
       setLoading(false);
     }
@@ -96,14 +97,14 @@ function AdminManagement() {
       
       // Show detailed success message
       const message = response.data.message || 'Phê duyệt admin thành công!';
-      alert(message);
+      showToast(message);
       
       setShowPackageModal(false);
       setSelectedAdminId(null);
       loadPendingAdmins();
       loadAllAdmins();
     } catch (error) {
-      alert(error.response?.data?.error || 'Phê duyệt thất bại');
+      showToast(error.response?.data?.error || 'Phê duyệt thất bại');
     }
   };
 
@@ -111,11 +112,11 @@ function AdminManagement() {
     if (!confirm('Bạn có chắc muốn từ chối admin này?')) return;
     try {
       await api.post(`/users/${id}/reject`);
-      alert('Đã từ chối admin');
+      showToast('Đã từ chối admin');
       loadPendingAdmins();
       loadAllAdmins();
     } catch (error) {
-      alert(error.response?.data?.error || 'Từ chối thất bại');
+      showToast(error.response?.data?.error || 'Từ chối thất bại');
     }
   };
 
@@ -123,18 +124,18 @@ function AdminManagement() {
     if (!confirm(`Chuyển admin "${name}" về trạng thái chờ phê duyệt? Tài khoản sẽ không đăng nhập được cho đến khi được phê duyệt lại.`)) return;
     try {
       await api.post(`/users/${id}/revert-to-pending`);
-      alert('Đã chuyển admin về chờ phê duyệt');
+      showToast('Đã chuyển admin về chờ phê duyệt');
       loadPendingAdmins();
       loadAllAdmins();
     } catch (error) {
-      alert(error.response?.data?.error || 'Chuyển trạng thái thất bại');
+      showToast(error.response?.data?.error || 'Chuyển trạng thái thất bại');
     }
   };
 
   const handleCreateAdmin = async (e) => {
     e.preventDefault();
     if (!formData.name || !formData.password) {
-      alert('Vui lòng điền đầy đủ thông tin bắt buộc (Tên, Mật khẩu)');
+      showToast('Vui lòng điền đầy đủ thông tin bắt buộc (Tên, Mật khẩu)');
       return;
     }
 
@@ -151,7 +152,7 @@ function AdminManagement() {
       };
       
       await api.post('/users', submitData);
-      alert(formData.trial_7days
+      showToast(formData.trial_7days
         ? 'Tạo admin thành công! Admin được kích hoạt dùng thử 7 ngày.'
         : 'Tạo admin thành công! Admin sẽ ở trạng thái chờ phê duyệt.');
       setShowModal(false);
@@ -160,7 +161,7 @@ function AdminManagement() {
       loadAllAdmins();
     } catch (error) {
       const errorMessage = error.response?.data?.error || error.message || 'Tạo admin thất bại';
-      alert(errorMessage);
+      showToast(errorMessage);
       console.error('Create admin error:', error);
     }
   };
@@ -200,13 +201,13 @@ function AdminManagement() {
       const response = await api.post(`/users/${extendAdmin.id}/extend-subscription`, {
         package: extendPackage,
       });
-      alert(response.data.message || 'Đã gia hạn thành công!');
+      showToast(response.data.message || 'Đã gia hạn thành công!');
       setShowExtendModal(false);
       setExtendAdmin(null);
       loadAllAdmins();
     } catch (error) {
       const msg = error.response?.data?.error || error.message || 'Gia hạn thất bại';
-      alert(msg);
+      showToast(msg);
     }
   };
 
@@ -241,14 +242,14 @@ function AdminManagement() {
       }
 
       await api.patch(`/users/${selectedAdmin.id}`, updateData);
-      alert('Cập nhật admin thành công!');
+      showToast('Cập nhật admin thành công!');
       setShowEditModal(false);
       setSelectedAdmin(null);
       loadAllAdmins();
       loadPendingAdmins();
     } catch (error) {
       const errorMessage = error.response?.data?.error || error.message || 'Cập nhật thất bại';
-      alert(errorMessage);
+      showToast(errorMessage);
       console.error('Update admin error:', error);
     }
   };
@@ -257,7 +258,7 @@ function AdminManagement() {
     // Check if trying to delete yourself
     const { user: currentUser } = getAuth();
     if (currentUser && currentUser.id === id) {
-      alert('Bạn không thể xóa chính mình!');
+      showToast('Bạn không thể xóa chính mình!');
       return;
     }
     
@@ -265,11 +266,11 @@ function AdminManagement() {
     
     try {
       await api.delete(`/users/${id}`);
-      alert('Xóa admin thành công!');
+      showToast('Xóa admin thành công!');
       loadAllAdmins();
       loadPendingAdmins();
     } catch (error) {
-      alert(error.response?.data?.error || 'Xóa thất bại');
+      showToast(error.response?.data?.error || 'Xóa thất bại');
     }
   };
 

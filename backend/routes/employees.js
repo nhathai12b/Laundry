@@ -394,7 +394,13 @@ router.delete('/:id', blockEmployeeLogin, async (req, res) => {
       try {
         return Boolean(await queryOne(sql, params));
       } catch (error) {
-        return false; // bảng/cột chưa tồn tại (chưa migrate) = không có dữ liệu
+        // CHỈ nuốt lỗi thiếu bảng/cột (chưa migrate = chắc chắn không có dữ liệu).
+        // Lỗi khác (mất kết nối, timeout) phải ném ra — nuốt hết sẽ hard-delete
+        // nhầm nhân viên CÓ dữ liệu và CASCADE xóa sổ quỹ + lịch sử thưởng phạt
+        if (error.code === 'ER_NO_SUCH_TABLE' || error.code === 'ER_BAD_FIELD_ERROR') {
+          return false;
+        }
+        throw error;
       }
     };
     const [hasTimesheets, hasAdjustments, hasOrders] = await Promise.all([

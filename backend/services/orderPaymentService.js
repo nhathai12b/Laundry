@@ -23,25 +23,30 @@ function paymentStatusFor(finalAmount, paidAmount, markDebtIfUnpaid = false) {
 async function findOpenTimesheet(db, actor, storeId) {
   if (!actor?.id) return null;
 
-  const params = [actor.id];
-  let sql = `
-    SELECT id, employee_id, store_id
-    FROM timesheets
-    WHERE user_id = ?
-      AND check_out IS NULL
-  `;
-
+  // Ca CŨ NHẤT đang mở = "ca chính" giữ két tiền. Khi biết storeId, xác định
+  // THEO TIỆM (không lọc user_id) để khớp với hasOlderOpenShiftTx / logic chia
+  // doanh thu ca (đều scope theo tiệm): tiệm có 2 tài khoản (riêng + chung)
+  // cùng mở ca thì tiền mặt vẫn phải vào ca cũ nhất CỦA TIỆM, không phải ca cũ
+  // nhất của riêng người thao tác. Tie-break id ASC giống hasOlderOpenShiftTx.
+  // store_id IS NULL: ca legacy không gắn tiệm — chỉ nhận khi thuộc chính actor.
   if (storeId) {
-    sql += ' AND (store_id = ? OR store_id IS NULL)';
-    params.push(storeId);
+    return db.queryOne(`
+      SELECT id, employee_id, store_id
+      FROM timesheets
+      WHERE check_out IS NULL
+        AND (store_id = ? OR (store_id IS NULL AND user_id = ?))
+      ORDER BY check_in ASC, id ASC
+      LIMIT 1
+    `, [storeId, actor.id]);
   }
 
-  // Ca CŨ NHẤT đang mở = "ca chính" giữ két tiền — phải khớp với
-  // getCurrentDrawer (cashDrawerService) và logic chia doanh thu ca
-  // (getShiftPaymentSummaryDeduped). DESC ở đây từng ghi tiền mặt vào
-  // két ca phụ khi 2 người cùng đứng ca → lệch két.
-  sql += ' ORDER BY check_in ASC LIMIT 1';
-  return db.queryOne(sql, params);
+  return db.queryOne(`
+    SELECT id, employee_id, store_id
+    FROM timesheets
+    WHERE user_id = ? AND check_out IS NULL
+    ORDER BY check_in ASC, id ASC
+    LIMIT 1
+  `, [actor.id]);
 }
 
 async function updateOrderPaymentState(db, order, paidAmount, actor, markDebtIfUnpaid = false) {

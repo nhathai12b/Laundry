@@ -1,4 +1,6 @@
-import { useEffect, useState } from 'react';
+﻿import { useEffect, useState } from 'react';
+import PageSkeleton from '../../components/PageSkeleton';
+import { showToast } from '../../utils/toast';
 import api from '../../utils/api';
 import { getSavedFilters, saveFilters } from '../../utils/filterStorage';
 
@@ -83,7 +85,7 @@ function Products() {
       
       if (editingProduct) {
         await api.patch(`/products/${editingProduct.id}`, submitData);
-        alert('Cập nhật sản phẩm thành công!');
+        showToast('Cập nhật sản phẩm thành công!');
       } else {
         submitData.store_id = formData.store_id;
         await api.post('/products', submitData);
@@ -94,7 +96,7 @@ function Products() {
       await loadProducts();
     } catch (error) {
       console.error('Error saving product:', error);
-      alert(error.response?.data?.error || 'Có lỗi xảy ra khi lưu sản phẩm');
+      showToast(error.response?.data?.error || 'Có lỗi xảy ra khi lưu sản phẩm');
     }
   };
 
@@ -118,11 +120,11 @@ function Products() {
       const msg = res.data?.action === 'deactivated'
         ? 'Đã ẩn/ngừng kinh doanh sản phẩm.'
         : (res.data?.message || 'Đã xử lý xong.');
-      alert(msg);
+      showToast(msg);
       await loadProducts();
     } catch (error) {
       console.error('Error deleting product:', error);
-      alert(error.response?.data?.error || 'Có lỗi xảy ra khi xử lý sản phẩm');
+      showToast(error.response?.data?.error || 'Có lỗi xảy ra khi xử lý sản phẩm');
     }
   };
 
@@ -138,14 +140,7 @@ function Products() {
   };
 
   if (loading) {
-    return (
-      <div className="flex items-center justify-center min-h-[400px]">
-        <div className="text-center">
-          <div className="inline-block animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mb-4"></div>
-          <div className="text-gray-600">Đang tải...</div>
-        </div>
-      </div>
-    );
+    return <PageSkeleton />;
   }
 
   return (

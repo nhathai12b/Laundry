@@ -413,7 +413,13 @@ router.post('/', auditLog('create', 'order'), async (req, res) => {
           `, [assigned_to, req.user.id]);
           
           if (!assignedUser) {
-            return res.status(403).json({ error: 'Bạn chỉ có thể gán đơn hàng cho nhân viên trong chuỗi cửa hàng của mình' });
+            // Phải throw để transaction ROLLBACK — `return res.status(403)` ở đây
+            // sẽ COMMIT customer vừa insert (đơn ma), Response object trở thành
+            // "order id" cho các query sau, và response bị gửi 2 lần (crash risk)
+            throw Object.assign(
+              new Error('Bạn chỉ có thể gán đơn hàng cho nhân viên trong chuỗi cửa hàng của mình'),
+              { statusCode: 403 }
+            );
           }
         }
         // If no assigned_to, find an employer user from the store
@@ -547,7 +553,7 @@ router.post('/', auditLog('create', 'order'), async (req, res) => {
   } catch (error) {
     console.error('Create order error:', error);
     const errorMessage = error.message || 'Server error';
-    res.status(500).json({ error: errorMessage });
+    res.status(error.statusCode || 500).json({ error: errorMessage });
   }
 });
 
@@ -676,14 +682,14 @@ router.patch('/:id', auditLog('update', 'order'), async (req, res) => {
       const values = [];
 
       if (status !== undefined) {
-        updates.push('status = ?');
-        values.push(status);
-        
-        // Add status history
-        await db.execute(`
-          INSERT INTO order_status_history (order_id, status, changed_by)
-          VALUES (?, ?, ?)
-        `, [req.params.id, status, req.user.id]);
+        // Đổi trạng thái phải đi qua POST /:id/status — PATCH đổi status "chay"
+        // sẽ bỏ qua toàn bộ side effect (hoàn tác thống kê khách khi hủy, ghi
+        // nhận thanh toán khi hoàn thành, tin Zalo "chờ nhận", mốc ready_at...)
+        // và POST sau đó cũng skip vì thấy status đã đổi rồi
+        throw Object.assign(
+          new Error('Không thể đổi trạng thái qua API này. Dùng POST /orders/:id/status.'),
+          { statusCode: 400 }
+        );
       }
 
       if (assigned_to !== undefined) {
@@ -755,6 +761,21 @@ router.patch('/:id', auditLog('update', 'order'), async (req, res) => {
 
         updates.push('total_amount = ?', 'discount_amount = 0', 'final_amount = ?', 'promotion_id = ?');
         values.push(total, total, null);
+
+        // Cập nhật DELTA vào thống kê khách: tạo đơn đã cộng final_amount cũ
+        // vào total_spent — sửa items đổi tiền mà không điều chỉnh thì số liệu
+        // khách lệch vĩnh viễn (hủy/xóa đơn sau đó trừ theo số MỚI)
+        if (order.customer_id && order.status !== 'cancelled') {
+          const oldFinal = Number.parseFloat(order.final_amount || order.total_amount || 0) || 0;
+          const delta = total - oldFinal;
+          if (delta !== 0) {
+            await db.execute(`
+              UPDATE customers
+              SET total_spent = GREATEST(total_spent + ?, 0)
+              WHERE id = ?
+            `, [delta, order.customer_id]);
+          }
+        }
       }
 
       updates.push('updated_by = ?');
@@ -767,6 +788,13 @@ router.patch('/:id', auditLog('update', 'order'), async (req, res) => {
           SET ${updates.join(', ')}
           WHERE id = ?
         `, values);
+      }
+
+      // Sửa items của đơn ĐÃ hoàn thành làm final_amount đổi — phải đồng bộ lại
+      // paid/debt/payment_status. Nếu không: đơn 100k đã trả đủ, sửa lên 150k
+      // vẫn hiện "paid" với debt=0, 50k còn thiếu không bao giờ vào danh sách nợ
+      if (items && Array.isArray(items) && order.status === 'completed') {
+        await syncOrderPaymentStateTx(db, req.params.id, req.user, { markDebtIfUnpaid: true });
       }
     });
 
@@ -791,7 +819,7 @@ router.patch('/:id', auditLog('update', 'order'), async (req, res) => {
     res.json({ data: { ...updatedOrder, items: orderItems } });
   } catch (error) {
     console.error('Update order error:', error);
-    res.status(500).json({ error: 'Server error' });
+    res.status(error.statusCode || 500).json({ error: error.statusCode ? error.message : 'Server error' });
   }
 });
 
@@ -824,14 +852,21 @@ router.post('/:id/status', auditLog('update', 'order'), async (req, res) => {
     }
 
     let amountPaid = null;
+    const amountPaidProvided = amount_paid !== undefined && amount_paid !== null && amount_paid !== '';
     if (status === 'completed') {
-      if (amount_paid !== undefined && amount_paid !== null && amount_paid !== '') {
+      const finalAmount = Number.parseFloat(order.final_amount || order.total_amount || 0) || 0;
+      const paidSoFar = Number.parseFloat(order.paid_amount || 0) || 0;
+      const remaining = Math.max(finalAmount - paidSoFar, 0);
+
+      if (amountPaidProvided) {
         amountPaid = Number.parseFloat(amount_paid);
         if (!Number.isFinite(amountPaid) || amountPaid < 0) {
           return res.status(400).json({ error: 'amount_paid must be a non-negative number.' });
         }
       } else if (payment_method) {
-        amountPaid = Number.parseFloat(order.final_amount || order.total_amount || 0) || 0;
+        // Mặc định thu PHẦN CÒN LẠI, không phải toàn bộ final_amount — đơn đã
+        // trả trước một phần mà mặc định full sẽ bị chặn "exceeds remaining"
+        amountPaid = remaining;
       } else {
         amountPaid = 0;
       }
@@ -840,9 +875,6 @@ router.post('/:id/status', auditLog('update', 'order'), async (req, res) => {
         return res.status(400).json({ error: 'Invalid payment_method. Only "cash" and "transfer" are allowed.' });
       }
 
-      const finalAmount = Number.parseFloat(order.final_amount || order.total_amount || 0) || 0;
-      const paidSoFar = Number.parseFloat(order.paid_amount || 0) || 0;
-      const remaining = Math.max(finalAmount - paidSoFar, 0);
       if (amountPaid - remaining > 0.009) {
         return res.status(400).json({ error: 'Payment amount exceeds remaining order balance' });
       }
@@ -899,7 +931,10 @@ router.post('/:id/status', auditLog('update', 'order'), async (req, res) => {
       `, [req.params.id, status, req.user.id]);
 
       if (status === 'completed') {
-        if (isNewlyCompleted && amountPaid > 0) {
+        // amountPaidProvided: đơn ĐÃ hoàn thành nhưng người dùng nhập số tiền
+        // (thu nợ qua nút hoàn thành) — trước đây bị bỏ qua im lặng: 200 OK,
+        // payment_method đổi, nhưng không có đồng nào vào sổ
+        if ((isNewlyCompleted || amountPaidProvided) && amountPaid > 0) {
           await recordOrderPaymentTx(db, req.params.id, {
             amount: amountPaid,
             payment_method,
@@ -918,6 +953,20 @@ router.post('/:id/status', auditLog('update', 'order'), async (req, res) => {
           UPDATE customers
           SET total_orders = GREATEST(total_orders - 1, 0),
               total_spent = GREATEST(total_spent - ?, 0)
+          WHERE id = ?
+        `, [orderAmount, order.customer_id]);
+      }
+
+      // Bỏ hủy (cancelled → trạng thái khác): cộng LẠI thống kê đã hoàn tác lúc
+      // hủy — nếu không, đơn hủy nhầm rồi khôi phục sẽ thiếu vĩnh viễn trong
+      // total_orders/total_spent của khách (lệch cả điều kiện khuyến mãi)
+      const isNewlyUncancelled = order.status === 'cancelled' && status !== 'cancelled';
+      if (isNewlyUncancelled && order.customer_id) {
+        const orderAmount = Number.parseFloat(order.final_amount || order.total_amount || 0) || 0;
+        await db.execute(`
+          UPDATE customers
+          SET total_orders = total_orders + 1,
+              total_spent = total_spent + ?
           WHERE id = ?
         `, [orderAmount, order.customer_id]);
       }
@@ -970,7 +1019,7 @@ router.delete('/:id', authorize('admin'), auditLog('delete', 'order'), async (re
 
     // Lấy đủ thông tin để (1) kiểm tra chủ quyền chuỗi, (2) hoàn tác thống kê khách
     const order = await queryOne(`
-      SELECT o.id, o.customer_id, o.final_amount, o.total_amount,
+      SELECT o.id, o.customer_id, o.final_amount, o.total_amount, o.status,
         s.admin_id AS store_admin_id,
         cs.admin_id AS creator_admin_id
       FROM orders o
@@ -985,16 +1034,20 @@ router.delete('/:id', authorize('admin'), auditLog('delete', 'order'), async (re
     }
 
     // Chặn xóa chéo tenant: đơn phải thuộc chuỗi cửa hàng của admin này
-    // (theo store của đơn, fallback theo store của người tạo đơn)
+    // (theo store của đơn, fallback theo store của người tạo đơn).
+    // ownerAdminId null = đơn legacy không xác định được chuỗi (store_id NULL
+    // và người tạo cũng không gắn store) — cho phép xóa thay vì khóa vĩnh viễn
     const ownerAdminId = order.store_admin_id || order.creator_admin_id;
-    if (ownerAdminId !== req.user.id) {
+    if (ownerAdminId && ownerAdminId !== req.user.id) {
       return res.status(403).json({ error: 'Bạn chỉ có thể xóa đơn hàng trong chuỗi cửa hàng của mình' });
     }
 
     await transaction(async (db) => {
       // Hoàn tác thống kê khách hàng (tạo đơn đã +1 và +tiền) — nếu không,
-      // xóa đơn để lại total_orders/total_spent bị thổi phồng vĩnh viễn
-      if (order.customer_id) {
+      // xóa đơn để lại total_orders/total_spent bị thổi phồng vĩnh viễn.
+      // Đơn ĐÃ HỦY thì bỏ qua: lúc hủy đã hoàn tác rồi, hoàn tác lần 2 sẽ
+      // ăn mất đóng góp của đơn khác (GREATEST che lỗi, không tự lành)
+      if (order.customer_id && order.status !== 'cancelled') {
         const orderAmount = Number.parseFloat(order.final_amount || order.total_amount || 0) || 0;
         await db.execute(`
           UPDATE customers

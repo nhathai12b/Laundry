@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+﻿import { useEffect, useState } from 'react';
+import { showToast } from '../../utils/toast';
 import api from '../../utils/api';
 import { isAdmin } from '../../utils/auth';
 import { getSavedFilters, saveFilters } from '../../utils/filterStorage';
@@ -56,7 +57,7 @@ function Promotions() {
 
   const loadPromotions = async () => {
     try {
-      setLoading(true);
+      // Không bật spinner khi refresh — giữ dữ liệu cũ trên màn hình (lần đầu đã có useState(true))
       const params = {};
       if (filterType !== 'all') {
         params.type = filterType;
@@ -76,14 +77,13 @@ function Promotions() {
         || 'Không thể tải danh sách khuyến mãi';
       
       if (error.response?.status === 401) {
-        alert('Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.');
-        window.location.href = '/login';
+        // api.js interceptor đã xóa token và chuyển về /login — toast ở đây sẽ mất theo trang
       } else if (error.response?.status === 403) {
-        alert('Bạn không có quyền truy cập tính năng này. Vui lòng đăng nhập bằng tài khoản admin.');
+        showToast('Bạn không có quyền truy cập tính năng này. Vui lòng đăng nhập bằng tài khoản admin.');
       } else if (error.response?.status === 500) {
-        alert(`Lỗi máy chủ: ${errorMessage}\n\nVui lòng kiểm tra:\n- Kết nối cơ sở dữ liệu\n- Bảng promotions đã được tạo chưa`);
+        showToast(`Lỗi máy chủ: ${errorMessage}`);
       } else {
-        alert(`Không thể tải danh sách khuyến mãi: ${errorMessage}`);
+        showToast(`Không thể tải danh sách khuyến mãi: ${errorMessage}`);
       }
     } finally {
       setLoading(false);
@@ -94,22 +94,22 @@ function Promotions() {
     e.preventDefault();
     
     if (!formData.name || !formData.start_date || !formData.end_date) {
-      alert('Vui lòng điền đầy đủ thông tin bắt buộc');
+      showToast('Vui lòng điền đầy đủ thông tin bắt buộc');
       return;
     }
 
     if (!formData.min_bill_amount) {
-      alert('Vui lòng nhập giá trị đơn hàng tối thiểu');
+      showToast('Vui lòng nhập giá trị đơn hàng tối thiểu');
       return;
     }
 
     if (!formData.discount_value) {
-      alert('Vui lòng nhập giá trị khuyến mãi');
+      showToast('Vui lòng nhập giá trị khuyến mãi');
       return;
     }
 
     if (new Date(formData.start_date) >= new Date(formData.end_date)) {
-      alert('Ngày kết thúc phải sau ngày bắt đầu');
+      showToast('Ngày kết thúc phải sau ngày bắt đầu');
       return;
     }
 
@@ -133,11 +133,11 @@ function Promotions() {
 
       if (editingPromotion) {
         await api.patch(`/promotions/${editingPromotion.id}`, submitData);
-        alert('Cập nhật khuyến mãi thành công!');
+        showToast('Cập nhật khuyến mãi thành công!');
       } else {
         const response = await api.post('/promotions', submitData);
         // Debug log removed for security
-        alert('Tạo khuyến mãi thành công!');
+        showToast('Tạo khuyến mãi thành công!');
       }
       setShowModal(false);
       setEditingPromotion(null);
@@ -145,7 +145,7 @@ function Promotions() {
       await loadPromotions();
     } catch (error) {
       console.error('Error saving promotion:', error);
-      alert(error.response?.data?.error || 'Có lỗi xảy ra khi lưu khuyến mãi');
+      showToast(error.response?.data?.error || 'Có lỗi xảy ra khi lưu khuyến mãi');
     }
   };
 
@@ -174,10 +174,10 @@ function Promotions() {
       const msg = res.data?.action === 'deactivated'
         ? 'Đã ẩn/ngừng khuyến mãi.'
         : (res.data?.message || 'Đã xử lý xong.');
-      alert(msg);
+      showToast(msg);
       loadPromotions();
     } catch (error) {
-      alert(error.response?.data?.error || 'Xử lý thất bại');
+      showToast(error.response?.data?.error || 'Xử lý thất bại');
     }
   };
 
@@ -186,10 +186,10 @@ function Promotions() {
       await api.patch(`/promotions/${promotion.id}`, {
         status: promotion.status === 'active' ? 'inactive' : 'active'
       });
-      alert('Cập nhật trạng thái thành công!');
+      showToast('Cập nhật trạng thái thành công!');
       loadPromotions();
     } catch (error) {
-      alert(error.response?.data?.error || 'Cập nhật thất bại');
+      showToast(error.response?.data?.error || 'Cập nhật thất bại');
     }
   };
 

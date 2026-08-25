@@ -18,7 +18,9 @@ setInterval(() => {
   }
 }, RATE_LIMITER_CLEANUP_INTERVAL_MS);
 
-const getClientIp = (req) => req.ip || req.connection?.remoteAddress || 'unknown';
+// Dùng chung toàn backend (rate limit, lưu IP chấm công để đối soát...) —
+// sửa cách lấy IP sau proxy thì chỉ sửa ở đây
+export const getClientIp = (req) => req.ip || req.connection?.remoteAddress || 'unknown';
 
 /**
  * Generic per-IP rate limiter factory.
@@ -66,8 +68,14 @@ export const registerRateLimiter = (maxAttempts = 5, windowMs = 60 * 60 * 1000) 
   createRateLimiter('register', maxAttempts, windowMs);
 
 /**
- * Reset rate limit for successful login
+ * Login thành công: chỉ hoàn lại 1 lượt (lượt của chính request này) thay vì
+ * xóa cả bucket của IP. Xóa cả bucket cho phép kẻ có sẵn 1 tài khoản hợp lệ
+ * brute-force tài khoản khác đến sát ngưỡng, đăng nhập tài khoản của mình để
+ * reset, rồi tiếp tục — vô hiệu hóa hoàn toàn rate limit theo IP.
  */
 export const resetLoginRateLimit = (req) => {
-  attemptStore.delete(`login:${getClientIp(req)}`);
+  const data = attemptStore.get(`login:${getClientIp(req)}`);
+  if (data && data.count > 0) {
+    data.count -= 1;
+  }
 };

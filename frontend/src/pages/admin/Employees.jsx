@@ -1,4 +1,6 @@
 ﻿import { useEffect, useState } from 'react';
+import PageSkeleton from '../../components/PageSkeleton';
+import { showToast } from '../../utils/toast';
 import api from '../../utils/api';
 import { isAdmin } from '../../utils/auth';
 import SalaryAdjustModal from '../../components/SalaryAdjustModal';
@@ -61,23 +63,23 @@ function Employees() {
     e.preventDefault();
     try {
       if (!formData.name || formData.name.trim() === '') {
-        alert('Vui lòng nhập tên nhân viên');
+        showToast('Vui lòng nhập tên nhân viên');
         return;
       }
 
       if (isAdmin() && !editingEmployee && !formData.store_id) {
-        alert('Vui lòng chọn cửa hàng');
+        showToast('Vui lòng chọn cửa hàng');
         return;
       }
 
       const passwordError = getPasswordError(formData.password);
       if (passwordError) {
-        alert(`⚠️ Mật khẩu chưa đủ điều kiện: ${passwordError}`);
+        showToast(`⚠️ Mật khẩu chưa đủ điều kiện: ${passwordError}`);
         return;
       }
 
       if (formData.password && !formData.phone?.trim()) {
-        alert('Nhân viên cần có SĐT để đăng nhập riêng. Vui lòng nhập SĐT.');
+        showToast('Nhân viên cần có SĐT để đăng nhập riêng. Vui lòng nhập SĐT.');
         return;
       }
 
@@ -105,7 +107,7 @@ function Employees() {
     } catch (error) {
       console.error('Submit error:', error);
       const errorMessage = error.response?.data?.error || error.message || 'Lưu thất bại';
-      alert(errorMessage);
+      showToast(errorMessage);
     }
   };
 
@@ -126,11 +128,12 @@ function Employees() {
     try {
       const res = await api.delete(`/employees/${id}`);
       if (res.data?.action === 'deactivated') {
-        alert(res.data.message);
+        // type 'success' tường minh: message chứa 'đã bị vô hiệu' sẽ bị auto-detect tô đỏ nhầm
+        showToast(res.data.message, 'success');
       }
       loadEmployees();
     } catch (error) {
-      alert(error.response?.data?.error || 'Xóa thất bại');
+      showToast(error.response?.data?.error || 'Xóa thất bại');
     }
   };
 
@@ -139,7 +142,7 @@ function Employees() {
   };
 
   if (loading) {
-    return <div className="text-center py-8">Đang tải...</div>;
+    return <PageSkeleton />;
   }
 
   return (

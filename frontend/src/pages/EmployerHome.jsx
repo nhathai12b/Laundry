@@ -1,4 +1,6 @@
-import { useEffect, useState } from 'react';
+﻿import { useEffect, useState } from 'react';
+import PageSkeleton from '../components/PageSkeleton';
+import { showToast } from '../utils/toast';
 import api from '../utils/api';
 import { getAuth } from '../utils/auth';
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDaysInMonth } from 'date-fns';
@@ -129,15 +131,15 @@ function EmployerHome() {
         setPrinting(true);
         try {
           const result = await printBill(orderToComplete.id);
-          alert(`Đơn hàng đã hoàn thành và bill đã được in! (Phương thức: ${result.method === 'bluetooth' ? 'Bluetooth' : 'Server'})`);
+          showToast(`Đơn hàng đã hoàn thành và bill đã được in! (Phương thức: ${result.method === 'bluetooth' ? 'Bluetooth' : 'Server'})`);
         } catch (printError) {
           console.error('Print error:', printError);
-          alert(printError.message || 'Đơn hàng đã hoàn thành nhưng in bill thất bại. Vui lòng kiểm tra kết nối máy in.');
+          showToast(printError.message || 'Đơn hàng đã hoàn thành nhưng in bill thất bại. Vui lòng kiểm tra kết nối máy in.');
         } finally {
           setPrinting(false);
         }
       } else {
-        alert('Đơn hàng đã hoàn thành!');
+        showToast('Đơn hàng đã hoàn thành!');
       }
 
       setShowCompleteModal(false);
@@ -147,7 +149,7 @@ function EmployerHome() {
       loadOrders();
       loadData(); // Reload stats
     } catch (error) {
-      alert(error.response?.data?.error || 'Cập nhật thất bại');
+      showToast(error.response?.data?.error || 'Cập nhật thất bại');
       setPrinting(false);
     }
   };
@@ -280,7 +282,7 @@ function EmployerHome() {
       };
 
       if (orderData.items.length === 0) {
-        alert('Vui lòng thêm ít nhất một sản phẩm');
+        showToast('Vui lòng thêm ít nhất một sản phẩm');
         return;
       }
 
@@ -297,7 +299,7 @@ function EmployerHome() {
       loadOrders();
       loadData(); // Reload stats
     } catch (error) {
-      alert(error.response?.data?.error || 'Tạo đơn thất bại');
+      showToast(error.response?.data?.error || 'Tạo đơn thất bại');
     }
   };
 
@@ -325,7 +327,7 @@ function EmployerHome() {
   };
 
   if (loading) {
-    return <div className="text-center py-8">Đang tải...</div>;
+    return <PageSkeleton />;
   }
 
   return (
@@ -521,10 +523,10 @@ function EmployerHome() {
                       setPrinting(true);
                       try {
                         const result = await printBill(order.id);
-                        alert(`Bill đã được in! (Phương thức: ${result.method === 'bluetooth' ? 'Bluetooth' : 'Server'})`);
+                        showToast(`Bill đã được in! (Phương thức: ${result.method === 'bluetooth' ? 'Bluetooth' : 'Server'})`);
                       } catch (printError) {
                         console.error('Print error:', printError);
-                        alert(printError.message || 'In bill thất bại. Vui lòng kiểm tra kết nối máy in.');
+                        showToast(printError.message || 'In bill thất bại. Vui lòng kiểm tra kết nối máy in.');
                       } finally {
                         setPrinting(false);
                       }

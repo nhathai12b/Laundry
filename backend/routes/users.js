@@ -183,10 +183,14 @@ router.post('/', authorize('admin'), auditLog('create', 'user', (req) => req.bod
         return res.status(400).json({ error: 'Store ID is required. Please select a store.' });
       }
 
-      // Verify store exists in stores table
-      const storeExists = await queryOne('SELECT id FROM stores WHERE id = ?', [store_id]);
+      // Verify store exists VÀ thuộc chuỗi của admin đang thao tác — thiếu check
+      // admin_id thì admin A có thể tạo tài khoản employer gắn vào store của admin B
+      // rồi đăng nhập đọc/ghi dữ liệu của B (root được phép mọi store)
+      const storeExists = req.user.role === 'root'
+        ? await queryOne('SELECT id FROM stores WHERE id = ?', [store_id])
+        : await queryOne('SELECT id FROM stores WHERE id = ? AND admin_id = ?', [store_id, req.user.id]);
       if (!storeExists) {
-        return res.status(400).json({ error: 'Selected store does not exist' });
+        return res.status(400).json({ error: 'Cửa hàng không tồn tại hoặc không thuộc quyền quản lý của bạn' });
       }
 
       storeId = parseInt(store_id);
@@ -194,6 +198,11 @@ router.post('/', authorize('admin'), auditLog('create', 'user', (req) => req.bod
       // Admin thường không có store_id
       // Admin chỉ được quản lý bởi root admin, không xuất hiện trong danh sách stores/users/employees
       storeId = null;
+    }
+
+    const passwordCheck = validatePasswordStrength(password);
+    if (!passwordCheck.valid) {
+      return res.status(400).json({ error: passwordCheck.errors.join(' ') });
     }
 
     const password_hash = await hashPassword(password);
@@ -294,6 +303,10 @@ router.patch('/:id', authorize('admin'), auditLog('update', 'user'), async (req,
       if (!password) {
         return res.status(400).json({ error: 'Chỉ có thể đổi mật khẩu. Gửi field password.' });
       }
+      const selfPasswordCheck = validatePasswordStrength(password);
+      if (!selfPasswordCheck.valid) {
+        return res.status(400).json({ error: selfPasswordCheck.errors.join(' ') });
+      }
       const password_hash = await hashPassword(password);
       await execute('UPDATE users SET password_hash = ? WHERE id = ?', [password_hash, req.params.id]);
       return res.json({ message: 'Đổi mật khẩu thành công' });
@@ -380,7 +393,10 @@ router.patch('/:id', authorize('admin'), auditLog('update', 'user'), async (req,
       }
     }
     if (password) {
-      // Password validation removed - no requirements
+      const patchPasswordCheck = validatePasswordStrength(password);
+      if (!patchPasswordCheck.valid) {
+        return res.status(400).json({ error: patchPasswordCheck.errors.join(' ') });
+      }
       const password_hash = await hashPassword(password);
       updates.push('password_hash = ?');
       values.push(password_hash);

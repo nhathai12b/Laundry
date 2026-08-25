@@ -86,9 +86,13 @@ router.get('/', async (req, res) => {
 
     querySql += ' ORDER BY c.total_spent DESC, c.created_at DESC';
     
-    // Add limit for autocomplete (default 20, max 50)
-    const limit = Math.min(parseInt(req.query.limit) || 20, 50);
-    querySql += ` LIMIT ${limit}`;
+    // LIMIT chỉ áp khi client yêu cầu (autocomplete gửi limit=10, max 50).
+    // Trước đây mặc định LIMIT 20 cho MỌI request — trang Khách hàng và số
+    // "Tổng khách" trên Dashboard không bao giờ vượt quá 20 dù có hàng trăm khách
+    const requestedLimit = parseInt(req.query.limit);
+    if (Number.isFinite(requestedLimit) && requestedLimit > 0) {
+      querySql += ` LIMIT ${Math.min(requestedLimit, 50)}`;
+    }
 
     const customers = await query(querySql, params);
     res.json({ data: customers });

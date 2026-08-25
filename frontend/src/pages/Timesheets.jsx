@@ -1,10 +1,17 @@
-import { useEffect, useState } from 'react';
+﻿import { useEffect, useRef, useState } from 'react';
+import PageSkeleton from '../components/PageSkeleton';
+import { showToast } from '../utils/toast';
 import api from '../utils/api';
 import { isAdmin, getEmployeeId, getAuth } from '../utils/auth';
 import { format, getDaysInMonth } from 'date-fns';
 import { getSavedFilters, saveFilters } from '../utils/filterStorage';
 import SalaryAdjustModal from '../components/SalaryAdjustModal';
 import MoneyInput from '../components/MoneyInput';
+import { getPositionBestEffort } from '../utils/geo';
+
+// Khởi tạo Intl formatter 1 lần ở module scope — tạo mới trong vòng lặp render
+// (31 ngày × N nhân viên ô/lần) tốn kém gấp nhiều lần .format() và gây giật
+const VND_FORMAT = new Intl.NumberFormat('vi-VN');
 import {
   formatLocalDate,
   formatLocalDateKey,
@@ -27,6 +34,11 @@ function Timesheets() {
   const [selectedMonth, setSelectedMonth] = useState(savedFilters.selectedMonth);
   const [selectedYear, setSelectedYear] = useState(savedFilters.selectedYear);
   const [showCheckoutModal, setShowCheckoutModal] = useState(false);
+  // Chống double-submit: GPS có thể chờ tới 10s, không khóa nút thì bấm lại
+  // trong lúc chờ sẽ bắn 2 request (2 ca mở trùng / check-out 2 lần)
+  const [checkInSubmitting, setCheckInSubmitting] = useState(false);
+  const [checkOutSubmitting, setCheckOutSubmitting] = useState(false);
+  const [cashDrawerSubmitting, setCashDrawerSubmitting] = useState(false);
   const [revenueAmount, setRevenueAmount] = useState('');
   const [checkoutNote, setCheckoutNote] = useState('');
   const [expectedRevenue, setExpectedRevenue] = useState(0);
@@ -54,6 +66,9 @@ function Timesheets() {
   const [cashShortagePaidAmount, setCashShortagePaidAmount] = useState('');
   const [mySalary, setMySalary] = useState(null);
   const [adjustEmployee, setAdjustEmployee] = useState(null);
+  // GPS warm-up: bắt đầu lấy vị trí ngay khi mở modal để lúc bấm nút không
+  // phải đợi fix GPS (có thể tới 10s trong nhà)
+  const positionPromiseRef = useRef(null);
   const [adminEmployees, setAdminEmployees] = useState([]);
   const [adjustmentsGrid, setAdjustmentsGrid] = useState([]);
   const [adjustmentsGridDays, setAdjustmentsGridDays] = useState(31);
@@ -121,11 +136,11 @@ function Timesheets() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewMode]);
 
-  const formatMoney = (value) => `${new Intl.NumberFormat('vi-VN').format(parseFloat(value) || 0)} đ`;
+  const formatMoney = (value) => `${VND_FORMAT.format(parseFloat(value) || 0)} đ`;
 
   const loadTimesheets = async () => {
     try {
-      setLoading(true);
+      // Không bật spinner khi refresh — giữ dữ liệu cũ trên màn hình (lần đầu đã có useState(true))
       const params = new URLSearchParams();
       
       if (isAdmin() && periodViewMode === 'month') {
@@ -225,6 +240,7 @@ function Timesheets() {
 
   const handleCheckInClick = () => {
     const employeeIdFromToken = getEmployeeId();
+    positionPromiseRef.current = getPositionBestEffort(); // warm-up GPS
     setShowCheckinModal(true);
     // Tài khoản cá nhân: luôn là chính mình. Tài khoản cửa hàng dùng chung:
     // ca đầu dùng nhân viên đã chọn khi login (nếu có), người vào thêm tự chọn tên.
@@ -234,6 +250,8 @@ function Timesheets() {
   };
 
   const handleCheckIn = async () => {
+    if (checkInSubmitting) return;
+    setCheckInSubmitting(true);
     try {
       const employeeIdFromToken = getEmployeeId();
       const isAdditional = openShifts.length > 0;
@@ -242,15 +260,21 @@ function Timesheets() {
       const employeeIdToSend = employeeIdFromToken || selectedEmployee || undefined;
 
       if (!employeeIdFromToken && isAdditional && !employeeIdToSend) {
-        alert('Vui lòng chọn tên nhân viên check-in thêm vào ca.');
+        showToast('Vui lòng chọn tên nhân viên check-in thêm vào ca.');
         return;
       }
+
+      // Vị trí GPS (best-effort): backend chỉ yêu cầu khi tiệm có đặt tọa độ.
+      // Ưu tiên promise đã warm-up từ lúc mở modal — không bắt người dùng đợi
+      const position = await (positionPromiseRef.current || getPositionBestEffort());
+      positionPromiseRef.current = null;
 
       await api.post('/timesheets/check-in', {
         employee_id: employeeIdToSend,
         // Két tiền thuộc ca chính — người vào thêm không nhập quỹ đầu ca
         opening_cash_amount: isAdditional ? 0 : (openingCashAmount !== '' ? parseFloat(openingCashAmount) : 0),
         note: checkinNote,
+        ...position,
       });
       setShowCheckinModal(false);
       setSelectedEmployee('');
@@ -259,16 +283,19 @@ function Timesheets() {
       checkTodayStatus();
       loadTimesheets();
     } catch (error) {
-      alert(error.response?.data?.error || 'Check-in thất bại');
+      showToast(error.response?.data?.error || 'Check-in thất bại');
+    } finally {
+      setCheckInSubmitting(false);
     }
   };
 
   const handleCheckOutClick = async (shift) => {
     const ts = shift || todayCheckIn;
     if (!ts?.id) {
-      alert('Không tìm thấy ca đang mở.');
+      showToast('Không tìm thấy ca đang mở.');
       return;
     }
+    positionPromiseRef.current = getPositionBestEffort(); // warm-up GPS
     setClosingShift(ts);
     setClosingTimesheetId(ts.id);
     setCheckoutOutAt('');
@@ -293,16 +320,17 @@ function Timesheets() {
   };
 
   const handleCheckOut = async () => {
+    if (checkOutSubmitting) return;
     // Allow any numeric value, including negative numbers
     if (revenueAmount === '' || revenueAmount === null || revenueAmount === undefined) {
-      alert('Vui lòng nhập số tiền thực tế');
+      showToast('Vui lòng nhập số tiền thực tế');
       return;
     }
     
     const revenueValue = parseFloat(revenueAmount);
     
     if (isNaN(revenueValue)) {
-      alert('Vui lòng nhập số tiền hợp lệ');
+      showToast('Vui lòng nhập số tiền hợp lệ');
       return;
     }
 
@@ -313,10 +341,16 @@ function Timesheets() {
       checkOutAtPayload = new Date(checkoutOutAt).toISOString();
     }
 
+    setCheckOutSubmitting(true);
     try {
+      // Vị trí GPS (best-effort): ưu tiên promise đã warm-up từ lúc mở modal
+      const position = await (positionPromiseRef.current || getPositionBestEffort());
+      positionPromiseRef.current = null;
+
       const response = await api.post('/timesheets/check-out', {
         timesheet_id: closingTimesheetId || todayCheckIn?.id,
         check_out_at: checkOutAtPayload,
+        ...position,
         actual_cash_amount: revenueValue,
         cash_shortage_paid_amount: cashShortagePaidAmount !== '' && cashShortagePaidAmount != null
           ? parseFloat(cashShortagePaidAmount)
@@ -348,11 +382,13 @@ function Timesheets() {
       if (isAdmin() && viewMode === 'daily') {
         loadDailyHours();
       }
-      alert('Check-out thành công!');
+      showToast('Check-out thành công!');
     } catch (error) {
       // Error details removed for security
       const errorMessage = error.response?.data?.error || error.message || 'Lỗi không xác định';
-      alert('Check-out thất bại: ' + errorMessage);
+      showToast('Check-out thất bại: ' + errorMessage);
+    } finally {
+      setCheckOutSubmitting(false);
     }
   };
 
@@ -365,21 +401,23 @@ function Timesheets() {
 
   const handleCashDrawerSubmit = async () => {
     if (!todayCheckIn?.id) {
-      alert('Không tìm thấy ca đang mở.');
+      showToast('Không tìm thấy ca đang mở.');
       return;
     }
 
     const amount = parseFloat(cashDrawerAmount);
     if (Number.isNaN(amount) || amount <= 0) {
-      alert('Vui lòng nhập số tiền hợp lệ');
+      showToast('Vui lòng nhập số tiền hợp lệ');
       return;
     }
 
     if (cashDrawerAction === 'cash-out' && !cashDrawerReason.trim()) {
-      alert('Vui lòng nhập lý do trừ tiền');
+      showToast('Vui lòng nhập lý do trừ tiền');
       return;
     }
 
+    if (cashDrawerSubmitting) return;
+    setCashDrawerSubmitting(true);
     try {
       const endpoint = cashDrawerAction === 'cash-in' ? '/cash-drawer/cash-in' : '/cash-drawer/cash-out';
       const response = await api.post(endpoint, {
@@ -392,7 +430,9 @@ function Timesheets() {
       setCashDrawerAmount('');
       setCashDrawerReason('');
     } catch (error) {
-      alert(error.response?.data?.error || 'Không thể cập nhật ngăn két');
+      showToast(error.response?.data?.error || 'Không thể cập nhật ngăn két');
+    } finally {
+      setCashDrawerSubmitting(false);
     }
   };
 
@@ -535,10 +575,10 @@ function Timesheets() {
       link.remove();
       window.URL.revokeObjectURL(url);
       
-      alert('Xuất Excel thành công!');
+      showToast('Xuất Excel thành công!');
     } catch (error) {
       console.error('Error exporting Excel:', error);
-      alert(error.response?.data?.error || 'Có lỗi xảy ra khi xuất Excel');
+      showToast(error.response?.data?.error || 'Có lỗi xảy ra khi xuất Excel');
     }
   };
 
@@ -582,14 +622,7 @@ function Timesheets() {
   };
 
   if (loading) {
-    return (
-      <div className="flex items-center justify-center min-h-[400px]">
-        <div className="text-center">
-          <div className="inline-block animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mb-4"></div>
-          <div className="text-gray-600">Đang tải...</div>
-        </div>
-      </div>
-    );
+    return <PageSkeleton />;
   }
 
   return (
@@ -1127,12 +1160,12 @@ function Timesheets() {
                             adj < 0 ? 'text-red-600' : adj > 0 ? 'text-green-600' : 'text-gray-400'
                           }`}
                         >
-                          {adj !== 0 ? `${adj > 0 ? '+' : ''}${new Intl.NumberFormat('vi-VN').format(adj)}` : '-'}
+                          {adj !== 0 ? `${adj > 0 ? '+' : ''}${VND_FORMAT.format(adj)}` : '-'}
                         </td>
                       );
                     })}
                     <td className="px-1.5 py-1 text-[10px] text-center font-bold bg-gray-100 border border-gray-300">
-                      {new Intl.NumberFormat('vi-VN').format(
+                      {VND_FORMAT.format(
                         dailyHours.reduce((sum, emp) => sum + (parseFloat(emp.total_adjustments) || 0), 0)
                       )}
                     </td>
@@ -1273,25 +1306,25 @@ function Timesheets() {
                         <td className="px-3 py-3 text-sm text-gray-600 text-right">{emp.total_shifts}</td>
                         <td className="px-3 py-3 text-sm font-medium text-gray-800 text-right">{(parseFloat(emp.total_hours) || 0).toFixed(2)}h</td>
                         <td className="px-3 py-3 text-sm text-gray-600 text-right">
-                          {emp.hourly_rate > 0 ? new Intl.NumberFormat('vi-VN').format(emp.hourly_rate) + ' đ/h' : '-'}
+                          {emp.hourly_rate > 0 ? VND_FORMAT.format(emp.hourly_rate) + ' đ/h' : '-'}
                         </td>
                         <td className="px-3 py-3 text-sm text-gray-700 text-right">
-                          {new Intl.NumberFormat('vi-VN').format(emp.salary)} đ
+                          {VND_FORMAT.format(emp.salary)} đ
                         </td>
                         <td className={`px-3 py-3 text-sm font-medium text-right ${(emp.total_commission || 0) > 0 ? 'text-amber-600' : 'text-gray-400'}`}>
                           {(emp.total_commission || 0) > 0
-                            ? `+${new Intl.NumberFormat('vi-VN').format(emp.total_commission)} đ`
+                            ? `+${VND_FORMAT.format(emp.total_commission)} đ`
                             : '-'}
                         </td>
                         <td className={`px-3 py-3 text-sm font-medium text-right ${
                           (emp.total_adjustments || 0) < 0 ? 'text-red-600' : (emp.total_adjustments || 0) > 0 ? 'text-green-600' : 'text-gray-400'
                         }`}>
                           {(emp.total_adjustments || 0) !== 0
-                            ? `${emp.total_adjustments > 0 ? '+' : ''}${new Intl.NumberFormat('vi-VN').format(emp.total_adjustments)} đ`
+                            ? `${emp.total_adjustments > 0 ? '+' : ''}${VND_FORMAT.format(emp.total_adjustments)} đ`
                             : '-'}
                         </td>
                         <td className="px-3 py-3 text-sm font-bold text-green-600 text-right">
-                          {new Intl.NumberFormat('vi-VN').format(emp.final_salary ?? emp.salary)} đ
+                          {VND_FORMAT.format(emp.final_salary ?? emp.salary)} đ
                         </td>
                         <td className="px-3 py-3 text-center">
                           {emp.is_employee ? (
@@ -1322,16 +1355,16 @@ function Timesheets() {
                       </td>
                       <td className="px-3 py-3"></td>
                       <td className="px-3 py-3 text-sm text-gray-700 text-right">
-                        {new Intl.NumberFormat('vi-VN').format(payroll.reduce((sum, emp) => sum + emp.salary, 0))} đ
+                        {VND_FORMAT.format(payroll.reduce((sum, emp) => sum + emp.salary, 0))} đ
                       </td>
                       <td className="px-3 py-3 text-sm text-amber-600 text-right">
-                        {new Intl.NumberFormat('vi-VN').format(payroll.reduce((sum, emp) => sum + (emp.total_commission || 0), 0))} đ
+                        {VND_FORMAT.format(payroll.reduce((sum, emp) => sum + (emp.total_commission || 0), 0))} đ
                       </td>
                       <td className="px-3 py-3 text-sm text-right">
-                        {new Intl.NumberFormat('vi-VN').format(payroll.reduce((sum, emp) => sum + (emp.total_adjustments || 0), 0))} đ
+                        {VND_FORMAT.format(payroll.reduce((sum, emp) => sum + (emp.total_adjustments || 0), 0))} đ
                       </td>
                       <td className="px-3 py-3 text-sm text-green-600 text-right">
-                        {new Intl.NumberFormat('vi-VN').format(payroll.reduce((sum, emp) => sum + (emp.final_salary ?? emp.salary), 0))} đ
+                        {VND_FORMAT.format(payroll.reduce((sum, emp) => sum + (emp.final_salary ?? emp.salary), 0))} đ
                       </td>
                       <td className="px-3 py-3"></td>
                     </tr>
@@ -1390,12 +1423,12 @@ function Timesheets() {
                                     amt < 0 ? 'text-red-600 font-medium' : amt > 0 ? 'text-green-600 font-medium' : 'text-gray-300'
                                   }`}
                                 >
-                                  {amt !== 0 ? `${amt > 0 ? '+' : ''}${new Intl.NumberFormat('vi-VN').format(amt)}` : '-'}
+                                  {amt !== 0 ? `${amt > 0 ? '+' : ''}${VND_FORMAT.format(amt)}` : '-'}
                                 </td>
                               );
                             })}
                             <td className={`px-1.5 py-1 text-[10px] text-center font-bold bg-gray-100 border border-gray-300 ${dayTotal < 0 ? 'text-red-600' : dayTotal > 0 ? 'text-green-600' : 'text-gray-400'}`}>
-                              {dayTotal !== 0 ? new Intl.NumberFormat('vi-VN').format(dayTotal) : '-'}
+                              {dayTotal !== 0 ? VND_FORMAT.format(dayTotal) : '-'}
                             </td>
                           </tr>
                         );
@@ -1406,11 +1439,11 @@ function Timesheets() {
                         <td className="px-1.5 py-1 text-[11px] text-gray-800 border border-gray-300 sticky left-0 bg-gray-50 z-10">Tổng</td>
                         {adjustmentsGrid.map((emp) => (
                           <td key={emp.employee_id} className={`px-1 py-1 text-[10px] text-center font-bold border border-gray-300 ${emp.total < 0 ? 'text-red-600' : emp.total > 0 ? 'text-green-600' : 'text-gray-400'}`}>
-                            {emp.total !== 0 ? new Intl.NumberFormat('vi-VN').format(emp.total) : '-'}
+                            {emp.total !== 0 ? VND_FORMAT.format(emp.total) : '-'}
                           </td>
                         ))}
                         <td className="px-1.5 py-1 text-[10px] text-center bg-gray-100 border border-gray-300">
-                          {new Intl.NumberFormat('vi-VN').format(adjustmentsGrid.reduce((sum, emp) => sum + (emp.total || 0), 0))}
+                          {VND_FORMAT.format(adjustmentsGrid.reduce((sum, emp) => sum + (emp.total || 0), 0))}
                         </td>
                       </tr>
                     </tfoot>
@@ -1473,7 +1506,7 @@ function Timesheets() {
                         </td>
                         <td className="px-4 py-3 text-right font-bold text-green-600">
                           {timesheet.revenue_amount 
-                            ? `${new Intl.NumberFormat('vi-VN').format(parseFloat(timesheet.revenue_amount) || 0)} đ`
+                            ? `${VND_FORMAT.format(parseFloat(timesheet.revenue_amount) || 0)} đ`
                             : '-'
                           }
                         </td>
@@ -1490,7 +1523,7 @@ function Timesheets() {
                         {timesheets.reduce((sum, t) => sum + ((parseFloat(t.regular_hours) || 0) + (parseFloat(t.overtime_hours) || 0)), 0).toFixed(2)}h
                       </td>
                       <td className="px-4 py-3 text-right text-green-600">
-                        {new Intl.NumberFormat('vi-VN').format(
+                        {VND_FORMAT.format(
                           timesheets.reduce((sum, t) => sum + (parseFloat(t.revenue_amount) || 0), 0)
                         )} đ
                       </td>
@@ -1544,7 +1577,7 @@ function Timesheets() {
                         <div className="text-right">
                           <div className="text-xs text-gray-600 mb-0.5">Doanh thu ca</div>
                           <div className="text-base font-bold text-green-600">
-                            {new Intl.NumberFormat('vi-VN').format(parseFloat(timesheet.revenue_amount) || 0)} đ
+                            {VND_FORMAT.format(parseFloat(timesheet.revenue_amount) || 0)} đ
                           </div>
                         </div>
                       ) : null}
@@ -1598,7 +1631,7 @@ function Timesheets() {
                     )}
                   </div>
                   <div className="text-lg sm:text-xl font-bold text-blue-600 break-words">
-                    {new Intl.NumberFormat('vi-VN').format(expectedRevenue || 0)} đ
+                    {VND_FORMAT.format(expectedRevenue || 0)} đ
                   </div>
                 </div>
 
@@ -1608,7 +1641,7 @@ function Timesheets() {
                     <span className="font-medium">Số tiền đã rút (từ đơn):</span>
                   </div>
                   <div className="text-lg sm:text-xl font-bold text-amber-700 break-words">
-                    {new Intl.NumberFormat('vi-VN').format(totalWithdrawn || 0)} đ
+                    {VND_FORMAT.format(totalWithdrawn || 0)} đ
                   </div>
                 </div>
 
@@ -1700,9 +1733,10 @@ function Timesheets() {
               <div className="flex-shrink-0 flex flex-col gap-2 p-3 sm:p-4 border-t border-gray-200 bg-gray-50">
                 <button
                   type="submit"
-                  className="w-full bg-red-600 text-white py-2 rounded-lg hover:bg-red-700 active:bg-red-800 font-medium text-sm shadow-sm transition-all touch-manipulation"
+                  disabled={checkOutSubmitting}
+                  className="w-full bg-red-600 text-white py-2 rounded-lg hover:bg-red-700 active:bg-red-800 font-medium text-sm shadow-sm transition-all touch-manipulation disabled:opacity-60 disabled:cursor-not-allowed"
                 >
-                  Xác nhận Check-out
+                  {checkOutSubmitting ? '⏳ Đang xử lý...' : 'Xác nhận Check-out'}
                 </button>
                 <button
                   type="button"
@@ -1713,6 +1747,8 @@ function Timesheets() {
                     setCheckoutWithdrawnAmount('');
                     setCheckoutOutAt('');
                     setClosingTimesheetId(null);
+                    setClosingShift(null);
+                    setCashDrawerSummary(null);
                     setCashShortagePaidAmount('');
                     setExpectedRevenue(0);
                     setExpectedOrderCount(0);
@@ -1771,11 +1807,12 @@ function Timesheets() {
               <button
                 type="button"
                 onClick={handleCashDrawerSubmit}
-                className={`rounded-lg py-2 text-sm font-medium text-white ${
+                disabled={cashDrawerSubmitting}
+                className={`rounded-lg py-2 text-sm font-medium text-white disabled:opacity-60 disabled:cursor-not-allowed ${
                   cashDrawerAction === 'cash-in' ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-amber-600 hover:bg-amber-700'
                 }`}
               >
-                Xác nhận
+                {cashDrawerSubmitting ? '⏳ Đang xử lý...' : 'Xác nhận'}
               </button>
             </div>
           </div>
@@ -1933,9 +1970,10 @@ function Timesheets() {
             <div className="flex flex-row gap-2 px-4 sm:px-5 pb-4 pt-2 border-t border-gray-200 flex-shrink-0">
               <button
                 onClick={handleCheckIn}
-                className="flex-1 min-w-0 bg-gradient-to-r from-green-500 to-green-600 text-white py-2.5 rounded-lg hover:from-green-600 hover:to-green-700 active:from-green-700 active:to-green-800 font-medium text-sm shadow-md transition-all touch-manipulation"
+                disabled={checkInSubmitting}
+                className="flex-1 min-w-0 bg-gradient-to-r from-green-500 to-green-600 text-white py-2.5 rounded-lg hover:from-green-600 hover:to-green-700 active:from-green-700 active:to-green-800 font-medium text-sm shadow-md transition-all touch-manipulation disabled:opacity-60 disabled:cursor-not-allowed"
               >
-                ✓ Xác nhận
+                {checkInSubmitting ? '⏳ Đang xử lý...' : '✓ Xác nhận'}
               </button>
               <button
                 onClick={() => {

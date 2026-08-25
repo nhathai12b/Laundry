@@ -1,10 +1,13 @@
-import { useEffect, useState } from 'react';
+﻿import { useEffect, useRef, useState } from 'react';
+import { showToast } from '../utils/toast';
+import PageSkeleton from '../components/PageSkeleton';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import api from '../utils/api';
 import { getAuth, isAdmin, isEmployer, getEmployeeId } from '../utils/auth';
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDaysInMonth } from 'date-fns';
 import { printBill } from '../utils/printBill';
 import MoneyInput from '../components/MoneyInput';
+import { getPositionBestEffort } from '../utils/geo';
 import { bestApplicablePromotionId, promotionDiscountAmount } from '../utils/promotions';
 import {
   formatLocalDate,
@@ -107,6 +110,9 @@ function ReturnTimePicker({ value, onChange }) {
 }
 
 function Home() {
+  // GPS warm-up: bắt đầu lấy vị trí ngay khi mở prompt check-in để lúc bấm
+  // nút không phải đợi fix GPS (có thể tới 10s trong nhà)
+  const positionPromiseRef = useRef(null);
   const [orders, setOrders] = useState([]);
   const [products, setProducts] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -222,7 +228,7 @@ function Home() {
 
   const loadOrders = async () => {
     try {
-      setLoading(true);
+      // Không bật spinner khi refresh — giữ dữ liệu cũ trên màn hình (lần đầu đã có useState(true))
       const params = new URLSearchParams();
       const range = getLocalDateRangeUtc(selectedDate);
       params.append('start_at', range.start_at);
@@ -300,12 +306,18 @@ function Home() {
   };
 
   const handleStatusChange = async (orderId, newStatus) => {
+    // Optimistic: đổi trạng thái trên UI ngay lập tức. Lỗi thì chỉ hoàn tác
+    // đúng đơn này (khôi phục cả snapshot sẽ đè mất thao tác song song vừa
+    // thành công trên đơn khác)
+    const prevStatus = orders.find((o) => o.id === orderId)?.status;
+    setOrders((cur) => cur.map((o) => (o.id === orderId ? { ...o, status: newStatus } : o)));
     try {
       await api.post(`/orders/${orderId}/status`, { status: newStatus });
       loadOrders();
       loadStats();
     } catch (error) {
-      alert(error.response?.data?.error || 'Cập nhật thất bại');
+      setOrders((cur) => cur.map((o) => (o.id === orderId ? { ...o, status: prevStatus } : o)));
+      showToast(error.response?.data?.error || 'Cập nhật thất bại');
     }
   };
 
@@ -335,12 +347,13 @@ function Home() {
       loadStats();
       if (viewTab === 'debt') loadDebtOrders();
     } catch (error) {
-      alert(error.response?.data?.error || 'Thao tác thất bại');
+      showToast(error.response?.data?.error || 'Thao tác thất bại');
     }
   };
 
   const loadDebtOrders = async () => {
-    setDebtOrdersLoading(true);
+    // Chỉ hiện loading lần đầu — refresh sau giữ danh sách cũ trên màn hình
+    if (debtOrders.length === 0) setDebtOrdersLoading(true);
     try {
       const params = new URLSearchParams();
       params.append('debt_only', 'true');
@@ -372,10 +385,15 @@ function Home() {
 
   const handleConfirmDebtPaid = async () => {
     if (!orderForDebtPay) return;
+    const debtAmountNum = parseFloat(debtPayAmount);
+    if (!Number.isFinite(debtAmountNum) || debtAmountNum <= 0) {
+      showToast('Vui lòng nhập số tiền trả nợ lớn hơn 0.', 'error');
+      return;
+    }
     try {
       setDebtPaySubmitting(true);
       await api.post(`/orders/${orderForDebtPay.id}/payments`, {
-        amount: parseFloat(debtPayAmount || 0),
+        amount: debtAmountNum,
         payment_method: debtPayPaymentMethod,
         payment_type: 'debt_payment',
         note: 'Khách trả nợ',
@@ -387,7 +405,7 @@ function Home() {
       loadDebtOrders();
       loadStats();
     } catch (error) {
-      alert(error.response?.data?.error || 'Thao tác thất bại');
+      showToast(error.response?.data?.error || 'Thao tác thất bại');
     } finally {
       setDebtPaySubmitting(false);
     }
@@ -396,14 +414,20 @@ function Home() {
   const handleCheckInFromPrompt = async () => {
     const employeeIdToSend = getEmployeeId() || checkInEmployeeId || undefined;
     if (!checkInEmployees.length && !employeeIdToSend) {
-      alert('Vui lòng chọn nhân viên hoặc liên hệ admin thêm danh sách nhân viên.');
+      showToast('Vui lòng chọn nhân viên hoặc liên hệ admin thêm danh sách nhân viên.');
       return;
     }
     try {
       setCheckInLoading(true);
+      // Vị trí GPS (best-effort): backend chỉ yêu cầu khi tiệm đã đặt tọa độ —
+      // thiếu dòng này thì tiệm bật GPS là check-in từ Trang chủ bị chặn oan.
+      // Ưu tiên promise đã warm-up từ lúc mở prompt (không bắt người dùng đợi)
+      const position = await (positionPromiseRef.current || getPositionBestEffort());
+      positionPromiseRef.current = null;
       await api.post('/timesheets/check-in', {
         employee_id: employeeIdToSend,
         note: checkInNote,
+        ...position,
       });
       setShowCheckInPrompt(false);
       setCheckInEmployeeId('');
@@ -411,7 +435,7 @@ function Home() {
       await checkTodayStatus();
       setShowModal(true);
     } catch (error) {
-      alert(error.response?.data?.error || 'Check-in thất bại');
+      showToast(error.response?.data?.error || 'Check-in thất bại');
     } finally {
       setCheckInLoading(false);
     }
@@ -441,14 +465,14 @@ function Home() {
       loadOrders();
       loadStats();
     } catch (error) {
-      alert(error.response?.data?.error || 'Cập nhật thất bại');
+      showToast(error.response?.data?.error || 'Cập nhật thất bại');
       setPrinting(false);
     }
   };
 
   const handleOpenEditOrder = (order) => {
     if (!order.items || order.items.length === 0) {
-      alert('Đơn không có sản phẩm, không thể sửa.');
+      showToast('Đơn không có sản phẩm, không thể sửa.');
       return;
     }
     setOrderToEdit(order);
@@ -473,6 +497,19 @@ function Home() {
   const handleCloseEditModal = () => {
     setShowEditModal(false);
     setOrderToEdit(null);
+    // formData dùng CHUNG với modal Tạo đơn — không reset thì mở "+ Tạo đơn"
+    // sau khi sửa đơn X sẽ điền sẵn khách + sản phẩm của X, một cú submit
+    // theo phản xạ là ra đơn trùng
+    setFormData({
+      customer_name: '',
+      customer_phone: '0',
+      items: [{ product_id: '', quantity: '' }],
+      note: '',
+      promotion_id: '',
+      expected_return_at: '',
+    });
+    setApplicablePromotions([]);
+    setLoadingPromotions(false);
   };
 
   const handleSubmitEditOrder = async (e) => {
@@ -490,7 +527,7 @@ function Home() {
         })),
     };
     if (payload.items.length === 0) {
-      alert('Vui lòng giữ ít nhất một sản phẩm');
+      showToast('Vui lòng giữ ít nhất một sản phẩm');
       return;
     }
     try {
@@ -499,10 +536,10 @@ function Home() {
       handleCloseEditModal();
       loadOrders();
       loadStats();
-      alert('Đã cập nhật đơn hàng.');
+      showToast('Đã cập nhật đơn hàng.');
     } catch (error) {
       const msg = error.response?.data?.error || error.message || 'Sửa đơn thất bại';
-      alert(msg);
+      showToast(msg);
     } finally {
       setSavingEdit(false);
     }
@@ -688,7 +725,7 @@ function Home() {
       };
 
       if (orderData.items.length === 0) {
-        alert('Vui lòng thêm ít nhất một sản phẩm');
+        showToast('Vui lòng thêm ít nhất một sản phẩm');
         return;
       }
 
@@ -757,15 +794,14 @@ function Home() {
         console.error('Error reloading stats:', error);
       }
       
-      // Reload again after a short delay to ensure backend has fully processed
-      setTimeout(() => {
-        loadOrders();
-        loadStats();
-      }, 1500);
+      // KHÔNG reload lại bằng setTimeout: closure loadOrders ở đây giữ
+      // selectedDate CŨ (trước khi nhảy về hôm nay) — 1.5s sau nó âm thầm
+      // thay danh sách hôm nay bằng đơn của ngày cũ. Force-reload phía trên
+      // + useEffect theo selectedDate đã đủ.
     } catch (error) {
       console.error('Create order error:', error);
       const errorMessage = error.response?.data?.error || error.message || 'Tạo đơn thất bại';
-      alert(errorMessage);
+      showToast(errorMessage);
     }
   };
 
@@ -814,7 +850,7 @@ function Home() {
   };
 
   if (loading && orders.length === 0) {
-    return <div className="text-center py-8">Đang tải...</div>;
+    return <PageSkeleton />;
   }
 
   return (
@@ -937,6 +973,7 @@ function Home() {
           <button
             onClick={() => {
               if (isEmployer() && !todayCheckIn) {
+                positionPromiseRef.current = getPositionBestEffort(); // warm-up GPS
                 setShowCheckInPrompt(true);
               } else {
                 setShowModal(true);
@@ -1069,10 +1106,10 @@ function Home() {
                           setPrinting(true);
                           try {
                             const result = await printBill(order.id);
-                            alert(`Bill đã được in! (Phương thức: ${result.method === 'bluetooth' ? 'Bluetooth' : 'Server'})`);
+                            showToast(`Bill đã được in! (Phương thức: ${result.method === 'bluetooth' ? 'Bluetooth' : 'Server'})`);
                           } catch (printError) {
                             console.error('Print error:', printError);
-                            alert(printError.message || 'In bill thất bại. Vui lòng kiểm tra kết nối máy in.');
+                            showToast(printError.message || 'In bill thất bại. Vui lòng kiểm tra kết nối máy in.');
                           } finally {
                             setPrinting(false);
                           }
@@ -1183,10 +1220,10 @@ function Home() {
                       setPrinting(true);
                       try {
                         const result = await printBill(order.id);
-                        alert(`Bill đã được in! (Phương thức: ${result.method === 'bluetooth' ? 'Bluetooth' : 'Server'})`);
+                        showToast(`Bill đã được in! (Phương thức: ${result.method === 'bluetooth' ? 'Bluetooth' : 'Server'})`);
                       } catch (printError) {
                         console.error('Print error:', printError);
-                        alert(printError.message || 'In bill thất bại.');
+                        showToast(printError.message || 'In bill thất bại.');
                       } finally {
                         setPrinting(false);
                       }

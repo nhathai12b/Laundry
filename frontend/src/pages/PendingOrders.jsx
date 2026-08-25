@@ -1,4 +1,6 @@
-import { useEffect, useState } from 'react';
+﻿import { useEffect, useState } from 'react';
+import PageSkeleton from '../components/PageSkeleton';
+import { showToast } from '../utils/toast';
 import api from '../utils/api';
 import { format } from 'date-fns';
 import MoneyInput from '../components/MoneyInput';
@@ -20,7 +22,7 @@ function PendingOrders() {
 
   const loadPendingOrders = async () => {
     try {
-      setLoading(true);
+      // Không bật spinner khi refresh — giữ dữ liệu cũ trên màn hình (lần đầu đã có useState(true))
       const params = new URLSearchParams();
       params.append('my_orders', 'true');
       // Không filter theo status, sẽ filter ở client-side
@@ -56,7 +58,7 @@ function PendingOrders() {
 
     try {
       if (!paymentMethod) {
-        alert('Vui lòng chọn hình thức thanh toán');
+        showToast('Vui lòng chọn hình thức thanh toán');
         return;
       }
 
@@ -65,11 +67,11 @@ function PendingOrders() {
       if (customAmountPaid !== '') {
         amountPaid = parseFloat(customAmountPaid);
         if (isNaN(amountPaid) || amountPaid < 0) {
-          alert('Số tiền thanh toán phải là số không âm');
+          showToast('Số tiền thanh toán phải là số không âm');
           return;
         }
         if (amountPaid > maxAmount + 0.01) {
-          alert(`Số tiền thanh toán không được vượt quá ${maxAmount.toLocaleString('vi-VN')} đ`);
+          showToast(`Số tiền thanh toán không được vượt quá ${maxAmount.toLocaleString('vi-VN')} đ`);
           return;
         }
       }
@@ -96,17 +98,23 @@ function PendingOrders() {
       // Reload orders
       loadPendingOrders();
     } catch (error) {
-      alert(error.response?.data?.error || 'Cập nhật thất bại');
+      showToast(error.response?.data?.error || 'Cập nhật thất bại');
       setPrinting(false);
     }
   };
 
   const handleStatusChange = async (orderId, newStatus) => {
+    // Optimistic: đổi trạng thái tại chỗ (KHÔNG remove — reload vẫn giữ đơn hủy
+    // trong danh sách dạng "Đã hủy", remove rồi hiện lại sẽ gây giật). Lỗi thì
+    // chỉ hoàn tác đúng đơn này để không đè lên thao tác song song trên đơn khác
+    const prevStatus = orders.find((o) => o.id === orderId)?.status;
+    setOrders((cur) => cur.map((o) => (o.id === orderId ? { ...o, status: newStatus } : o)));
     try {
       await api.post(`/orders/${orderId}/status`, { status: newStatus });
       loadPendingOrders();
     } catch (error) {
-      alert(error.response?.data?.error || 'Cập nhật thất bại');
+      setOrders((cur) => cur.map((o) => (o.id === orderId ? { ...o, status: prevStatus } : o)));
+      showToast(error.response?.data?.error || 'Cập nhật thất bại');
     }
   };
 
@@ -122,7 +130,7 @@ function PendingOrders() {
       });
       loadPendingOrders();
     } catch (error) {
-      alert(error.response?.data?.error || 'Thao tác thất bại');
+      showToast(error.response?.data?.error || 'Thao tác thất bại');
     }
   };
 
@@ -145,14 +153,7 @@ function PendingOrders() {
   };
 
   if (loading) {
-    return (
-      <div className="flex items-center justify-center min-h-[400px]">
-        <div className="text-center">
-          <div className="inline-block animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mb-4"></div>
-          <div className="text-gray-600">Đang tải...</div>
-        </div>
-      </div>
-    );
+    return <PageSkeleton />;
   }
 
   const q = (searchQuery || '').trim().toLowerCase();

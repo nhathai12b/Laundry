@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+﻿import { useEffect, useState } from 'react';
+import PageSkeleton from '../../components/PageSkeleton';
 import api from '../../utils/api';
 import { isAdmin, isEmployer, getAuth } from '../../utils/auth';
 import PasswordRequirements from '../../components/PasswordRequirements';
@@ -57,7 +58,7 @@ function Settings() {
 
   const loadSettings = async () => {
     try {
-      setLoading(true);
+      // Không bật spinner khi refresh — giữ form hiện tại trên màn hình (lần đầu đã có useState(true))
       const params = new URLSearchParams();
       if (isAdmin() && selectedStoreId) {
         params.append('store_id', selectedStoreId);
@@ -170,7 +171,7 @@ function Settings() {
   };
 
   if (loading) {
-    return <div className="text-center py-8">Đang tải...</div>;
+    return <PageSkeleton />;
   }
 
   return (

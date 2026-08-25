@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+﻿import { useEffect, useState } from 'react';
+import PageSkeleton from '../components/PageSkeleton';
 import { Link } from 'react-router-dom';
 import api from '../utils/api';
 import { isAdmin, isRoot, isMobileScreen } from '../utils/auth';
@@ -90,7 +91,7 @@ function Dashboard() {
 
   const loadData = async () => {
     try {
-      setLoading(true);
+      // Không bật spinner khi refresh — giữ số liệu cũ trên màn hình (lần đầu đã có useState(true))
       const now = new Date();
       let startDate, endDate, period, range;
       if (periodView === 'day') {
@@ -342,19 +343,17 @@ function Dashboard() {
 
   // Regular admin/employer dashboard
   if (loading) {
-    return (
-      <div className="flex items-center justify-center min-h-[400px]">
-        <div className="text-center">
-          <div className="inline-block animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mb-4"></div>
-          <div className="text-gray-600">Đang tải dữ liệu...</div>
-        </div>
-      </div>
-    );
+    return <PageSkeleton />;
   }
 
   return (
     <div className="space-y-6">
-      <SetupChecklist />
+      {/* Checklist thiết lập ban đầu chỉ hiện trên desktop — ẩn trên mobile.
+          Dùng Tailwind breakpoint (md = 768px, khớp isMobileScreen) thay vì
+          gọi hàm lúc render để tự phản ứng khi xoay màn hình/resize */}
+      <div className="hidden md:block">
+        <SetupChecklist />
+      </div>
       <div className="mb-6 flex flex-wrap items-end gap-4 justify-between">
         <div>
           <h1 className="text-3xl font-bold text-gray-900 mb-2">Dashboard</h1>

@@ -1788,7 +1788,9 @@ router.get('/revenue-daily', authorize('admin', 'employer'), async (req, res) =>
 
     querySql += ` GROUP BY ${orderDateExpr} ORDER BY date DESC`;
 
-    const revenueData = await query(querySql, params);
+    // 4 aggregate của trang này độc lập nhau — build SQL xong hết rồi chạy
+    // song song (Promise.all) thay vì 4 round-trip nối tiếp
+    const revenuePromise = query(querySql, params);
 
     let withdrawnSql = `
       SELECT 
@@ -1811,49 +1813,34 @@ router.get('/revenue-daily', authorize('admin', 'employer'), async (req, res) =>
       withdrawnParams.push(req.user.id);
     }
     withdrawnSql += ` GROUP BY ${timesheetDateExpr}`;
-    const withdrawnData = await query(withdrawnSql, withdrawnParams);
-    const withdrawnMap = {};
-    withdrawnData.forEach((row) => {
-      const dateKey = row.date instanceof Date ? row.date.toISOString().split('T')[0] : String(row.date).split(' ')[0];
-      withdrawnMap[dateKey] = parseFloat(row.total_withdrawn) || 0;
-    });
+    const withdrawnPromise = query(withdrawnSql, withdrawnParams);
 
     // Thêm tiền vào két (cash_in) và trừ tiền khỏi két (cash_out) mà nhân viên
     // thao tác trong ca — trước đây báo cáo bỏ sót, chỉ có phần rút (withdrawn)
     const cashDrawerDateExpr = localDateSql('cdt.occurred_at', timezoneOffset);
-    const cashInMap = {};
-    const cashOutMap = {};
-    try {
-      let cashDrawerSql = `
-        SELECT
-          ${cashDrawerDateExpr} as date,
-          COALESCE(SUM(CASE WHEN cdt.type = 'cash_in' THEN cdt.amount ELSE 0 END), 0) as total_cash_in,
-          COALESCE(SUM(CASE WHEN cdt.type = 'cash_out' THEN cdt.amount ELSE 0 END), 0) as total_cash_out
-        FROM cash_drawer_transactions cdt
-        WHERE cdt.occurred_at >= ?
-          AND cdt.occurred_at < ?
-      `;
-      const cashDrawerParams = [monthRange.startAt, monthRange.endAt];
-      if (storeId) {
-        cashDrawerSql += ' AND cdt.store_id = ?';
-        cashDrawerParams.push(storeId);
-      } else if (req.user.role === 'employer') {
-        cashDrawerSql += ' AND cdt.user_id = ?';
-        cashDrawerParams.push(req.user.id);
-      } else if (req.user.role === 'admin') {
-        cashDrawerSql += ' AND cdt.store_id IN (SELECT id FROM stores WHERE admin_id = ?)';
-        cashDrawerParams.push(req.user.id);
-      }
-      cashDrawerSql += ` GROUP BY ${cashDrawerDateExpr}`;
-      const cashDrawerData = await query(cashDrawerSql, cashDrawerParams);
-      cashDrawerData.forEach((row) => {
-        const dateKey = row.date instanceof Date ? row.date.toISOString().split('T')[0] : String(row.date).split(' ')[0];
-        cashInMap[dateKey] = parseFloat(row.total_cash_in) || 0;
-        cashOutMap[dateKey] = parseFloat(row.total_cash_out) || 0;
-      });
-    } catch (error) {
-      // Bảng cash_drawer_transactions chưa tồn tại (chưa migrate) — coi như 0
+    let cashDrawerSql = `
+      SELECT
+        ${cashDrawerDateExpr} as date,
+        COALESCE(SUM(CASE WHEN cdt.type = 'cash_in' THEN cdt.amount ELSE 0 END), 0) as total_cash_in,
+        COALESCE(SUM(CASE WHEN cdt.type = 'cash_out' THEN cdt.amount ELSE 0 END), 0) as total_cash_out
+      FROM cash_drawer_transactions cdt
+      WHERE cdt.occurred_at >= ?
+        AND cdt.occurred_at < ?
+    `;
+    const cashDrawerParams = [monthRange.startAt, monthRange.endAt];
+    if (storeId) {
+      cashDrawerSql += ' AND cdt.store_id = ?';
+      cashDrawerParams.push(storeId);
+    } else if (req.user.role === 'employer') {
+      cashDrawerSql += ' AND cdt.user_id = ?';
+      cashDrawerParams.push(req.user.id);
+    } else if (req.user.role === 'admin') {
+      cashDrawerSql += ' AND cdt.store_id IN (SELECT id FROM stores WHERE admin_id = ?)';
+      cashDrawerParams.push(req.user.id);
     }
+    cashDrawerSql += ` GROUP BY ${cashDrawerDateExpr}`;
+    // .catch: bảng cash_drawer_transactions chưa tồn tại (chưa migrate) — coi như 0
+    const cashDrawerPromise = query(cashDrawerSql, cashDrawerParams).catch(() => []);
 
     let notesSql = `
       SELECT 
@@ -1876,7 +1863,27 @@ router.get('/revenue-daily', authorize('admin', 'employer'), async (req, res) =>
       notesParams.push(req.user.id);
     }
     notesSql += ` GROUP BY ${timesheetDateExpr}`;
-    const notesData = await query(notesSql, notesParams);
+    const notesPromise = query(notesSql, notesParams);
+
+    // Chạy song song cả 4 aggregate — độ trễ = query chậm nhất thay vì tổng 4
+    const [revenueData, withdrawnData, cashDrawerData, notesData] = await Promise.all([
+      revenuePromise, withdrawnPromise, cashDrawerPromise, notesPromise,
+    ]);
+
+    const withdrawnMap = {};
+    withdrawnData.forEach((row) => {
+      const dateKey = row.date instanceof Date ? row.date.toISOString().split('T')[0] : String(row.date).split(' ')[0];
+      withdrawnMap[dateKey] = parseFloat(row.total_withdrawn) || 0;
+    });
+
+    const cashInMap = {};
+    const cashOutMap = {};
+    cashDrawerData.forEach((row) => {
+      const dateKey = row.date instanceof Date ? row.date.toISOString().split('T')[0] : String(row.date).split(' ')[0];
+      cashInMap[dateKey] = parseFloat(row.total_cash_in) || 0;
+      cashOutMap[dateKey] = parseFloat(row.total_cash_out) || 0;
+    });
+
     const notesMap = {};
     notesData.forEach((row) => {
       const dateKey = row.date instanceof Date ? row.date.toISOString().split('T')[0] : String(row.date).split(' ')[0];

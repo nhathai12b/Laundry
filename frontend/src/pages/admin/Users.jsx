@@ -1,8 +1,18 @@
-import { useEffect, useState } from 'react';
+﻿import { useEffect, useState } from 'react';
+import { showToast } from '../../utils/toast';
 import api from '../../utils/api';
 import { isAdmin, isRoot } from '../../utils/auth';
 import PasswordRequirements from '../../components/PasswordRequirements';
 import MoneyInput from '../../components/MoneyInput';
+
+// Khớp validPackages của backend POST /users/:id/approve
+const APPROVE_PACKAGES = [
+  { value: '7days', label: 'Dùng thử 7 ngày' },
+  { value: '1month', label: '1 tháng' },
+  { value: '3months', label: '3 tháng' },
+  { value: '6months', label: '6 tháng' },
+  { value: '1year', label: '1 năm' },
+];
 
 function Users() {
   const [activeTab, setActiveTab] = useState('users'); // 'users', 'employees', or 'pending'
@@ -40,6 +50,7 @@ function Users() {
   // Pending admins state (for root only)
   const [pendingAdmins, setPendingAdmins] = useState([]);
   const [pendingLoading, setPendingLoading] = useState(false);
+  const [approvePackage, setApprovePackage] = useState('1month');
 
   useEffect(() => {
     if (activeTab === 'users') {
@@ -65,12 +76,13 @@ function Users() {
   // Users functions
   const loadUsers = async () => {
     try {
-      setUsersLoading(true);
+      // Chỉ hiện loading lần đầu — refresh sau giữ danh sách cũ trên màn hình
+      if (users.length === 0) setUsersLoading(true);
       const response = await api.get('/users');
       setUsers(response.data.data || []);
     } catch (error) {
       console.error('Error loading users:', error);
-      alert('Không thể tải danh sách tài khoản');
+      showToast('Không thể tải danh sách tài khoản');
     } finally {
       setUsersLoading(false);
     }
@@ -81,17 +93,17 @@ function Users() {
     try {
       if (editingUser) {
         await api.patch(`/users/${editingUser.id}`, userFormData);
-        alert('Cập nhật tài khoản thành công!');
+        showToast('Cập nhật tài khoản thành công!');
       } else {
         await api.post('/users', userFormData);
-        alert('Tạo tài khoản thành công!');
+        showToast('Tạo tài khoản thành công!');
       }
       setShowUserModal(false);
       setEditingUser(null);
       resetUserForm();
       loadUsers();
     } catch (error) {
-      alert(error.response?.data?.error || 'Có lỗi xảy ra');
+      showToast(error.response?.data?.error || 'Có lỗi xảy ra');
     }
   };
 
@@ -115,10 +127,10 @@ function Users() {
     if (!confirm('Bạn có chắc muốn xóa tài khoản này?')) return;
     try {
       await api.delete(`/users/${id}`);
-      alert('Xóa tài khoản thành công!');
+      showToast('Xóa tài khoản thành công!');
       loadUsers();
     } catch (error) {
-      alert(error.response?.data?.error || 'Xóa thất bại');
+      showToast(error.response?.data?.error || 'Xóa thất bại');
     }
   };
 
@@ -139,12 +151,13 @@ function Users() {
   // Employees functions
   const loadEmployees = async () => {
     try {
-      setEmployeesLoading(true);
+      // Chỉ hiện loading lần đầu — refresh sau giữ danh sách cũ trên màn hình
+      if (employees.length === 0) setEmployeesLoading(true);
       const response = await api.get('/employees');
       setEmployees(response.data.data || []);
     } catch (error) {
       console.error('Error loading employees:', error);
-      alert('Không thể tải danh sách nhân viên');
+      showToast('Không thể tải danh sách nhân viên');
     } finally {
       setEmployeesLoading(false);
     }
@@ -173,12 +186,12 @@ function Users() {
     e.preventDefault();
     try {
       if (!employeeFormData.name || employeeFormData.name.trim() === '') {
-        alert('Vui lòng nhập tên nhân viên');
+        showToast('Vui lòng nhập tên nhân viên');
         return;
       }
       
       if (isAdmin() && !editingEmployee && !employeeFormData.user_id) {
-        alert('Vui lòng chọn account cho nhân viên');
+        showToast('Vui lòng chọn account cho nhân viên');
         return;
       }
       
@@ -190,10 +203,10 @@ function Users() {
       
       if (editingEmployee) {
         await api.patch(`/employees/${editingEmployee.id}`, submitData);
-        alert('Cập nhật nhân viên thành công!');
+        showToast('Cập nhật nhân viên thành công!');
       } else {
         await api.post('/employees', submitData);
-        alert('Thêm nhân viên thành công!');
+        showToast('Thêm nhân viên thành công!');
       }
       setShowEmployeeModal(false);
       setEditingEmployee(null);
@@ -201,7 +214,7 @@ function Users() {
       loadEmployees();
     } catch (error) {
       console.error('Submit error:', error);
-      alert(error.response?.data?.error || error.message || 'Lưu thất bại');
+      showToast(error.response?.data?.error || error.message || 'Lưu thất bại');
     }
   };
 
@@ -219,38 +232,41 @@ function Users() {
     if (!confirm('Bạn có chắc muốn xóa nhân viên này?')) return;
     try {
       await api.delete(`/employees/${id}`);
-      alert('Xóa nhân viên thành công!');
+      showToast('Xóa nhân viên thành công!');
       loadEmployees();
     } catch (error) {
-      alert(error.response?.data?.error || 'Xóa thất bại');
+      showToast(error.response?.data?.error || 'Xóa thất bại');
     }
   };
 
   // Pending admins functions (for root only)
   const loadPendingAdmins = async () => {
     try {
-      setPendingLoading(true);
+      // Chỉ hiện loading lần đầu — refresh sau giữ danh sách cũ trên màn hình
+      if (pendingAdmins.length === 0) setPendingLoading(true);
       const response = await api.get('/users');
       const allUsers = response.data.data || [];
       const pending = allUsers.filter(u => u.role === 'admin' && u.status === 'pending');
       setPendingAdmins(pending);
     } catch (error) {
       console.error('Error loading pending admins:', error);
-      alert('Không thể tải danh sách admin chờ phê duyệt');
+      showToast('Không thể tải danh sách admin chờ phê duyệt');
     } finally {
       setPendingLoading(false);
     }
   };
 
   const handleApproveAdmin = async (id) => {
-    if (!confirm('Bạn có chắc muốn phê duyệt admin này?')) return;
+    const packageLabel = APPROVE_PACKAGES.find((p) => p.value === approvePackage)?.label || approvePackage;
+    if (!confirm(`Phê duyệt admin này với gói "${packageLabel}"?`)) return;
     try {
-      await api.post(`/users/${id}/approve`);
-      alert('Phê duyệt admin thành công!');
+      // Backend bắt buộc có package — gọi không kèm body sẽ luôn 400
+      await api.post(`/users/${id}/approve`, { package: approvePackage });
+      showToast('Phê duyệt admin thành công!');
       loadPendingAdmins();
       loadUsers();
     } catch (error) {
-      alert(error.response?.data?.error || 'Phê duyệt thất bại');
+      showToast(error.response?.data?.error || 'Phê duyệt thất bại');
     }
   };
 
@@ -258,11 +274,11 @@ function Users() {
     if (!confirm('Bạn có chắc muốn từ chối admin này?')) return;
     try {
       await api.post(`/users/${id}/reject`);
-      alert('Đã từ chối admin');
+      showToast('Đã từ chối admin');
       loadPendingAdmins();
       loadUsers();
     } catch (error) {
-      alert(error.response?.data?.error || 'Từ chối thất bại');
+      showToast(error.response?.data?.error || 'Từ chối thất bại');
     }
   };
 
@@ -614,6 +630,18 @@ function Users() {
       {/* Pending Admins Tab (Root only) */}
       {activeTab === 'pending' && isRoot() && (
         <div className="bg-white rounded-lg shadow overflow-hidden">
+          <div className="flex items-center gap-2 px-4 py-3 border-b bg-gray-50">
+            <label className="text-sm font-medium text-gray-700">Gói khi phê duyệt:</label>
+            <select
+              value={approvePackage}
+              onChange={(e) => setApprovePackage(e.target.value)}
+              className="px-3 py-1.5 border rounded-lg text-sm"
+            >
+              {APPROVE_PACKAGES.map((p) => (
+                <option key={p.value} value={p.value}>{p.label}</option>
+              ))}
+            </select>
+          </div>
           {pendingLoading ? (
             <div className="text-center py-8">Đang tải...</div>
           ) : (

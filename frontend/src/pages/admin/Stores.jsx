@@ -1,4 +1,6 @@
-import { useEffect, useState } from 'react';
+﻿import { useEffect, useState } from 'react';
+import PageSkeleton from '../../components/PageSkeleton';
+import { showToast } from '../../utils/toast';
 import api from '../../utils/api';
 import { isAdmin } from '../../utils/auth';
 import PasswordRequirements from '../../components/PasswordRequirements';
@@ -6,6 +8,7 @@ import SalaryAdjustModal from '../../components/SalaryAdjustModal';
 import ZaloConnectModal from '../../components/ZaloConnectModal';
 import MoneyInput from '../../components/MoneyInput';
 import { getPasswordError } from '../../utils/passwordValidation';
+import { getCurrentPosition } from '../../utils/geo';
 
 function Stores() {
   const [activeTab, setActiveTab] = useState('stores'); // 'stores', 'employees'
@@ -22,6 +25,8 @@ function Stores() {
     status: 'active',
     account_phone: '',
     account_password: '',
+    latitude: '',
+    longitude: '',
   });
 
   // Users state
@@ -94,14 +99,15 @@ function Stores() {
   // Users functions
   const loadUsers = async () => {
     try {
-      setUsersLoading(true);
+      // Chỉ hiện loading lần đầu — refresh sau giữ danh sách cũ trên màn hình
+      if (users.length === 0) setUsersLoading(true);
       const response = await api.get('/users');
       const usersData = response.data.data || [];
       setUsers(usersData);
       return usersData; // Return để có thể await
     } catch (error) {
       console.error('Error loading users:', error);
-      alert('Không thể tải danh sách tài khoản');
+      showToast('Không thể tải danh sách tài khoản');
       return [];
     } finally {
       setUsersLoading(false);
@@ -124,10 +130,10 @@ function Stores() {
           delete submitData.password;
         }
         await api.patch(`/users/${editingUser.id}`, submitData);
-        alert('Cập nhật tài khoản thành công!');
+        showToast('Cập nhật tài khoản thành công!');
       } else {
         await api.post('/users', submitData);
-        alert('Tạo tài khoản thành công!');
+        showToast('Tạo tài khoản thành công!');
       }
       setShowUserModal(false);
       setEditingUser(null);
@@ -135,7 +141,7 @@ function Stores() {
       await loadUsers();
       await loadStores();
     } catch (error) {
-      alert(error.response?.data?.error || 'Có lỗi xảy ra');
+      showToast(error.response?.data?.error || 'Có lỗi xảy ra');
     }
   };
 
@@ -167,12 +173,13 @@ function Stores() {
   // Employees functions
   const loadEmployees = async () => {
     try {
-      setEmployeesLoading(true);
+      // Chỉ hiện loading lần đầu — refresh sau giữ danh sách cũ trên màn hình
+      if (employees.length === 0) setEmployeesLoading(true);
       const response = await api.get('/employees');
       setEmployees(response.data.data || []);
     } catch (error) {
       console.error('Error loading employees:', error);
-      alert('Không thể tải danh sách nhân viên');
+      showToast('Không thể tải danh sách nhân viên');
     } finally {
       setEmployeesLoading(false);
     }
@@ -182,23 +189,23 @@ function Stores() {
     e.preventDefault();
     try {
       if (!employeeFormData.name || employeeFormData.name.trim() === '') {
-        alert('Vui lòng nhập tên nhân viên');
+        showToast('Vui lòng nhập tên nhân viên');
         return;
       }
 
       const passwordError = getPasswordError(employeeFormData.password);
       if (passwordError) {
-        alert(`⚠️ Mật khẩu chưa đủ điều kiện: ${passwordError}`);
+        showToast(`⚠️ Mật khẩu chưa đủ điều kiện: ${passwordError}`);
         return;
       }
       
       if (isAdmin() && !editingEmployee && !employeeFormData.user_id) {
-        alert('Vui lòng chọn account cho nhân viên');
+        showToast('Vui lòng chọn account cho nhân viên');
         return;
       }
       
       if (employeeFormData.password && !employeeFormData.phone?.trim()) {
-        alert('Nhân viên cần có SĐT để đăng nhập riêng. Vui lòng nhập SĐT.');
+        showToast('Nhân viên cần có SĐT để đăng nhập riêng. Vui lòng nhập SĐT.');
         return;
       }
 
@@ -214,7 +221,7 @@ function Stores() {
 
       if (editingEmployee) {
         await api.patch(`/employees/${editingEmployee.id}`, submitData);
-        alert('Cập nhật nhân viên thành công!');
+        showToast('Cập nhật nhân viên thành công!');
       } else {
         await api.post('/employees', submitData);
       }
@@ -224,7 +231,7 @@ function Stores() {
       loadEmployees();
     } catch (error) {
       console.error('Submit error:', error);
-      alert(error.response?.data?.error || error.message || 'Lưu thất bại');
+      showToast(error.response?.data?.error || error.message || 'Lưu thất bại');
     }
   };
 
@@ -244,10 +251,12 @@ function Stores() {
     if (!confirm('Bạn có chắc muốn xóa nhân viên này? (Nhân viên đã có chấm công/thưởng phạt sẽ được chuyển sang Ngừng hoạt động để giữ lịch sử lương)')) return;
     try {
       const res = await api.delete(`/employees/${id}`);
-      alert(res.data?.message || 'Xóa nhân viên thành công!');
+      // type 'success' tường minh: message "chuyển sang Ngừng hoạt động... đã bị
+      // vô hiệu" chứa từ khóa lỗi ('đã bị') nên auto-detect sẽ tô đỏ nhầm
+      showToast(res.data?.message || 'Xóa nhân viên thành công!', 'success');
       loadEmployees();
     } catch (error) {
-      alert(error.response?.data?.error || 'Xóa thất bại');
+      showToast(error.response?.data?.error || 'Xóa thất bại');
     }
   };
 
@@ -255,18 +264,18 @@ function Stores() {
     if (!confirm(`Bạn có chắc muốn xóa tài khoản "${userName}" của cửa hàng "${storeName}"?`)) return;
     try {
       await api.delete(`/users/${userId}`);
-      alert('Xóa tài khoản thành công!');
+      showToast('Xóa tài khoản thành công!');
       await loadUsers();
       await loadStores();
     } catch (error) {
       console.error('Error deleting user:', error);
-      alert(error.response?.data?.error || 'Xóa tài khoản thất bại');
+      showToast(error.response?.data?.error || 'Xóa tài khoản thất bại');
     }
   };
 
   const loadStores = async () => {
     try {
-      setLoading(true);
+      // Không bật spinner khi refresh — giữ dữ liệu cũ trên màn hình (lần đầu đã có useState(true))
       const response = await api.get('/stores');
       const storesData = response.data.data || [];
       setStores(storesData);
@@ -274,7 +283,7 @@ function Stores() {
       return storesData;
     } catch (error) {
       console.error('Error loading stores:', error);
-      alert('Không thể tải danh sách cửa hàng');
+      showToast('Không thể tải danh sách cửa hàng');
       return [];
     } finally {
       setLoading(false);
@@ -285,7 +294,7 @@ function Stores() {
     e.preventDefault();
     
     if (!formData.name.trim()) {
-      alert('Vui lòng nhập tên cửa hàng');
+      showToast('Vui lòng nhập tên cửa hàng');
       return;
     }
 
@@ -300,14 +309,16 @@ function Stores() {
           address: formData.address,
           phone: formData.phone,
           status: formData.status,
+          latitude: formData.latitude === '' ? null : formData.latitude,
+          longitude: formData.longitude === '' ? null : formData.longitude,
         };
         await api.patch(`/stores/${editingStore.id}`, storeData);
-        alert('Cập nhật cửa hàng thành công!');
+        showToast('Cập nhật cửa hàng thành công!');
       } else {
         // When creating, always create a new employer account.
         // The store phone doubles as the account login phone.
         if (!formData.phone.trim() || !formData.account_password.trim()) {
-          alert('Vui lòng nhập đầy đủ thông tin (Tên cửa hàng, SĐT, Mật khẩu)');
+          showToast('Vui lòng nhập đầy đủ thông tin (Tên cửa hàng, SĐT, Mật khẩu)');
           return;
         }
         const submitData = {
@@ -320,7 +331,7 @@ function Stores() {
 
         const response = await api.post('/stores', submitData);
         // Debug log removed for security
-        alert('Tạo cửa hàng thành công!');
+        showToast('Tạo cửa hàng thành công!');
       }
       setShowModal(false);
       setEditingStore(null);
@@ -335,7 +346,7 @@ function Stores() {
       }, 500);
     } catch (error) {
       console.error('Error saving store:', error);
-      alert(error.response?.data?.error || 'Có lỗi xảy ra khi lưu cửa hàng');
+      showToast(error.response?.data?.error || 'Có lỗi xảy ra khi lưu cửa hàng');
     }
   };
 
@@ -348,6 +359,8 @@ function Stores() {
       status: store.status || 'active',
       account_phone: '',
       account_password: '',
+      latitude: store.latitude ?? '',
+      longitude: store.longitude ?? '',
     });
     setShowModal(true);
   };
@@ -361,11 +374,11 @@ function Stores() {
       await api.patch(`/stores/${store.id}`, {
         status: store.status === 'active' ? 'inactive' : 'active',
       });
-      alert('Cập nhật trạng thái cửa hàng thành công!');
+      showToast('Cập nhật trạng thái cửa hàng thành công!');
       loadStores();
     } catch (error) {
       console.error('Error updating store status:', error);
-      alert(error.response?.data?.error || 'Có lỗi xảy ra');
+      showToast(error.response?.data?.error || 'Có lỗi xảy ra');
     }
   };
 
@@ -382,7 +395,7 @@ function Stores() {
   };
 
   if (loading) {
-    return <div className="text-center py-8">Đang tải...</div>;
+    return <PageSkeleton />;
   }
 
   return (
@@ -736,6 +749,51 @@ function Stores() {
                   <p className="text-xs text-gray-500 mt-1">Số điện thoại này cũng sẽ được dùng cho tài khoản</p>
                 )}
               </div>
+              {editingStore && (
+                <div className="rounded-lg border border-blue-200 bg-blue-50 p-3">
+                  <div className="text-sm font-semibold text-blue-900 mb-1">📍 Vị trí tiệm (kiểm soát chấm công GPS)</div>
+                  <p className="text-xs text-blue-800 mb-2">
+                    Đặt tọa độ để nhân viên chỉ check-in/check-out được trong phạm vi 150m quanh tiệm. Đứng tại tiệm và bấm nút bên dưới. Xóa trống 2 ô = tắt kiểm soát.
+                    <strong> Lưu ý: chỉ bật nếu nhân viên chấm công bằng điện thoại</strong> — máy tính bàn không có GPS sẽ bị chặn.
+                  </p>
+                  <div className="grid grid-cols-2 gap-2 mb-2">
+                    <input
+                      type="text"
+                      value={formData.latitude ?? ''}
+                      onChange={(e) => setFormData({ ...formData, latitude: e.target.value })}
+                      className="px-3 py-2 border rounded-lg text-sm"
+                      placeholder="Vĩ độ (VD: 10.7769)"
+                    />
+                    <input
+                      type="text"
+                      value={formData.longitude ?? ''}
+                      onChange={(e) => setFormData({ ...formData, longitude: e.target.value })}
+                      className="px-3 py-2 border rounded-lg text-sm"
+                      placeholder="Kinh độ (VD: 106.7009)"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        const pos = await getCurrentPosition();
+                        setFormData((prev) => ({
+                          ...prev,
+                          latitude: String(pos.latitude.toFixed(7)),
+                          longitude: String(pos.longitude.toFixed(7)),
+                        }));
+                        // type 'success' tường minh — chữ "sai số" khớp từ khóa lỗi của auto-detect
+                        showToast(`Đã lấy vị trí hiện tại (sai số ~${Math.round(pos.accuracy)}m). Bấm Cập nhật để lưu.`, 'success');
+                      } catch (error) {
+                        showToast(error.message, 'error');
+                      }
+                    }}
+                    className="w-full px-3 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-semibold"
+                  >
+                    📍 Lấy vị trí hiện tại làm vị trí tiệm
+                  </button>
+                </div>
+              )}
               {editingStore && (
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">

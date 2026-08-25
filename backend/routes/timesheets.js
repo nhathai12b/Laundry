@@ -3,6 +3,7 @@ import { query, queryOne, execute, transaction } from '../database/db.js';
 import { calculateHours, formatDateTimeUTC, parseTimesheetDateTimeMs } from '../utils/helpers.js';
 import { authenticate } from '../middleware/auth.js';
 import { authorize } from '../middleware/auth.js';
+import { getClientIp } from '../middleware/rateLimiter.js';
 import { OVERTIME_MULTIPLIER } from '../utils/constants.js';
 import { ensureOpeningFloatTx, getDrawerSummaryTx, recordClosingCountTx } from '../services/cashDrawerService.js';
 import * as XLSX from 'xlsx';
@@ -159,12 +160,17 @@ async function hasOlderOpenShiftTx(db, timesheet, checkInSql) {
 }
 
 async function getRevenueWindowStartTx(db, timesheet, checkInSql, checkOutSql) {
+  // Tie-break theo id phải GIỐNG hasOlderOpenShiftTx: chỉ ca "già hơn" (từng là
+  // ca chính) mới được trim window. Nếu thiếu, ca cùng giây check-in nhưng id
+  // lớn hơn (đóng trước, revenue 0 vì là ca phụ) vẫn trim window của ca chính
+  // → doanh thu khoảng đầu ca không thuộc về ai
   const row = await db.queryOne(`
     SELECT MAX(check_out) AS last_claimed_until
     FROM timesheets
     WHERE store_id = ? AND id != ? AND check_out IS NOT NULL
-      AND check_in <= ? AND check_out > ? AND check_out <= ?
-  `, [timesheet.store_id, timesheet.id, checkInSql, checkInSql, checkOutSql]);
+      AND (check_in < ? OR (check_in = ? AND id < ?))
+      AND check_out > ? AND check_out <= ?
+  `, [timesheet.store_id, timesheet.id, checkInSql, checkInSql, timesheet.id, checkInSql, checkOutSql]);
   if (!row?.last_claimed_until) return checkInSql;
   const ms = parseTimesheetDateTimeMsCompat(row.last_claimed_until);
   // +1s: the previous shift claimed payments up to AND INCLUDING its check_out
@@ -292,12 +298,169 @@ router.get('/store-employees', async (req, res) => {
   }
 });
 
+// Chuẩn hóa IP công khai để so sánh (bỏ tiền tố IPv4-mapped "::ffff:")
+function normalizeIp(ip) {
+  if (!ip) return '';
+  let s = String(ip).trim();
+  if (s.startsWith('::ffff:')) s = s.slice(7);
+  return s;
+}
+
+// ===== Kiểm soát chấm công bằng GPS =====
+// Nhân viên chỉ check-in/check-out được trong bán kính quanh tiệm.
+const GEO_RADIUS_M = 150;
+
+// Khoảng cách haversine giữa 2 tọa độ (mét)
+function distanceMeters(lat1, lng1, lat2, lng2) {
+  const toRad = (d) => (d * Math.PI) / 180;
+  const R = 6371000;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a = Math.sin(dLat / 2) ** 2
+    + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+// Trả về message lỗi nếu vị trí KHÔNG hợp lệ, null nếu qua.
+// Tiệm chưa đặt tọa độ → bỏ qua (admin bật tính năng bằng cách lưu vị trí
+// tiệm trong Cửa hàng & Nhân sự); client không gửi được GPS chỉ bị chặn
+// khi tiệm CÓ đặt tọa độ.
+async function verifyAtStore(storeId, body) {
+  if (!storeId) return null;
+  const store = await queryOne('SELECT latitude, longitude FROM stores WHERE id = ?', [storeId]);
+  if (!store || store.latitude === null || store.longitude === null) return null;
+
+  const lat = Number.parseFloat(body?.latitude);
+  const lng = Number.parseFloat(body?.longitude);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return 'Cần bật định vị (GPS) để chấm công tại tiệm. Vui lòng cho phép trình duyệt truy cập vị trí rồi thử lại.';
+  }
+
+  // Trừ hao sai số GPS thiết bị báo về (tối đa 100m) để không chặn oan trong nhà
+  const accuracy = Math.min(Math.max(Number.parseFloat(body?.accuracy) || 0, 0), 100);
+  const distance = distanceMeters(lat, lng, Number(store.latitude), Number(store.longitude));
+  if (distance - accuracy > GEO_RADIUS_M) {
+    return `Bạn đang ở cách tiệm ~${Math.round(distance)}m — chỉ có thể chấm công trong phạm vi ${GEO_RADIUS_M}m quanh tiệm.`;
+  }
+  return null;
+}
+
+// Tự đóng các ca mở đã qua nửa đêm (không check-out trong ngày) → tính 0h công.
+// Với mỗi ca (theo thứ tự cũ → mới):
+// 1) CLAIM trước bằng UPDATE có điều kiện (chống race: 2 request đồng thời
+//    chỉ 1 bên thắng — không bao giờ ghi trùng 2 dòng chốt két cho 1 ca)
+// 2) Tính doanh thu ca TRƯỚC khi đóng (dedupe: ca cũ nhất nhận doanh thu,
+//    ca phụ = 0) — nếu bỏ qua, tiền khách trả trong ca bị "mồ côi" khỏi báo cáo
+// 3) Chốt sổ quỹ két (actual = expected, chênh lệch 0). Lỗi két thật sự →
+//    rollback để lần gọi sau thử lại; riêng deploy cũ chưa có bảng két thì bỏ qua
+async function autoCloseStaleShifts(userId = null) {
+  // Cutoff = 00:00 hôm nay theo giờ VN, đổi về UTC — tính bằng JS để query
+  // sargable (check_in < ?) dùng được index, không quét full bảng mỗi giờ
+  const todayVN = new Date(Date.now() + 7 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const cutoffUtc = formatDateTimeUTC(new Date(Date.parse(`${todayVN}T00:00:00Z`) - 7 * 60 * 60 * 1000));
+
+  const params = [cutoffUtc];
+  let staleSql = `
+    SELECT id, user_id, store_id, employee_id, check_in
+    FROM timesheets
+    WHERE check_out IS NULL AND check_in < ?
+  `;
+  if (userId) {
+    staleSql += ' AND user_id = ?';
+    params.push(userId);
+  }
+  staleSql += ' ORDER BY check_in ASC';
+
+  const staleShifts = await query(staleSql, params);
+  if (staleShifts.length === 0) return;
+
+  const nowSql = formatDateTimeUTC(new Date());
+
+  // Tính doanh thu cho TẤT CẢ ca trước khi đóng bất kỳ ca nào — lúc này mọi
+  // ca đều còn mở nên dedupe hoạt động đúng (cũ nhất = ca chính, còn lại = 0)
+  const revenueByShift = new Map();
+  for (const shift of staleShifts) {
+    try {
+      const normalizedCheckIn = formatDateTimeUTC(new Date(parseTimesheetDateTimeMsCompat(shift.check_in)));
+      const summary = await getShiftPaymentSummaryDeduped(
+        { queryOne }, shift, shift.user_id, normalizedCheckIn, nowSql
+      );
+      revenueByShift.set(shift.id, summary.revenue_amount || 0);
+    } catch (error) {
+      // KHÔNG stamp 0 khi tính doanh thu lỗi (vd pool quá tải): đóng ca với
+      // revenue=0 là mất tiền vĩnh viễn (window ca sau bắt đầu sau check_out
+      // này nên không ai claim lại được). Bỏ qua ca này, sweep sau thử lại.
+      console.warn(`Auto-close: skip shift ${shift.id} (revenue calc failed): ${error.message}`);
+    }
+  }
+
+  for (const shift of staleShifts) {
+    if (!revenueByShift.has(shift.id)) continue; // tính doanh thu lỗi — chờ sweep sau
+    try {
+      await transaction(async (db) => {
+        // CLAIM: chỉ request thắng cuộc mới đi tiếp (auto_closed đánh dấu claim)
+        const claim = await db.execute(`
+          UPDATE timesheets SET auto_closed = 1
+          WHERE id = ? AND check_out IS NULL AND auto_closed = 0
+        `, [shift.id]);
+        if (!claim.affectedRows) return; // request khác đã xử lý ca này
+
+        // Chốt sổ quỹ két về mặt sổ sách (actual = expected kẹp ≥ 0)
+        try {
+          await recordClosingCountTx(db, shift, {
+            actual_cash_amount: null,
+            cash_shortage_paid_amount: 0,
+            note: 'Tự đóng ca quá hạn — chưa ai đếm két thực tế',
+          }, { id: shift.user_id });
+        } catch (drawerError) {
+          // Deploy cũ chưa có bảng két → không có ledger để chốt, đi tiếp.
+          // Lỗi khác → ném ra cho transaction rollback, lần gọi sau thử lại
+          if (drawerError.code !== 'ER_NO_SUCH_TABLE') throw drawerError;
+        }
+
+        const revenue = revenueByShift.get(shift.id) || 0;
+        // check_out = NOW (không phải check_in): cửa sổ doanh thu của ca sau
+        // sẽ bắt đầu SAU thời điểm này (getRevenueWindowStartTx cắt theo
+        // check_out) — đặt check_out = check_in từng gây đếm trùng tiền với
+        // ca đang mở. Giờ công vẫn = 0 theo luật nửa đêm.
+        // actual/cash_difference = NULL: không ai đếm két thật — ghi "cân
+        // bằng 0" sẽ che mất thiếu hụt nếu nhân viên cầm tiền bỏ đi.
+        await db.execute(`
+          UPDATE timesheets
+          SET check_out = ?,
+              regular_hours = 0,
+              overtime_hours = 0,
+              revenue_amount = ?,
+              expected_revenue = ?,
+              actual_cash_amount = NULL,
+              cash_difference = NULL,
+              note = CONCAT(COALESCE(note, ''), ' [Tự đóng: không check-out tại tiệm trước 12h đêm — 0h công, két chưa đếm]')
+          WHERE id = ?
+        `, [nowSql, revenue, revenue, shift.id]);
+      });
+    } catch (error) {
+      console.warn(`Auto-close timesheet ${shift.id} failed (sẽ thử lại):`, error.message);
+    }
+  }
+}
+
+// Quét ĐỊNH KỲ toàn hệ thống: ca của nhân viên không bao giờ mở app lại
+// (nghỉ việc, mất máy) nếu chỉ dọn theo-request sẽ treo mở vĩnh viễn và
+// chặn cả cửa hàng (ca chính giả, EMPLOYEE_REQUIRED, doanh thu ca phụ = 0)
+const AUTO_CLOSE_SWEEP_MS = 60 * 60 * 1000; // mỗi giờ
+setTimeout(() => {
+  autoCloseStaleShifts().catch((e) => console.warn('Stale shift sweep failed:', e.message));
+  setInterval(() => {
+    autoCloseStaleShifts().catch((e) => console.warn('Stale shift sweep failed:', e.message));
+  }, AUTO_CLOSE_SWEEP_MS).unref?.();
+}, 15 * 1000).unref?.();
+
 router.get('/open-shifts', async (req, res) => {
   try {
     if (req.user.role === 'admin') {
       return res.json({ data: [] });
     }
-    const shifts = await query(`
+    let shifts = await query(`
       SELECT t.*,
         COALESCE(e.name, u.name) as employee_name
       FROM timesheets t
@@ -306,6 +469,28 @@ router.get('/open-shifts', async (req, res) => {
       WHERE t.user_id = ? AND t.check_out IS NULL
       ORDER BY t.check_in ASC
     `, [req.user.id]);
+
+    // Phát hiện ca quá hạn ngay trên kết quả vừa lấy (so ngày VN = UTC+7) —
+    // tránh chạy thêm 1 query dọn dẹp trên MỌI lần gọi endpoint nóng này
+    const todayVN = new Date(Date.now() + 7 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    const hasStale = (shifts || []).some((s) => {
+      const ms = parseTimesheetDateTimeMsCompat(s.check_in);
+      if (Number.isNaN(ms)) return false;
+      return new Date(ms + 7 * 60 * 60 * 1000).toISOString().slice(0, 10) < todayVN;
+    });
+    if (hasStale) {
+      await autoCloseStaleShifts(req.user.id);
+      shifts = await query(`
+        SELECT t.*,
+          COALESCE(e.name, u.name) as employee_name
+        FROM timesheets t
+        JOIN users u ON t.user_id = u.id
+        LEFT JOIN employees e ON t.employee_id = e.id
+        WHERE t.user_id = ? AND t.check_out IS NULL
+        ORDER BY t.check_in ASC
+      `, [req.user.id]);
+    }
+
     res.json({ data: serializeTimesheets(shifts || []) });
   } catch (error) {
     console.error('Get open shifts error:', error);
@@ -352,6 +537,18 @@ router.post('/check-in', async (req, res) => {
     }
     
     const storeId = user.store_id; // This is stores.id, not users.id
+
+    // Dọn ca cũ quá hạn (qua nửa đêm chưa check-out) → 0h, trước khi mở ca mới
+    await autoCloseStaleShifts(req.user.id);
+
+    // GPS: phải đứng trong bán kính tiệm mới check-in được (nếu tiệm đã đặt tọa độ)
+    const checkInGeoError = await verifyAtStore(storeId, req.body);
+    if (checkInGeoError) {
+      return res.status(403).json({ error: checkInGeoError, code: 'GEO_MISMATCH' });
+    }
+
+    // IP thiết bị lúc check-in — lưu để đối soát/audit
+    const checkInIp = normalizeIp(getClientIp(req));
 
     // Tài khoản cá nhân (employee_login): LUÔN dùng employee_id trong token —
     // không cho check-in hộ người khác. Tài khoản cửa hàng dùng chung: body
@@ -404,7 +601,9 @@ router.post('/check-in', async (req, res) => {
       `, [storeId]);
     }
     if (openSameSlot) {
-      const d = String(openSameSlot.check_in || '').slice(0, 10);
+      const d = openSameSlot.check_in instanceof Date
+        ? openSameSlot.check_in.toISOString().slice(0, 10)
+        : String(openSameSlot.check_in || '').slice(0, 10);
       return res.status(400).json({
         error: employeeId
           ? `Nhân viên này còn ca chưa check-out (check-in ${d}). Vui lòng check-out ca đó trước, hoặc chọn nhân viên khác.`
@@ -414,11 +613,13 @@ router.post('/check-in', async (req, res) => {
       });
     }
 
-    const timesheet = await transaction(async (db) => {
+    let timesheet;
+    try {
+      timesheet = await transaction(async (db) => {
       const result = await db.execute(`
-        INSERT INTO timesheets (user_id, store_id, employee_id, check_in, note)
-        VALUES (?, ?, ?, ?, ?)
-      `, [req.user.id, storeId, employeeId, checkIn, note || null]);
+        INSERT INTO timesheets (user_id, store_id, employee_id, check_in, check_in_ip, note)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `, [req.user.id, storeId, employeeId, checkIn, checkInIp || null, note || null]);
 
       const created = await db.queryOne(`
         SELECT t.*, 
@@ -440,7 +641,19 @@ router.post('/check-in', async (req, res) => {
         LEFT JOIN employees e ON t.employee_id = e.id
         WHERE t.id = ?
       `, [result.insertId]);
-    });
+      });
+    } catch (error) {
+      // Unique index uq_timesheets_open_slot: 2 request check-in đồng thời
+      // (2 thiết bị) cho cùng nhân viên — pre-check phía trên đều pass, request
+      // chậm hơn fail ở INSERT thay vì tạo ca trùng (double giờ công)
+      if (error?.code === 'ER_DUP_ENTRY') {
+        return res.status(400).json({
+          error: 'Nhân viên này vừa được check-in — không thể mở 2 ca cùng lúc.',
+          code: 'OPEN_SHIFT_EXISTS',
+        });
+      }
+      throw error;
+    }
 
     res.status(201).json({ data: serializeTimesheet(timesheet) });
   } catch (error) {
@@ -540,6 +753,10 @@ router.post('/check-out', async (req, res) => {
       ? parseInt(timesheet_id, 10)
       : null;
 
+    // Áp luật nửa đêm NGAY TẠI check-out: ca quá hạn phải bị đóng 0h trước,
+    // không thể gọi thẳng API này hôm sau để lách (backdate check_out_at)
+    await autoCloseStaleShifts(userId);
+
     // Tài khoản cá nhân chỉ được đóng ca mang employee_id của chính mình
     const ownShiftFilter = req.user.employee_login ? ' AND employee_id = ?' : '';
 
@@ -551,9 +768,14 @@ router.post('/check-out', async (req, res) => {
         SELECT * FROM timesheets
         WHERE id = ? AND user_id = ? AND check_out IS NULL${ownShiftFilter}
       `, params);
-      if (!timesheet && req.user.employee_login) {
-        return res.status(403).json({
-          error: 'Không tìm thấy ca đang mở của bạn với mã này — bạn chỉ có thể check-out ca của chính mình.',
+      if (!timesheet) {
+        // KHÔNG fallback sang ca mở cũ nhất khi client đã chỉ định timesheet_id:
+        // double-submit sau khi ca B vừa đóng sẽ rơi xuống fallback và đóng nhầm
+        // ca A của đồng nghiệp (ghi đè số két, giờ công của người khác)
+        return res.status(req.user.employee_login ? 403 : 409).json({
+          error: req.user.employee_login
+            ? 'Không tìm thấy ca đang mở của bạn với mã này — bạn chỉ có thể check-out ca của chính mình.'
+            : 'Ca này đã được check-out hoặc không tồn tại. Vui lòng tải lại danh sách ca.',
         });
       }
     }
@@ -572,6 +794,13 @@ router.post('/check-out', async (req, res) => {
       return res.status(400).json({
         error: 'Không tìm thấy ca làm việc đang mở. Vui lòng check-in hoặc liên hệ quản trị viên.',
       });
+    }
+
+    // GPS: phải đứng trong bán kính tiệm mới check-out được — về nhà không
+    // thể check-out; qua nửa đêm ca tự đóng 0h công
+    const checkOutGeoError = await verifyAtStore(timesheet.store_id, req.body);
+    if (checkOutGeoError) {
+      return res.status(403).json({ error: checkOutGeoError, code: 'GEO_MISMATCH' });
     }
 
     const normOut = normalizeCheckoutAtTime(check_out_at);
@@ -621,12 +850,16 @@ router.post('/check-out', async (req, res) => {
         normalizedCheckIn,
         checkOut
       );
-      const drawerSummary = await recordClosingCountTx(db, timesheet, {
+      await recordClosingCountTx(db, timesheet, {
         actual_cash_amount: actualCashValue,
         cash_shortage_paid_amount: shortagePaidValue,
         note,
       }, req.user);
 
+      // AND check_out IS NULL: chống race với auto-close (hoặc check-out
+      // trùng từ tab khác) — nếu ca đã bị đóng giữa chừng, affectedRows = 0
+      // → throw → transaction rollback kéo theo cả closing_count vừa ghi,
+      // không bao giờ có 2 lần chốt két cho 1 ca
       const updateResult = await db.execute(`
         UPDATE timesheets
         SET check_out = ?,
@@ -636,15 +869,15 @@ router.post('/check-out', async (req, res) => {
             expected_revenue = ?,
             withdrawn_amount = ?,
             note = COALESCE(?, note)
-        WHERE id = ?
+        WHERE id = ? AND check_out IS NULL
       `, [
-        checkOut, 
-        regular, 
-        overtime, 
-        paymentSummary.revenue_amount, 
-        paymentSummary.revenue_amount, 
-        withdrawnValue, 
-        note || null, 
+        checkOut,
+        regular,
+        overtime,
+        paymentSummary.revenue_amount,
+        paymentSummary.revenue_amount,
+        withdrawnValue,
+        note || null,
         timesheet.id
       ]);
 
@@ -666,7 +899,7 @@ router.post('/check-out', async (req, res) => {
         WHERE t.id = ?
       `, [timesheet.id]);
 
-      return { updated: updatedTimesheet, cashDrawerSummary: drawerSummary };
+      return { updated: updatedTimesheet };
     });
 
     res.json({ data: serializeTimesheet(updated) });
@@ -692,7 +925,7 @@ router.get('/summary', authorize('admin'), async (req, res) => {
       SELECT 
         t.user_id,
         u.name as user_name,
-        COUNT(*) as total_days,
+        SUM(CASE WHEN t.auto_closed = 0 THEN 1 ELSE 0 END) as total_days,
         SUM(t.regular_hours) as total_regular_hours,
         SUM(t.overtime_hours) as total_overtime_hours,
         SUM(t.regular_hours + t.overtime_hours) as total_hours,
@@ -839,8 +1072,13 @@ router.get('/payroll', authorize('admin'), async (req, res) => {
       startDate = new Date(ISOweekStart);
       endDate = new Date(startDate);
       endDate.setDate(endDate.getDate() + 6);
-      startDate = startDate.toISOString().split('T')[0];
-      endDate = endDate.toISOString().split('T')[0];
+      // Format theo local parts — toISOString() đổi sang UTC nên trên server
+      // múi VN (UTC+7) mọi mốc local 00:00 bị lùi thành NGÀY HÔM TRƯỚC,
+      // dịch cả tuần lương sớm 1 ngày
+      const fmtLocalDate = (d) =>
+        `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      startDate = fmtLocalDate(startDate);
+      endDate = fmtLocalDate(endDate);
       const startAt = req.query.start_at ? isoToMysqlUtc(req.query.start_at) : null;
       const endAt = req.query.end_at ? isoToMysqlUtc(req.query.end_at) : null;
       range = startAt && endAt ? { startAt, endAt } : null;
@@ -861,7 +1099,7 @@ router.get('/payroll', authorize('admin'), async (req, res) => {
         COALESCE(e.name, u.name) as employee_name,
         MAX(t.employee_id) as real_employee_id,
         COALESCE(e.hourly_rate, u.hourly_rate) as hourly_rate,
-        COUNT(*) as total_shifts,
+        SUM(CASE WHEN t.auto_closed = 0 THEN 1 ELSE 0 END) as total_shifts,
         SUM(t.regular_hours) as total_regular_hours,
         SUM(t.overtime_hours) as total_overtime_hours,
         SUM(t.regular_hours + t.overtime_hours) as total_hours,
@@ -884,12 +1122,16 @@ router.get('/payroll', authorize('admin'), async (req, res) => {
     const periodEnd = range?.endAt || nextDayStr(endDate);
 
     const params = [periodStart, periodEnd];
-    
+
     const storeIdParam = req.query.store_id;
+    // Store đã xác thực thuộc chuỗi — dùng để scope cả thưởng/phạt & hoa hồng
+    // bên dưới (không scope thì payroll lọc 1 cửa hàng vẫn cộng tiền cả chuỗi)
+    let scopedStoreId = null;
     if (req.user.role === 'admin') {
       if (storeIdParam && storeIdParam !== 'all') {
         const store = await queryOne('SELECT 1 FROM stores WHERE id = ? AND admin_id = ?', [storeIdParam, req.user.id]);
         if (store) {
+          scopedStoreId = storeIdParam;
           querySql += ' AND t.store_id = ?';
           params.push(storeIdParam);
         } else {
@@ -978,48 +1220,63 @@ router.get('/payroll', authorize('admin'), async (req, res) => {
       return extraRows.get(employeeId);
     };
 
-    // Thưởng/phạt trong kỳ — scope theo chuỗi cửa hàng của admin
-    try {
-      const adjRows = await query(`
-        SELECT a.employee_id, e.name AS employee_name, SUM(a.amount) AS total_adjustments
-        FROM salary_adjustments a
-        JOIN employees e ON a.employee_id = e.id
-        JOIN users u ON e.store_id = u.id
-        JOIN stores s ON u.store_id = s.id
-        WHERE s.admin_id = ? AND a.adjust_date >= ? AND a.adjust_date <= ?
-        GROUP BY a.employee_id, e.name
-      `, [req.user.id, startDate, endDate]);
-      for (const r of adjRows) {
-        const row = getOrCreateRow(r.employee_id, r.employee_name);
-        row.total_adjustments = Math.round((Number.parseFloat(r.total_adjustments) || 0) * 100) / 100;
-      }
-    } catch (error) {
-      // Bảng salary_adjustments chưa tồn tại (chưa chạy migration) — coi như 0
+    // Thưởng/phạt + hoa hồng trong kỳ — scope theo chuỗi, và theo cửa hàng
+    // nếu đang lọc. Hai aggregate độc lập → chạy song song (Promise.all);
+    // .catch: bảng/cột chưa migrate — coi như 0
+    let adjSql = `
+      SELECT a.employee_id, e.name AS employee_name, SUM(a.amount) AS total_adjustments
+      FROM salary_adjustments a
+      JOIN employees e ON a.employee_id = e.id
+      JOIN users u ON e.store_id = u.id
+      JOIN stores s ON u.store_id = s.id
+      WHERE s.admin_id = ? AND a.adjust_date >= ? AND a.adjust_date <= ?
+    `;
+    const adjParams = [req.user.id, startDate, endDate];
+    if (scopedStoreId) {
+      adjSql += ' AND s.id = ?';
+      adjParams.push(scopedStoreId);
     }
+    adjSql += ' GROUP BY a.employee_id, e.name';
 
-    // Hoa hồng sản phẩm trong kỳ (đơn hoàn thành, theo nhân viên tạo đơn) —
-    // scope theo chuỗi cửa hàng của admin
-    try {
-      const commissionRows = await query(`
-        SELECT o.employee_id, e.name AS employee_name,
-          COALESCE(SUM(oi.quantity * oi.unit_price * (p.commission_percent / 100)), 0) AS commission
-        FROM order_items oi
-        JOIN orders o ON oi.order_id = o.id
-        JOIN products p ON oi.product_id = p.id
-        JOIN employees e ON o.employee_id = e.id
-        WHERE o.employee_id IS NOT NULL
-          AND o.status = 'completed'
-          AND o.created_at >= ? AND o.created_at < ?
-          AND p.commission_percent > 0
-          AND o.store_id IN (SELECT id FROM stores WHERE admin_id = ?)
-        GROUP BY o.employee_id, e.name
-      `, [periodStart, periodEnd, req.user.id]);
-      for (const r of commissionRows) {
-        const row = getOrCreateRow(r.employee_id, r.employee_name);
-        row.total_commission = Math.round((Number.parseFloat(r.commission) || 0) * 100) / 100;
-      }
-    } catch (error) {
-      // Cột commission_percent/employee_id chưa migrate — coi như 0
+    let commSql = `
+      SELECT o.employee_id, e.name AS employee_name,
+        COALESCE(SUM(oi.quantity * oi.unit_price * (p.commission_percent / 100)), 0) AS commission
+      FROM order_items oi
+      JOIN orders o ON oi.order_id = o.id
+      JOIN products p ON oi.product_id = p.id
+      JOIN employees e ON o.employee_id = e.id
+      WHERE o.employee_id IS NOT NULL
+        AND o.status = 'completed'
+        AND o.created_at >= ? AND o.created_at < ?
+        AND p.commission_percent > 0
+        AND o.store_id IN (SELECT id FROM stores WHERE admin_id = ?)
+    `;
+    const commParams = [periodStart, periodEnd, req.user.id];
+    if (scopedStoreId) {
+      commSql += ' AND o.store_id = ?';
+      commParams.push(scopedStoreId);
+    }
+    commSql += ' GROUP BY o.employee_id, e.name';
+
+    // Chỉ nuốt lỗi thiếu bảng/cột (DB chưa migrate). Lỗi thật (deadlock, timeout)
+    // phải ném ra — trả [] im lặng làm payroll 200 OK với hoa hồng/thưởng phạt = 0
+    // và admin trả lương thiếu mà không có tín hiệu lỗi nào
+    const swallowMissingSchema = (fallback) => (error) => {
+      if (error?.code === 'ER_NO_SUCH_TABLE' || error?.code === 'ER_BAD_FIELD_ERROR') return fallback;
+      throw error;
+    };
+    const [adjRows, commissionRows] = await Promise.all([
+      query(adjSql, adjParams).catch(swallowMissingSchema([])),
+      query(commSql, commParams).catch(swallowMissingSchema([])),
+    ]);
+
+    for (const r of adjRows) {
+      const row = getOrCreateRow(r.employee_id, r.employee_name);
+      row.total_adjustments = Math.round((Number.parseFloat(r.total_adjustments) || 0) * 100) / 100;
+    }
+    for (const r of commissionRows) {
+      const row = getOrCreateRow(r.employee_id, r.employee_name);
+      row.total_commission = Math.round((Number.parseFloat(r.commission) || 0) * 100) / 100;
     }
 
     payroll.push(...extraRows.values());
@@ -1060,8 +1317,9 @@ router.get('/daily-hours', authorize('admin'), async (req, res) => {
 
     // Get all timesheets for the month
     let querySql = `
-      SELECT 
-        COALESCE(t.employee_id, t.user_id) as employee_id,
+      SELECT
+        t.employee_id as real_employee_id,
+        t.user_id as shift_user_id,
         COALESCE(e.name, u.name) as employee_name,
         ${timesheetDateExpr} as work_date,
         t.regular_hours,
@@ -1144,7 +1402,10 @@ router.get('/daily-hours', authorize('admin'), async (req, res) => {
     }
 
     timesheets.forEach((ts) => {
-      const empId = ts.employee_id;
+      // employees.id và users.id là 2 dãy số ĐỘC LẬP (đều auto-increment từ 1).
+      // Ca vô danh (employee_id NULL) phải có key riêng 'u<user_id>' — nếu dùng
+      // thẳng user_id, giờ công của ca tài khoản cộng nhầm vào nhân viên trùng số id
+      const empId = ts.real_employee_id != null ? ts.real_employee_id : `u${ts.shift_user_id}`;
       if (!employeeMap[empId]) {
         employeeMap[empId] = {
           user_id: empId,
@@ -1155,7 +1416,12 @@ router.get('/daily-hours', authorize('admin'), async (req, res) => {
         };
       }
       
-      const dateKey = ts.work_date;
+      // mysql2 trả cột DATE về dạng Date object (pool không bật dateStrings) —
+      // dùng thẳng làm key sẽ thành "Sun Aug 24 2026 ..." và không bao giờ khớp
+      // key "YYYY-MM-DD" ở bước build lưới bên dưới → cả bảng hiện 0 giờ
+      const dateKey = ts.work_date instanceof Date
+        ? ts.work_date.toISOString().slice(0, 10)
+        : String(ts.work_date).slice(0, 10);
       if (!employeeMap[empId].daily_hours[dateKey]) {
         employeeMap[empId].daily_hours[dateKey] = 0;
       }

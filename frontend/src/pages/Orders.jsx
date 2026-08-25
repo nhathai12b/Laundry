@@ -1,4 +1,6 @@
-import { useEffect, useState } from 'react';
+﻿import { useEffect, useState } from 'react';
+import PageSkeleton from '../components/PageSkeleton';
+import { showToast } from '../utils/toast';
 import api from '../utils/api';
 import { isAdmin, isEmployer, getAuth, isRoot } from '../utils/auth';
 import { format, getDaysInMonth } from 'date-fns';
@@ -97,7 +99,7 @@ function Orders() {
 
   const loadOrders = async () => {
     try {
-      setLoading(true);
+      // Không bật spinner khi refresh — giữ dữ liệu cũ trên màn hình (lần đầu đã có useState(true))
       const params = new URLSearchParams();
       if (filters.status) params.append('status', filters.status);
       if (filters.customer_phone) params.append('customer_phone', filters.customer_phone);
@@ -189,11 +191,17 @@ function Orders() {
   };
 
   const handleStatusChange = async (orderId, newStatus) => {
+    // Optimistic: đổi trạng thái trên UI ngay lập tức. Lỗi thì chỉ hoàn tác
+    // đúng đơn này (khôi phục cả snapshot sẽ đè mất thao tác song song vừa
+    // thành công trên đơn khác)
+    const prevStatus = orders.find((o) => o.id === orderId)?.status;
+    setOrders((cur) => cur.map((o) => (o.id === orderId ? { ...o, status: newStatus } : o)));
     try {
       await api.post(`/orders/${orderId}/status`, { status: newStatus });
       loadOrders();
     } catch (error) {
-      alert(error.response?.data?.error || 'Cập nhật thất bại');
+      setOrders((cur) => cur.map((o) => (o.id === orderId ? { ...o, status: prevStatus } : o)));
+      showToast(error.response?.data?.error || 'Cập nhật thất bại');
     }
   };
 
@@ -201,6 +209,10 @@ function Orders() {
     setOrderToComplete(order);
     setShowCompleteModal(true);
     setShouldPrint(false);
+    // Reset số tiền của lần hoàn thành trước — không reset thì số cũ (vd 5.000
+    // gõ dở rồi Hủy) âm thầm được gửi làm amount_paid của đơn TIẾP THEO
+    setCustomAmountPaid('');
+    setPaymentMethod('cash');
   };
 
   const handleMarkDebt = async (order) => {
@@ -220,7 +232,7 @@ function Orders() {
       }
       loadOrders();
     } catch (error) {
-      alert(error.response?.data?.error || 'Thao tác thất bại');
+      showToast(error.response?.data?.error || 'Thao tác thất bại');
     }
   };
 
@@ -229,7 +241,7 @@ function Orders() {
 
     try {
       if (!paymentMethod) {
-        alert('Vui lòng chọn hình thức thanh toán');
+        showToast('Vui lòng chọn hình thức thanh toán');
         return;
       }
 
@@ -238,11 +250,11 @@ function Orders() {
       if (customAmountPaid !== '') {
         amountPaid = parseFloat(customAmountPaid);
         if (isNaN(amountPaid) || amountPaid < 0) {
-          alert('Số tiền thanh toán phải là số không âm');
+          showToast('Số tiền thanh toán phải là số không âm');
           return;
         }
         if (amountPaid > maxAmount + 0.01) {
-          alert(`Số tiền thanh toán không được vượt quá ${maxAmount.toLocaleString('vi-VN')} đ`);
+          showToast(`Số tiền thanh toán không được vượt quá ${maxAmount.toLocaleString('vi-VN')} đ`);
           return;
         }
       }
@@ -261,15 +273,15 @@ function Orders() {
         setPrinting(true);
         try {
           const result = await printBill(orderToComplete.id);
-          alert(`Đơn hàng đã hoàn thành và bill đã được in! (Phương thức: ${result.method === 'bluetooth' ? 'Bluetooth' : 'Server'})`);
+          showToast(`Đơn hàng đã hoàn thành và bill đã được in! (Phương thức: ${result.method === 'bluetooth' ? 'Bluetooth' : 'Server'})`);
         } catch (printError) {
           console.error('Print error:', printError);
-          alert(printError.message || 'Đơn hàng đã hoàn thành nhưng in bill thất bại. Vui lòng kiểm tra kết nối máy in.');
+          showToast(printError.message || 'Đơn hàng đã hoàn thành nhưng in bill thất bại. Vui lòng kiểm tra kết nối máy in.');
         } finally {
           setPrinting(false);
         }
       } else {
-        alert('Đơn hàng đã hoàn thành!');
+        showToast('Đơn hàng đã hoàn thành!');
       }
 
       setShowCompleteModal(false);
@@ -279,7 +291,7 @@ function Orders() {
       setCustomAmountPaid('');
       loadOrders();
     } catch (error) {
-      alert(error.response?.data?.error || 'Cập nhật thất bại');
+      showToast(error.response?.data?.error || 'Cập nhật thất bại');
       setPrinting(false);
     }
   };
@@ -424,7 +436,7 @@ function Orders() {
       };
 
       if (orderData.items.length === 0) {
-        alert('Vui lòng thêm ít nhất một sản phẩm');
+        showToast('Vui lòng thêm ít nhất một sản phẩm');
         return;
       }
 
@@ -441,29 +453,30 @@ function Orders() {
       setApplicablePromotions([]);
       loadOrders();
     } catch (error) {
-      alert(error.response?.data?.error || 'Tạo đơn thất bại');
+      showToast(error.response?.data?.error || 'Tạo đơn thất bại');
     }
   };
 
   const statusColors = {
     created: 'bg-gray-100 text-gray-800',
+    washing: 'bg-blue-100 text-blue-800',
+    drying: 'bg-cyan-100 text-cyan-800',
+    waiting_pickup: 'bg-amber-100 text-amber-800',
     completed: 'bg-green-100 text-green-800',
+    cancelled: 'bg-red-100 text-red-700',
   };
 
   const statusLabels = {
     created: 'Đã tạo',
+    washing: 'Đang giặt',
+    drying: 'Đang sấy',
+    waiting_pickup: 'Chờ nhận',
     completed: 'Hoàn thành',
+    cancelled: 'Đã hủy',
   };
 
   if (loading) {
-    return (
-      <div className="flex items-center justify-center min-h-[400px]">
-        <div className="text-center">
-          <div className="inline-block animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mb-4"></div>
-          <div className="text-gray-600">Đang tải...</div>
-        </div>
-      </div>
-    );
+    return <PageSkeleton />;
   }
 
   return (
@@ -722,7 +735,7 @@ function Orders() {
                       </td>
                       {isRoot() && (
                         <td className="px-4 py-3 text-center">
-                          {order.status === 'created' && (
+                          {!['completed', 'cancelled'].includes(order.status) && (
                           <div className="flex gap-1.5 sm:gap-2 flex-nowrap justify-center overflow-x-auto">
                             <button
                               onClick={() => handleCompleteClick(order)}
@@ -741,10 +754,10 @@ function Orders() {
                                 setPrinting(true);
                                 try {
                                   const result = await printBill(order.id);
-                                  alert(`Bill đã được in! (Phương thức: ${result.method === 'bluetooth' ? 'Bluetooth' : 'Server'})`);
+                                  showToast(`Bill đã được in! (Phương thức: ${result.method === 'bluetooth' ? 'Bluetooth' : 'Server'})`);
                                 } catch (printError) {
                                   console.error('Print error:', printError);
-                                  alert(printError.message || 'In bill thất bại. Vui lòng kiểm tra kết nối máy in.');
+                                  showToast(printError.message || 'In bill thất bại. Vui lòng kiểm tra kết nối máy in.');
                                 } finally {
                                   setPrinting(false);
                                 }
@@ -847,7 +860,7 @@ function Orders() {
                 )}
 
                 <div className="border-t pt-3 mt-3 flex flex-nowrap gap-1.5 sm:gap-2 overflow-x-auto">
-                  {order.status === 'created' && (
+                  {!['completed', 'cancelled'].includes(order.status) && (
                     <>
                       <button
                         onClick={() => handleCompleteClick(order)}
@@ -868,10 +881,10 @@ function Orders() {
                       setPrinting(true);
                       try {
                         const result = await printBill(order.id);
-                        alert(`Bill đã được in! (Phương thức: ${result.method === 'bluetooth' ? 'Bluetooth' : 'Server'})`);
+                        showToast(`Bill đã được in! (Phương thức: ${result.method === 'bluetooth' ? 'Bluetooth' : 'Server'})`);
                       } catch (printError) {
                         console.error('Print error:', printError);
-                        alert(printError.message || 'In bill thất bại. Vui lòng kiểm tra kết nối máy in.');
+                        showToast(printError.message || 'In bill thất bại. Vui lòng kiểm tra kết nối máy in.');
                       } finally {
                         setPrinting(false);
                       }
@@ -1328,10 +1341,10 @@ function Orders() {
                     setPrinting(true);
                     try {
                       const result = await printBill(orderToComplete.id);
-                      alert(`Bill đã được in! (Phương thức: ${result.method === 'bluetooth' ? 'Bluetooth' : 'Server'})`);
+                      showToast(`Bill đã được in! (Phương thức: ${result.method === 'bluetooth' ? 'Bluetooth' : 'Server'})`);
                     } catch (printError) {
                       console.error('Print error:', printError);
-                      alert(printError.message || 'In bill thất bại. Vui lòng kiểm tra kết nối máy in.');
+                      showToast(printError.message || 'In bill thất bại. Vui lòng kiểm tra kết nối máy in.');
                     } finally {
                       setPrinting(false);
                     }

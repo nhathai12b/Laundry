@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import api from '../utils/api';
+import { getPasswordError } from '../utils/passwordValidation';
 
 const PACKAGES = [
   { id: '1month', label: '1 tháng', price: 120000 },
@@ -33,8 +34,9 @@ function Register() {
       setError('Mật khẩu và xác nhận mật khẩu không khớp.');
       return;
     }
-    if (form.password.length < 8) {
-      setError('Mật khẩu cần ít nhất 8 ký tự.');
+    const passwordError = getPasswordError(form.password);
+    if (passwordError) {
+      setError(passwordError);
       return;
     }
     setLoading(true);

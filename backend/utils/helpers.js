@@ -2,12 +2,9 @@ import bcrypt from 'bcryptjs';
 import { queryOne } from '../database/db.js';
 import {
   MAX_ORDER_CODE_GENERATION_ATTEMPTS,
-  PASSWORD_MIN_LENGTH,
-  PASSWORD_REQUIRE_UPPERCASE,
-  PASSWORD_REQUIRE_LOWERCASE,
-  PASSWORD_REQUIRE_NUMBERS,
-  PASSWORD_REQUIRE_SPECIAL_CHARS
+  REGULAR_HOURS_PER_DAY
 } from './constants.js';
+import { validatePasswordStrength as validatePasswordRules } from './passwordValidator.js';
 
 export const hashPassword = async (password) => {
   const salt = await bcrypt.genSalt(10);
@@ -18,32 +15,15 @@ export const comparePassword = async (password, hash) => {
   return bcrypt.compare(password, hash);
 };
 
+// NGUỒN DUY NHẤT của quy tắc mật khẩu là utils/passwordValidator.js — hàm này
+// chỉ là wrapper đổi shape trả về ({valid, message}) cho các caller cũ
+// (auth.js, employees.js). Sửa quy tắc thì sửa ở passwordValidator.js.
 export const validatePasswordStrength = (password) => {
-  if (!password || typeof password !== 'string') {
-    return { valid: false, message: 'Mật khẩu không hợp lệ.' };
-  }
-
-  if (password.length < PASSWORD_MIN_LENGTH) {
-    return { valid: false, message: `Mật khẩu phải có ít nhất ${PASSWORD_MIN_LENGTH} ký tự.` };
-  }
-
-  if (PASSWORD_REQUIRE_UPPERCASE && !/[A-Z]/.test(password)) {
-    return { valid: false, message: 'Mật khẩu phải chứa ít nhất một chữ hoa (A-Z).' };
-  }
-
-  if (PASSWORD_REQUIRE_LOWERCASE && !/[a-z]/.test(password)) {
-    return { valid: false, message: 'Mật khẩu phải chứa ít nhất một chữ thường (a-z).' };
-  }
-
-  if (PASSWORD_REQUIRE_NUMBERS && !/[0-9]/.test(password)) {
-    return { valid: false, message: 'Mật khẩu phải chứa ít nhất một số (0-9).' };
-  }
-
-  if (PASSWORD_REQUIRE_SPECIAL_CHARS && !/[!@#$%^&*()_+\-=\[\]{};:"\\|,.<>\/?]/.test(password)) {
-    return { valid: false, message: 'Mật khẩu phải chứa ít nhất một ký tự đặc biệt.' };
-  }
-
-  return { valid: true, message: 'Mật khẩu hợp lệ.' };
+  const result = validatePasswordRules(password);
+  return {
+    valid: result.valid,
+    message: result.valid ? 'Mật khẩu hợp lệ.' : result.errors.join(' '),
+  };
 };
 
 /**
@@ -127,8 +107,8 @@ export const calculateHours = (checkIn, checkOut) => {
   const diffHours = diffMs / (1000 * 60 * 60);
   const totalHours = Math.max(0, diffHours);
 
-  const regularHours = Math.min(totalHours, 8);
-  const overtimeHours = Math.max(totalHours - 8, 0);
+  const regularHours = Math.min(totalHours, REGULAR_HOURS_PER_DAY);
+  const overtimeHours = Math.max(totalHours - REGULAR_HOURS_PER_DAY, 0);
 
   return {
     regular: Math.round(regularHours * 100) / 100,

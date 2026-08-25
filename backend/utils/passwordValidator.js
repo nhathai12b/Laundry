@@ -1,7 +1,19 @@
 /**
  * Password strength validator
  * Enforces strong password requirements
+ *
+ * QUAN TRỌNG: dùng CÙNG quy tắc với utils/helpers.js validatePasswordStrength
+ * (lấy từ utils/constants.js). Trước đây file này chấp nhận MỌI chuỗi khác
+ * rỗng, trong khi nó lại được dùng cho tài khoản admin/cửa hàng (users.js,
+ * stores.js) — tài khoản quyền cao nhất có luật mật khẩu yếu nhất.
  */
+import {
+  PASSWORD_MIN_LENGTH,
+  PASSWORD_REQUIRE_UPPERCASE,
+  PASSWORD_REQUIRE_LOWERCASE,
+  PASSWORD_REQUIRE_NUMBERS,
+  PASSWORD_REQUIRE_SPECIAL_CHARS,
+} from './constants.js';
 
 /**
  * Validate password strength
@@ -9,15 +21,30 @@
  * @returns {Object} { valid: boolean, errors: string[] }
  */
 export const validatePasswordStrength = (password) => {
-  // Only check if password is not empty
-  if (!password) {
+  if (!password || typeof password !== 'string') {
     return { valid: false, errors: ['Mật khẩu là bắt buộc'] };
   }
 
-  // No other requirements - accept any password
+  const errors = [];
+  if (password.length < PASSWORD_MIN_LENGTH) {
+    errors.push(`Mật khẩu phải có ít nhất ${PASSWORD_MIN_LENGTH} ký tự.`);
+  }
+  if (PASSWORD_REQUIRE_UPPERCASE && !/[A-Z]/.test(password)) {
+    errors.push('Mật khẩu phải chứa ít nhất một chữ hoa (A-Z).');
+  }
+  if (PASSWORD_REQUIRE_LOWERCASE && !/[a-z]/.test(password)) {
+    errors.push('Mật khẩu phải chứa ít nhất một chữ thường (a-z).');
+  }
+  if (PASSWORD_REQUIRE_NUMBERS && !/[0-9]/.test(password)) {
+    errors.push('Mật khẩu phải chứa ít nhất một số (0-9).');
+  }
+  if (PASSWORD_REQUIRE_SPECIAL_CHARS && !/[!@#$%^&*()_+\-=\[\]{};:"\\|,.<>\/?]/.test(password)) {
+    errors.push('Mật khẩu phải chứa ít nhất một ký tự đặc biệt.');
+  }
+
   return {
-    valid: true,
-    errors: [],
+    valid: errors.length === 0,
+    errors,
     strength: calculatePasswordStrength(password)
   };
 };

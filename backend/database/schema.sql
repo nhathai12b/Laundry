@@ -6,6 +6,8 @@ CREATE TABLE IF NOT EXISTS stores (
     phone VARCHAR(50),
     admin_id INT,
     shared_account_id INT,
+    latitude DECIMAL(10, 7) NULL,
+    longitude DECIMAL(10, 7) NULL,
     status ENUM('active', 'inactive') NOT NULL DEFAULT 'active',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
@@ -185,6 +187,8 @@ CREATE TABLE IF NOT EXISTS timesheets (
     employee_id INT,
     check_in DATETIME NOT NULL,
     check_out DATETIME,
+    check_in_ip VARCHAR(45) NULL,
+    auto_closed TINYINT(1) NOT NULL DEFAULT 0,
     regular_hours DECIMAL(10, 2) DEFAULT 0,
     overtime_hours DECIMAL(10, 2) DEFAULT 0,
     revenue_amount DECIMAL(10, 2) DEFAULT 0,

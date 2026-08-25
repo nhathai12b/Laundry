@@ -29,33 +29,10 @@ function parseCredentials(raw) {
   }
 }
 
-// Tự đảm bảo cột qr_image tồn tại (DB có thể được khởi tạo lại mà chưa chạy
-// migration migrate-zalo-qr). Kết quả cache trong promise — chỉ check 1 lần.
-let qrImageColumnEnsured = null;
-async function ensureQrImageColumn() {
-  if (!qrImageColumnEnsured) {
-    qrImageColumnEnsured = (async () => {
-      const row = await queryOne(`
-        SELECT COUNT(*) AS count FROM information_schema.columns
-        WHERE table_schema = DATABASE()
-          AND table_name = 'store_zalo_accounts'
-          AND column_name = 'qr_image'
-      `);
-      if (!row || Number(row.count) === 0) {
-        await execute('ALTER TABLE store_zalo_accounts ADD COLUMN qr_image LONGTEXT NULL');
-        console.log('✅ Auto-added store_zalo_accounts.qr_image column');
-      }
-    })().catch((error) => {
-      qrImageColumnEnsured = null; // cho phép thử lại ở request sau
-      throw error;
-    });
-  }
-  return qrImageColumnEnsured;
-}
+// Cột qr_image được đảm bảo bởi ensureColumns lúc khởi động server
+// (backend/database/db.js) — không ALTER TABLE trong đường request nữa.
 
 async function upsertAccount(storeId, fields) {
-  await ensureQrImageColumn();
-
   // INSERT ... ON DUPLICATE: an toàn khi nhiều request (status/qr/login) chạy
   // đồng thời — trước đây SELECT-rồi-INSERT bị race gây ER_DUP_ENTRY
   await execute(`
@@ -217,7 +194,9 @@ export async function startZaloQrLogin(storeId) {
         last_error: error.message,
       });
       console.warn('Zalo QR login failed:', error.message);
-      throw error;
+      // KHÔNG rethrow: loginPromise được lưu vào sessions Map và không ai await
+      // — rethrow ở đây thành unhandled rejection, Node >=15 sẽ crash cả server
+      // khi khách từ chối QR / mạng lỗi. Trạng thái lỗi đã ghi vào DB ở trên.
     });
 
   sessions.set(storeId, { zalo, api: null, ready: false, loginPromise, profile: null });
@@ -227,7 +206,7 @@ export async function startZaloQrLogin(storeId) {
 export async function getZaloQrDataUrl(storeId) {
   // Đường đọc thuần — không upsert (tránh 1 write + kéo credentials_json
   // LONGTEXT mỗi 3s khi modal đang poll). Chỉ SELECT đúng 2 cột cần.
-  await ensureQrImageColumn();
+  // (Cột qr_image do ensureColumns lúc boot đảm bảo — xem database/db.js)
   const account = await queryOne(
     'SELECT qr_image, qr_path FROM store_zalo_accounts WHERE store_id = ?',
     [storeId]

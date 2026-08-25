@@ -41,7 +41,9 @@ function ZaloConnectModal({ store, onClose }) {
   }, [status.status, store.id]);
 
   useEffect(() => {
-    if (status.status !== 'pending_qr') return undefined;
+    // Chỉ poll khi CHƯA có QR — ảnh base64 hàng chục KB không đổi giữa các
+    // lần tải; tải lại mỗi 3s khi đã hiện là lãng phí băng thông + query DB
+    if (status.status !== 'pending_qr' || qr) return undefined;
 
     let cancelled = false;
     const loadQr = async () => {
@@ -65,7 +67,7 @@ function ZaloConnectModal({ store, onClose }) {
       clearInterval(interval);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status.status, store.id]);
+  }, [status.status, store.id, qr]);
 
   const handleStartLogin = async () => {
     try {

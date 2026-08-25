@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+﻿import { useEffect, useState } from 'react';
+import { showToast } from '../utils/toast';
 import api from '../utils/api';
 import { format } from 'date-fns';
 import MoneyInput from './MoneyInput';
@@ -36,7 +37,7 @@ function SalaryAdjustModal({ employee, onClose, onChanged }) {
     } catch (error) {
       console.error('Error loading salary summary:', error);
       setSummary(null);
-      alert(error.response?.data?.error || 'Không tải được lương');
+      showToast(error.response?.data?.error || 'Không tải được lương');
     } finally {
       setLoading(false);
     }
@@ -57,7 +58,7 @@ function SalaryAdjustModal({ employee, onClose, onChanged }) {
     e.preventDefault();
     const amountValue = parseFloat(adjAmount);
     if (!Number.isFinite(amountValue) || amountValue <= 0) {
-      alert('Vui lòng nhập số tiền lớn hơn 0');
+      showToast('Vui lòng nhập số tiền lớn hơn 0');
       return;
     }
     setSaving(true);
@@ -73,7 +74,7 @@ function SalaryAdjustModal({ employee, onClose, onChanged }) {
       loadSummary();
       onChanged?.();
     } catch (error) {
-      alert(error.response?.data?.error || 'Lưu thất bại');
+      showToast(error.response?.data?.error || 'Lưu thất bại');
     } finally {
       setSaving(false);
     }
@@ -86,7 +87,7 @@ function SalaryAdjustModal({ employee, onClose, onChanged }) {
       loadSummary();
       onChanged?.();
     } catch (error) {
-      alert(error.response?.data?.error || 'Xóa thất bại');
+      showToast(error.response?.data?.error || 'Xóa thất bại');
     }
   };
 

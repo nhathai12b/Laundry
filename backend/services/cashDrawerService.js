@@ -175,9 +175,19 @@ export async function recordCashOut(timesheetId, payload, actor) {
 
 export async function recordClosingCountTx(db, timesheet, payload, actor) {
   const summary = await getDrawerSummaryTx(db, timesheet.id);
-  const actualAmount = normalizeAmount(payload.actual_cash_amount, 'actual_cash_amount', true);
+  // actual_cash_amount = null/undefined → chốt theo số kỳ vọng (chênh lệch 0).
+  // Dùng cho auto-close ca quá hạn: không ai đếm két nên lấy expected làm actual.
+  // max(expected, 0): expected có thể ÂM (cash_out vượt quỹ) — normalizeAmount
+  // sẽ throw với số âm và ca kẹt mở vĩnh viễn nếu không kẹp về 0.
+  const actualAmount = (payload.actual_cash_amount === null || payload.actual_cash_amount === undefined)
+    ? Math.max(summary.expected_cash_amount, 0)
+    : normalizeAmount(payload.actual_cash_amount, 'actual_cash_amount', true);
   const expectedAmount = summary.expected_cash_amount;
-  const cashDifference = Math.round((actualAmount - expectedAmount) * 100) / 100;
+  // Khi actual được mặc định theo expected (auto-close): chênh lệch luôn 0 —
+  // nếu tính actual(kẹp 0) − expected(âm) sẽ ra "thừa két" ảo dương
+  const cashDifference = (payload.actual_cash_amount === null || payload.actual_cash_amount === undefined)
+    ? 0
+    : Math.round((actualAmount - expectedAmount) * 100) / 100;
   const shortagePaidAmount = normalizeAmount(payload.cash_shortage_paid_amount || 0, 'cash_shortage_paid_amount', true);
 
   if (shortagePaidAmount > 0) {
