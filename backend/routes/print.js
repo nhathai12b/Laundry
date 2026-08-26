@@ -7,6 +7,7 @@ import { fileURLToPath } from 'url';
 import { query, queryOne } from '../database/db.js';
 import { authenticate } from '../middleware/auth.js';
 import { validateId } from '../utils/validators.js';
+import { userCanAccessOrder } from './orders.js';
 import { createCanvas, registerFont, loadImage } from 'canvas';
 import QRCode from 'qrcode';
 
@@ -96,6 +97,11 @@ router.get('/bill-data/:orderId', async (req, res) => {
 
     const payload = await loadBillPayload(orderId);
     if (!payload) return res.status(404).json({ error: 'Không tìm thấy đơn hàng' });
+    // Chặn in bill chéo tenant: thiếu check này thì bất kỳ tài khoản nào cũng
+    // dò id đơn và đọc được bill (tên, SĐT khách, tiền) của chuỗi khác
+    if (!(await userCanAccessOrder(payload.order, req.user))) {
+      return res.status(403).json({ error: 'Bạn không có quyền in đơn hàng này' });
+    }
 
     const billData = await generateBill(payload.order, payload.items, payload.settings, payload.paperSize);
     res.json({ success: true, data: billData.toString('base64'), paperSize: payload.paperSize });
@@ -198,6 +204,10 @@ router.post('/bill/:orderId', async (req, res) => {
 
     const payload = await loadBillPayload(orderId);
     if (!payload) return res.status(404).json({ error: 'Không tìm thấy đơn hàng' });
+    // Chặn in bill chéo tenant (xem GET /bill-data)
+    if (!(await userCanAccessOrder(payload.order, req.user))) {
+      return res.status(403).json({ error: 'Bạn không có quyền in đơn hàng này' });
+    }
 
     const billBitmap = await generateBill(payload.order, payload.items, payload.settings, payload.paperSize);
     const escPosJob = Buffer.concat([

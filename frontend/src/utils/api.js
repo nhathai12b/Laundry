@@ -45,7 +45,11 @@ api.interceptors.request.use((config) => {
 api.interceptors.response.use(
   (response) => response,
   (error) => {
-    if (error.response?.status === 401) {
+    // KHÔNG redirect khi chính /auth/login trả 401 (sai mật khẩu): reload trang
+    // sẽ nuốt mất thông báo "Đăng nhập thất bại", và luồng đổi mật khẩu (verify
+    // mật khẩu cũ bằng cách gọi login) sẽ log out oan người đang đăng nhập
+    const isLoginAttempt = String(error.config?.url || '').includes('/auth/login');
+    if (error.response?.status === 401 && !isLoginAttempt) {
       localStorage.removeItem('token');
       localStorage.removeItem('user');
       window.location.href = '/login';

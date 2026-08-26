@@ -1,14 +1,26 @@
 import jwt from 'jsonwebtoken';
+import { queryOne } from '../database/db.js';
 
-export const authenticate = (req, res, next) => {
+export const authenticate = async (req, res, next) => {
   try {
     const token = req.headers.authorization?.split(' ')[1];
-    
+
     if (!token) {
       return res.status(401).json({ error: 'No token provided' });
     }
 
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+    // Token cá nhân của nhân viên sống 7 ngày — nếu chỉ tin JWT, nhân viên bị
+    // cho nghỉ (status inactive) vẫn tạo đơn/thu tiền cả tuần bằng token cũ.
+    // Re-check status mỗi request (1 lookup theo PK, rẻ; chỉ áp cho token nhân viên)
+    if (decoded.employee_login && decoded.employee_id) {
+      const emp = await queryOne('SELECT status FROM employees WHERE id = ?', [decoded.employee_id]);
+      if (!emp || emp.status !== 'active') {
+        return res.status(401).json({ error: 'Tài khoản nhân viên đã bị vô hiệu hóa. Vui lòng liên hệ quản lý.' });
+      }
+    }
+
     req.user = decoded;
     next();
   } catch (error) {

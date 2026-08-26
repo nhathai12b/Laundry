@@ -9,11 +9,6 @@ function Login() {
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const [showStoreSelection, setShowStoreSelection] = useState(false);
-  const [stores, setStores] = useState([]);
-  const [selectedStore, setSelectedStore] = useState('');
-  const [tempUser, setTempUser] = useState(null);
-  const [isStoreSelection, setIsStoreSelection] = useState(false);
   const navigate = useNavigate();
 
   const handleSubmit = async (e) => {
@@ -23,28 +18,8 @@ function Login() {
 
     try {
       const response = await api.post('/auth/login', { phone, password });
-      
-      if (response.data.requiresStoreSelection) {
-        setStores(response.data.stores || []);
-        setTempUser(response.data.user);
-        setIsStoreSelection(true);
-        setShowStoreSelection(true);
-        setLoading(false);
-        return;
-      }
-
-      // Check if employee selection is required (for employer)
-      if (response.data.requiresEmployeeSelection) {
-        const employees = response.data.employees || [];
-        setStores(employees);
-        setTempUser(response.data.user);
-        setIsStoreSelection(false);
-        setShowStoreSelection(true);
-        setLoading(false);
-        return;
-      }
-
-      // Direct login (for employer without employees, or other roles)
+      // (Luồng requiresStoreSelection/requiresEmployeeSelection đã xóa —
+      // backend không bao giờ trả các cờ này, toàn bộ nhánh là code chết)
       const { token, user } = response.data;
       if (!token || !user) {
         setError('Đăng nhập thất bại: Thiếu thông tin token hoặc user');
@@ -63,54 +38,6 @@ function Login() {
       }
     } catch (err) {
       setError(err.response?.data?.error || 'Đăng nhập thất bại');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleStoreSelect = async () => {
-    setLoading(true);
-    setError('');
-
-    try {
-      let response;
-      if (isStoreSelection) {
-        // Admin selecting store
-        if (!selectedStore) {
-          setError('Vui lòng chọn cửa hàng');
-          setLoading(false);
-          return;
-        }
-        response = await api.post('/auth/select-store', {
-          userId: tempUser.id,
-          storeId: parseInt(selectedStore)
-        });
-      } else {
-        // Employer selecting employee (employeeId is optional - can be null)
-        response = await api.post('/auth/select-employee', {
-          userId: tempUser.id,
-          employeeId: selectedStore ? parseInt(selectedStore) : null
-        });
-      }
-
-      const { token, user } = response.data;
-      if (!token || !user) {
-        setError('Đăng nhập thất bại: Thiếu thông tin token hoặc user');
-        return;
-      }
-
-      setAuth(token, user);
-
-      // Root admin chỉ có thể truy cập Dashboard và Admin Management
-      if (isRoot()) {
-        navigate('/admin');
-      } else if (isAdmin()) {
-        navigate('/admin');
-      } else {
-        navigate('/');
-      }
-    } catch (err) {
-      setError(err.response?.data?.error || (isStoreSelection ? 'Chọn cửa hàng thất bại' : 'Chọn nhân viên thất bại'));
     } finally {
       setLoading(false);
     }
@@ -551,73 +478,6 @@ function Login() {
         </div>
       </div>
 
-      {/* Store/Employee Selection Modal */}
-      {showStoreSelection && (
-        <div className="modal-overlay">
-          <div className="modal">
-            <div className="modal-header">
-              <h2 className="modal-title">
-                {isStoreSelection ? '🏢 Chọn cửa hàng' : '👥 Chọn nhân viên'}
-              </h2>
-              <button onClick={() => setShowStoreSelection(false)} style={{ background: 'none', border: 'none', fontSize: '1.5rem', cursor: 'pointer' }}>
-                ✕
-              </button>
-            </div>
-            <div className="modal-body">
-              {error && <div className="alert alert-danger">{error}</div>}
-              <div className="form-group">
-                <label>
-                  {isStoreSelection ? '✓ Cửa hàng *' : '✓ Nhân viên'}
-                </label>
-                <select
-                  value={selectedStore}
-                  onChange={(e) => setSelectedStore(e.target.value)}
-                  required={isStoreSelection}
-                >
-                  <option value="">
-                    {isStoreSelection ? '-- Chọn cửa hàng --' : '-- Chọn hoặc để trống --'}
-                  </option>
-                  {stores.length === 0 && !isStoreSelection ? (
-                    <option value="" disabled>Chưa có nhân viên</option>
-                  ) : (
-                    stores.map((item) => (
-                      <option key={item.id} value={item.id}>
-                        {item.name} {item.phone ? `(${item.phone})` : ''}
-                      </option>
-                    ))
-                  )}
-                </select>
-                {!isStoreSelection && (
-                  <p style={{ fontSize: '0.8125rem', color: '#6b7280', marginTop: '0.5rem' }}>
-                    Để trống nếu bạn là chủ cửa hàng
-                  </p>
-                )}
-              </div>
-            </div>
-            <div className="modal-footer">
-              <button
-                onClick={() => {
-                  setShowStoreSelection(false);
-                  setSelectedStore('');
-                  setTempUser(null);
-                  setStores([]);
-                  setIsStoreSelection(false);
-                }}
-                className="btn btn-outline"
-              >
-                Hủy
-              </button>
-              <button
-                onClick={handleStoreSelect}
-                disabled={loading}
-                className="btn btn-primary"
-              >
-                {loading ? '⏳ Xử lý...' : '✓ Xác nhận'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

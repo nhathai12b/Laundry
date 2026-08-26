@@ -347,7 +347,10 @@ function Reports() {
               {new Intl.NumberFormat('vi-VN').format(parseFloat(item.end_revenue) || 0)} đ
             </td>
             <td className="px-4 py-3 text-sm font-bold text-green-700 text-right">
-              {new Intl.NumberFormat('vi-VN').format(parseFloat(item.end_revenue) || 0)} đ
+              {/* Cột này từng render trùng end_revenue — giờ bind đúng số tiền mặt ĐẾM THỰC TẾ lúc kết ca */}
+              {item.actual_cash_amount != null
+                ? `${new Intl.NumberFormat('vi-VN').format(parseFloat(item.actual_cash_amount) || 0)} đ`
+                : 'Chưa đếm'}
             </td>
             <td className="px-4 py-3 text-sm font-bold text-amber-600 text-right">
               {new Intl.NumberFormat('vi-VN').format(parseFloat(item.withdrawn_amount) || 0)} đ

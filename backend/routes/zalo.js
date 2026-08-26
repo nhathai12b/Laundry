@@ -1,4 +1,4 @@
-import express from 'express';
+﻿import express from 'express';
 import { queryOne } from '../database/db.js';
 import { authenticate } from '../middleware/auth.js';
 import {
@@ -40,7 +40,7 @@ async function resolveUserStoreId(req) {
 
 function handleRouteError(res, error) {
   console.error('Zalo route error:', error);
-  res.status(error.statusCode || 500).json({ error: error.message || 'Server error' });
+  res.status(error.statusCode || 500).json({ error: error.statusCode ? error.message : 'Lỗi máy chủ. Vui lòng thử lại.' });
 }
 
 router.get('/status', async (req, res) => {

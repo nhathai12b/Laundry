@@ -1,4 +1,4 @@
-import express from 'express';
+﻿import express from 'express';
 import { authenticate } from '../middleware/auth.js';
 import {
   getCurrentDrawer,
@@ -26,7 +26,7 @@ router.get('/current', async (req, res) => {
     res.json({ data: drawer });
   } catch (error) {
     console.error('Get current cash drawer error:', error);
-    res.status(error.statusCode || 500).json({ error: error.message || 'Server error' });
+    res.status(error.statusCode || 500).json({ error: error.statusCode ? error.message : 'Lỗi máy chủ. Vui lòng thử lại.' });
   }
 });
 
@@ -41,7 +41,7 @@ router.get('/timesheets/:timesheetId', async (req, res) => {
     res.json({ data: drawer });
   } catch (error) {
     console.error('Get cash drawer details error:', error);
-    res.status(error.statusCode || 500).json({ error: error.message || 'Server error' });
+    res.status(error.statusCode || 500).json({ error: error.statusCode ? error.message : 'Lỗi máy chủ. Vui lòng thử lại.' });
   }
 });
 
@@ -56,7 +56,7 @@ router.post('/cash-in', async (req, res) => {
     res.status(201).json({ data: result });
   } catch (error) {
     console.error('Cash drawer cash in error:', error);
-    res.status(error.statusCode || 500).json({ error: error.message || 'Server error' });
+    res.status(error.statusCode || 500).json({ error: error.statusCode ? error.message : 'Lỗi máy chủ. Vui lòng thử lại.' });
   }
 });
 
@@ -71,7 +71,7 @@ router.post('/cash-out', async (req, res) => {
     res.status(201).json({ data: result });
   } catch (error) {
     console.error('Cash drawer cash out error:', error);
-    res.status(error.statusCode || 500).json({ error: error.message || 'Server error' });
+    res.status(error.statusCode || 500).json({ error: error.statusCode ? error.message : 'Lỗi máy chủ. Vui lòng thử lại.' });
   }
 });
 

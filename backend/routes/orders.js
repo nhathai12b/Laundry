@@ -27,7 +27,8 @@ const isoToMysqlUtc = (value) => {
   return formatDateTimeUTC(date);
 };
 
-async function userCanAccessOrder(order, user) {
+// export: print.js dùng chung để chặn in bill chéo tenant
+export async function userCanAccessOrder(order, user) {
   if (user.role === 'root') return true;
 
   if (user.role === 'admin') {
@@ -369,12 +370,14 @@ router.post('/', auditLog('create', 'order'), async (req, res) => {
         // Initial promotion fetch - will validate store_id later
         const promotion = await db.queryOne('SELECT * FROM promotions WHERE id = ? AND status = "active"', [promotionIdInt]);
         if (promotion) {
-          const now = new Date();
-          const startDate = new Date(promotion.start_date);
-          const endDate = new Date(promotion.end_date);
-          
-          // Check if promotion is active by date
-          if (now >= startDate && now <= endDate) {
+          // So sánh theo NGÀY giờ VN (khớp với /promotions/applicable): end_date
+          // là cột DATE → so timestamp với 00:00 ngày cuối làm mọi đơn sau nửa
+          // đêm ngày cuối bị RỚT khuyến mãi im lặng dù UI vừa báo giá đã giảm
+          const vnToday = new Date(Date.now() + 7 * 60 * 60 * 1000).toISOString().slice(0, 10);
+          const toDateStr = (v) => (v instanceof Date ? v.toISOString().slice(0, 10) : String(v).slice(0, 10));
+
+          // Check if promotion is active by date (biên bao gồm cả 2 đầu)
+          if (vnToday >= toDateStr(promotion.start_date) && vnToday <= toDateStr(promotion.end_date)) {
             // Check if customer meets promotion criteria
             const orderCount = customer.total_orders || 0;
             if (promotion.type === 'bill_amount' && promotion.min_bill_amount <= total) {
@@ -918,6 +921,20 @@ router.post('/:id/status', auditLog('update', 'order'), async (req, res) => {
     // Hủy đơn lần đầu (chưa từng hủy): hoàn tác thống kê khách đã cộng lúc tạo
     const isNewlyCancelled = status === 'cancelled' && order.status !== 'cancelled';
 
+    // Đơn ĐÃ THU TIỀN không được hủy trực tiếp: hủy chỉ hoàn tác thống kê khách,
+    // còn order_payments/tiền két/báo cáo doanh thu vẫn giữ nguyên → 3 sổ 3 số.
+    // Thực tế phải hoàn tiền cho khách trước (điều chỉnh sản phẩm/thanh toán).
+    if (isNewlyCancelled && (Number.parseFloat(order.paid_amount) || 0) > 0.009) {
+      return res.status(400).json({
+        error: 'Đơn đã thu tiền — không thể hủy trực tiếp. Vui lòng xử lý hoàn tiền/điều chỉnh thanh toán trước khi hủy.',
+      });
+    }
+    if (isNewlyCancelled) {
+      // Xóa trạng thái nợ khi hủy — nếu không, đơn hủy biến khỏi danh sách thu nợ
+      // của nhân viên nhưng vẫn nằm trong "công nợ còn lại" của báo cáo admin mãi mãi
+      updates.push('debt_amount = 0', 'is_debt = 0', "payment_status = 'unpaid'");
+    }
+
     await transaction(async (db) => {
       await db.execute(`
         UPDATE orders
@@ -969,6 +986,11 @@ router.post('/:id/status', auditLog('update', 'order'), async (req, res) => {
               total_spent = total_spent + ?
           WHERE id = ?
         `, [orderAmount, order.customer_id]);
+      }
+      // Bỏ hủy: tính lại paid/debt/payment_status từ order_payments (lúc hủy đã
+      // zero các trường nợ) — nhánh completed đã được sync ở khối phía trên
+      if (isNewlyUncancelled && status !== 'completed') {
+        await syncOrderPaymentStateTx(db, req.params.id, req.user);
       }
     });
 
@@ -1040,6 +1062,16 @@ router.delete('/:id', authorize('admin'), auditLog('delete', 'order'), async (re
     const ownerAdminId = order.store_admin_id || order.creator_admin_id;
     if (ownerAdminId && ownerAdminId !== req.user.id) {
       return res.status(403).json({ error: 'Bạn chỉ có thể xóa đơn hàng trong chuỗi cửa hàng của mình' });
+    }
+
+    // Đơn đã có giao dịch thanh toán: xóa sẽ CASCADE mất order_payments (báo cáo
+    // theo ngày mất tiền) trong khi tiền két + revenue ca đã chốt vẫn giữ —
+    // 3 báo cáo lệch nhau vĩnh viễn. Bắt xử lý thanh toán trước.
+    const hasPayments = await queryOne('SELECT 1 FROM order_payments WHERE order_id = ? LIMIT 1', [req.params.id]);
+    if (hasPayments) {
+      return res.status(400).json({
+        error: 'Đơn đã có giao dịch thanh toán — không thể xóa (sổ quỹ két sẽ lệch). Hãy hủy đơn sau khi xử lý hoàn tiền.',
+      });
     }
 
     await transaction(async (db) => {

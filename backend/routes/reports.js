@@ -1,4 +1,4 @@
-import express from 'express';
+﻿import express from 'express';
 import { query, queryOne, execute } from '../database/db.js';
 import { authenticate } from '../middleware/auth.js';
 import { authorize } from '../middleware/auth.js';
@@ -14,6 +14,11 @@ router.use(authenticate);
 
 // Helper function to get store_id from query param or token
 function getStoreIdFilter(req) {
+  // Employer/employee token: LUÔN dùng store trong token — nhận store_id từ
+  // query cho phép tài khoản tiệm A đọc doanh thu/tiền két của tiệm B
+  if (req.user.role !== 'admin' && req.user.role !== 'root') {
+    return req.user.store_id || null;
+  }
   const storeIdParam = req.query.store_id;
   if (storeIdParam && storeIdParam !== 'all' && storeIdParam !== '') {
     const storeIdValidation = validateId(storeIdParam);
@@ -105,10 +110,15 @@ function getUtcRangeFromQuery(req, month, year) {
   }
 
   if (req.query.start_date && req.query.end_date) {
-    const start = new Date(`${req.query.start_date}T00:00:00`);
-    const end = new Date(`${req.query.end_date}T00:00:00`);
-    end.setDate(end.getDate() + 1);
-    if (!Number.isNaN(start.getTime()) && !Number.isNaN(end.getTime())) {
+    // Mốc ngày phải quy đổi theo MÚI GIỜ CLIENT (như nhánh month/year bên dưới)
+    // — parse "T00:00:00" theo giờ server (UTC trên VPS) làm rớt các khoản
+    // 00:00–07:00 VN của ngày đầu kỳ và lệch với /revenue-daily
+    const offset = getTimezoneOffsetMinutes(req);
+    const startMs = Date.parse(`${req.query.start_date}T00:00:00Z`);
+    const endMs = Date.parse(`${req.query.end_date}T00:00:00Z`);
+    if (!Number.isNaN(startMs) && !Number.isNaN(endMs)) {
+      const start = new Date(startMs + offset * 60 * 1000);
+      const end = new Date(endMs + 24 * 60 * 60 * 1000 + offset * 60 * 1000);
       return { startAt: formatDateTimeUTC(start), endAt: formatDateTimeUTC(end) };
     }
   }
@@ -145,7 +155,7 @@ async function resolveDailyBusinessScope(req) {
     throw error;
   }
 
-  if (req.user.role === 'admin' && req.user.role !== 'root') {
+  if (req.user.role === 'admin') {
     if (storeId) {
       const store = await queryOne('SELECT id FROM stores WHERE id = ? AND admin_id = ?', [storeId, req.user.id]);
       if (!store) {
@@ -157,7 +167,15 @@ async function resolveDailyBusinessScope(req) {
     return { storeId, adminId: req.user.id };
   }
 
-  return { storeId, adminId: null };
+  // employer chưa gắn store (store_id NULL) hoặc root: KHÔNG được rơi xuống
+  // scope rỗng — buildDailyBusinessReport với storeId=null & adminId=null sẽ
+  // tổng hợp doanh thu của TOÀN BỘ hệ thống (mọi tenant)
+  if (req.user.role === 'employer' && storeId) {
+    return { storeId, adminId: null };
+  }
+  const error = new Error('Tài khoản chưa gắn cửa hàng — không thể xem báo cáo này');
+  error.statusCode = 403;
+  throw error;
 }
 
 router.get('/daily-business', authorize('admin', 'employer'), async (req, res) => {
@@ -713,20 +731,19 @@ router.get('/export', authorize('admin', 'employer'), async (req, res) => {
       return res.status(400).json({ error: 'Loại báo cáo là bắt buộc' });
     }
 
-    const monthNum = parseInt(month) || new Date().getMonth() + 1;
+    // Kẹp 1-12: month=13 âm thầm tạo range tháng 1 năm sau trong khi tên file ghi _13_
+    const monthNum = Math.min(12, Math.max(1, parseInt(month) || (new Date().getMonth() + 1)));
     const yearNum = parseInt(year) || new Date().getFullYear();
     const timezoneOffset = getTimezoneOffsetMinutes(req);
     const orderUpdatedDateExpr = localDateSql('o.updated_at', timezoneOffset);
     const monthRange = getUtcRangeFromQuery(req, monthNum, yearNum);
     let storeId = await resolveStoreIdForAdmin(req);
-    if (!storeId && store_id && store_id !== 'all') {
+    if (!storeId && store_id && store_id !== 'all' && req.user.role === 'admin') {
+      // Chỉ admin được chỉ định store — và phải là store thuộc chuỗi của mình.
+      // (Nhánh else cũ nhận thẳng store_id từ query cho employer → đọc chéo tenant)
       const sid = parseInt(store_id);
-      if (req.user.role === 'admin') {
-        const row = await queryOne('SELECT 1 FROM stores WHERE id = ? AND admin_id = ?', [sid, req.user.id]);
-        if (row) storeId = sid;
-      } else {
-        storeId = sid;
-      }
+      const row = await queryOne('SELECT 1 FROM stores WHERE id = ? AND admin_id = ?', [sid, req.user.id]);
+      if (row) storeId = sid;
     }
 
     let data = [];
@@ -1077,37 +1094,9 @@ router.get('/root/statistics', authorize('admin'), async (req, res) => {
         AND end_date >= CURDATE()
     `);
 
-    const topAdmins = await query(`
-      SELECT 
-        u.id,
-        u.name as admin_name,
-        u.phone,
-        u.subscription_package,
-        u.subscription_expires_at,
-        COUNT(DISTINCT s.id) as store_count,
-        COUNT(DISTINCT o.id) as order_count,
-        COALESCE(SUM(p.amount), 0) as revenue
-      FROM users u
-      LEFT JOIN stores s ON s.admin_id = u.id
-      LEFT JOIN orders o ON (
-        o.assigned_to IN (SELECT id FROM users WHERE store_id = s.id)
-        OR o.created_by IN (SELECT id FROM users WHERE store_id = s.id)
-      )
-      LEFT JOIN order_payments p ON p.order_id = o.id AND p.payment_method IN ('cash', 'transfer')
-      WHERE u.role = 'admin' AND u.status = 'active'
-      GROUP BY u.id, u.name, u.phone, u.subscription_package, u.subscription_expires_at
-      ORDER BY revenue DESC, order_count DESC
-      LIMIT 10
-    `);
-
-    const ordersByStatus = await query(`
-      SELECT 
-        status,
-        COUNT(*) as count
-      FROM orders
-      GROUP BY status
-      ORDER BY count DESC
-    `);
+    // (topAdmins + ordersByStatus đã bị xóa: response không bao giờ trả 2 khối
+    // này, trong khi topAdmins là triple-JOIN nhân bản payment rất nặng chạy
+    // trên MỌI lượt mở dashboard root — thuần lãng phí)
 
     const subscriptionPackages = await query(`
       SELECT 
@@ -1169,9 +1158,7 @@ router.get('/revenue-by-product-daily', authorize('admin', 'employer'), async (r
     const monthRange = getUtcRangeFromQuery(req, monthYearValidation.month, monthYearValidation.year);
     const offset = (paginationValidation.page - 1) * paginationValidation.limit;
 
-    // Increase GROUP_CONCAT max length to ensure all employees are included
-    await execute('SET SESSION group_concat_max_len = 10000');
-
+    // group_concat_max_len được set cho mọi connection ở db.js pool hook
     let querySql = `
       SELECT 
         ${orderDateExpr} as date,
@@ -1270,7 +1257,7 @@ router.get('/revenue-by-product-daily', authorize('admin', 'employer'), async (r
     });
   } catch (error) {
 
-    res.status(500).json({ error: error.message || 'Server error' });
+    res.status(500).json({ error: 'Lỗi máy chủ. Vui lòng thử lại.' });
   }
 });
 
@@ -1301,9 +1288,7 @@ router.get('/revenue-by-category-daily', authorize('admin', 'employer'), async (
     const monthRange = getUtcRangeFromQuery(req, monthYearValidation.month, monthYearValidation.year);
     const offset = (paginationValidation.page - 1) * paginationValidation.limit;
 
-    // Increase GROUP_CONCAT max length to ensure all employees are included
-    await execute('SET SESSION group_concat_max_len = 10000');
-
+    // group_concat_max_len được set cho mọi connection ở db.js pool hook
     let querySql = `
       SELECT 
         ${orderDateExpr} as date,
@@ -1398,7 +1383,7 @@ router.get('/revenue-by-category-daily', authorize('admin', 'employer'), async (
   } catch (error) {
     console.error('Get revenue by category daily error:', error);
     console.error('User role:', req.user?.role, 'Store ID:', req.user?.store_id);
-    res.status(500).json({ error: error.message || 'Server error' });
+    res.status(500).json({ error: 'Lỗi máy chủ. Vui lòng thử lại.' });
   }
 });
 
@@ -1468,6 +1453,13 @@ router.get('/revenue-by-employee-daily', authorize('admin', 'employer'), async (
         )
       )`;
       params.push(storeId, storeId, storeId);
+    } else if (req.user.role === 'admin') {
+      // Admin không chọn store: giới hạn trong CHUỖI của admin — thiếu nhánh
+      // này thì admin xem "tất cả cửa hàng" nhận doanh thu nhân viên của MỌI
+      // tenant trong hệ thống (các endpoint khác đều có nhánh tương tự)
+      const chain = adminStoresOnlyFilter('o');
+      querySql += chain.sql;
+      params.push(...chain.params(req.user.id));
     }
 
     querySql += ` GROUP BY ${orderDateExpr}, u.id, u.name ORDER BY date DESC, total_revenue DESC`;
@@ -1526,9 +1518,7 @@ router.get('/revenue-by-payment-daily', authorize('admin'), async (req, res) => 
     const monthRange = getUtcRangeFromQuery(req, monthYearValidation.month, monthYearValidation.year);
     const offset = (paginationValidation.page - 1) * paginationValidation.limit;
 
-    // Increase GROUP_CONCAT max length to ensure all employees are included
-    await execute('SET SESSION group_concat_max_len = 10000');
-
+    // group_concat_max_len được set cho mọi connection ở db.js pool hook
     // Group by payment method (cash or transfer)
     let querySql = `
       SELECT 
@@ -1661,6 +1651,7 @@ router.get('/revenue-by-shift-daily', authorize('admin', 'employer'), async (req
         TIME(t.check_out) as check_out_time,
         t.expected_revenue as start_revenue,
         t.revenue_amount as end_revenue,
+        t.actual_cash_amount,
         COALESCE(t.withdrawn_amount, 0) as withdrawn_amount,
         t.note,
         t.regular_hours,
@@ -1710,7 +1701,7 @@ router.get('/revenue-by-shift-daily', authorize('admin', 'employer'), async (req
   } catch (error) {
     console.error('Get revenue by shift daily error:', error);
     console.error('User role:', req.user?.role, 'Store ID:', req.user?.store_id);
-    res.status(500).json({ error: error.message || 'Server error' });
+    res.status(500).json({ error: 'Lỗi máy chủ. Vui lòng thử lại.' });
   }
 });
 
@@ -1948,7 +1939,7 @@ router.get('/revenue-daily', authorize('admin', 'employer'), async (req, res) =>
       days_in_month: lastDay,
     });
   } catch (error) {
-    res.status(500).json({ error: error.message || 'Server error' });
+    res.status(500).json({ error: 'Lỗi máy chủ. Vui lòng thử lại.' });
   }
 });
 

@@ -48,7 +48,6 @@ function Orders() {
   const [searchTimeout, setSearchTimeout] = useState(null);
   const [showCompleteModal, setShowCompleteModal] = useState(false);
   const [orderToComplete, setOrderToComplete] = useState(null);
-  const [shouldPrint, setShouldPrint] = useState(false);
   const [printing, setPrinting] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState('cash');
   const [customAmountPaid, setCustomAmountPaid] = useState('');
@@ -208,7 +207,6 @@ function Orders() {
   const handleCompleteClick = (order) => {
     setOrderToComplete(order);
     setShowCompleteModal(true);
-    setShouldPrint(false);
     // Reset số tiền của lần hoàn thành trước — không reset thì số cũ (vd 5.000
     // gõ dở rồi Hủy) âm thầm được gửi làm amount_paid của đơn TIẾP THEO
     setCustomAmountPaid('');
@@ -268,25 +266,12 @@ function Orders() {
       }
       await api.post(`/orders/${orderToComplete.id}/status`, payload);
 
-      // Print bill if selected
-      if (shouldPrint) {
-        setPrinting(true);
-        try {
-          const result = await printBill(orderToComplete.id);
-          showToast(`Đơn hàng đã hoàn thành và bill đã được in! (Phương thức: ${result.method === 'bluetooth' ? 'Bluetooth' : 'Server'})`);
-        } catch (printError) {
-          console.error('Print error:', printError);
-          showToast(printError.message || 'Đơn hàng đã hoàn thành nhưng in bill thất bại. Vui lòng kiểm tra kết nối máy in.');
-        } finally {
-          setPrinting(false);
-        }
-      } else {
-        showToast('Đơn hàng đã hoàn thành!');
-      }
+      // (Nhánh "in bill khi hoàn thành" đã xóa: shouldPrint không bao giờ được
+      // set true — không có checkbox nào bật nó; in bill có nút riêng)
+      showToast('Đơn hàng đã hoàn thành!');
 
       setShowCompleteModal(false);
       setOrderToComplete(null);
-      setShouldPrint(false);
       setPaymentMethod('cash');
       setCustomAmountPaid('');
       loadOrders();
@@ -484,7 +469,6 @@ function Orders() {
       <div className="flex items-center justify-between mb-6">
         <div>
           <h1 className="text-3xl font-bold text-gray-900 mb-2">Đơn hàng</h1>
-          <p className="text-gray-600">Quản lý đơn hàng</p>
         </div>
         {!isAdmin() && (
           <button
@@ -1254,7 +1238,6 @@ function Orders() {
                 onClick={() => {
                   setShowCompleteModal(false);
                   setOrderToComplete(null);
-                  setShouldPrint(false);
                   setPaymentMethod('cash');
                   setCustomAmountPaid('');
                 }}
@@ -1358,7 +1341,6 @@ function Orders() {
                   onClick={() => {
                     setShowCompleteModal(false);
                     setOrderToComplete(null);
-                    setShouldPrint(false);
                     setPaymentMethod('cash');
                   }}
                   disabled={printing}

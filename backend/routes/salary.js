@@ -110,7 +110,14 @@ const buildSalarySummary = async (req, employee, month, year) => {
     total_overtime_hours: Number(totalsRow?.total_overtime_hours) || 0,
   };
 
-  const hourlyRate = Number.parseFloat(employee.hourly_rate) || 0;
+  let hourlyRate = Number.parseFloat(employee.hourly_rate) || 0;
+  if (!hourlyRate && employee.store_id) {
+    // Fallback giống payroll admin (COALESCE(e.hourly_rate, u.hourly_rate)) —
+    // thiếu fallback thì payroll trả X đồng còn "Lương của tôi" trả 0 cho cùng
+    // một người cùng tháng (employees.store_id = users.id của tài khoản tiệm)
+    const owner = await queryOne('SELECT hourly_rate FROM users WHERE id = ?', [employee.store_id]);
+    hourlyRate = Number.parseFloat(owner?.hourly_rate) || 0;
+  }
   const workSalary = computeWorkSalary(totals, hourlyRate);
   const totalCommission = Math.round((Number.parseFloat(commissionRow?.commission) || 0) * 100) / 100;
 

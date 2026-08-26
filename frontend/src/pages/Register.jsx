@@ -145,7 +145,7 @@ function Register() {
                 value={form.password}
                 onChange={(e) => setForm({ ...form, password: e.target.value })}
                 className="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                placeholder="Ít nhất 6 ký tự"
+                placeholder="Ít nhất 8 ký tự, có hoa, thường và số"
                 required
                 minLength={8}
               />

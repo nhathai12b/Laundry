@@ -112,6 +112,10 @@ const DUPLICATE_GUARD_SKIP = ['/auth/', '/integrations/', '/print/'];
 app.use('/api', (req, res, next) => {
   if (DUPLICATE_GUARD_SKIP.some((p) => req.path.startsWith(p))) return next();
   if (/^\/orders\/\d+\/payments$/.test(req.path)) return next();
+  // Cùng lý do với payments: 2 lần nhập/rút két giống hệt nhau trong 5s là
+  // nghiệp vụ hợp lệ (2 khoản chi cùng số tiền) — nuốt request thứ 2 làm két
+  // thiếu tiền im lặng. Nút bấm đã có chống double-click riêng ở frontend.
+  if (req.path === '/cash-drawer/cash-in' || req.path === '/cash-drawer/cash-out') return next();
   return duplicateGuard(req, res, next);
 });
 

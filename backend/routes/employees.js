@@ -245,6 +245,20 @@ router.patch('/:id', blockEmployeeLogin, async (req, res) => {
       values.push(phoneValue);
     }
     if (status !== undefined) {
+      // Không cho vô hiệu hóa khi còn ca đang mở: ca đó vẫn là "ca chính" giữ
+      // két đến nửa đêm, tiền được ghi cho người đã nghỉ việc (DELETE đã chặn
+      // tương tự — PATCH status phải cùng luật)
+      if (status === 'inactive' && employee.status === 'active') {
+        const openShift = await queryOne(
+          'SELECT id FROM timesheets WHERE employee_id = ? AND check_out IS NULL LIMIT 1',
+          [employee.id]
+        ).catch(() => null);
+        if (openShift) {
+          return res.status(400).json({
+            error: 'Nhân viên đang có ca làm việc chưa check-out. Vui lòng check-out ca trước khi vô hiệu hóa.',
+          });
+        }
+      }
       updates.push('status = ?');
       values.push(status);
     }

@@ -269,7 +269,6 @@ function Dashboard() {
       <div className="space-y-6">
         <div className="mb-6">
           <h1 className="text-3xl font-bold text-gray-900 mb-2">Dashboard - Root Admin</h1>
-          <p className="text-gray-600">Tổng quan hệ thống</p>
         </div>
 
         {/* Main Stats */}
@@ -357,7 +356,6 @@ function Dashboard() {
       <div className="mb-6 flex flex-wrap items-end gap-4 justify-between">
         <div>
           <h1 className="text-3xl font-bold text-gray-900 mb-2">Dashboard</h1>
-          <p className="text-gray-600">Tổng quan hệ thống</p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
           <div>
@@ -451,15 +449,9 @@ function Dashboard() {
         </div>
       )}
 
-      {/* Stats Grid */}
+      {/* Stats Grid — thẻ "Đơn hôm nay" đã bỏ: trùng "Số đơn hoàn thành" ở khối
+          doanh thu phía trên (cùng stats.todayOrders), và nhãn sai khi xem theo tháng/năm */}
       <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
-        <div className="bg-gradient-to-br from-blue-50 to-cyan-100 rounded-xl shadow-lg p-5 border border-blue-200 hover:shadow-xl transition-all duration-300">
-          <div className="flex items-center justify-between mb-3">
-            <div className="text-xs font-medium text-blue-700 uppercase tracking-wide">Đơn hôm nay</div>
-            <div className="text-xl">📋</div>
-          </div>
-          <div className="text-2xl font-bold text-blue-600">{stats.todayOrders}</div>
-        </div>
         <div className="bg-gradient-to-br from-purple-50 to-pink-100 rounded-xl shadow-lg p-5 border border-purple-200 hover:shadow-xl transition-all duration-300">
           <div className="flex items-center justify-between mb-3">
             <div className="text-xs font-medium text-purple-700 uppercase tracking-wide">Tổng khách hàng</div>

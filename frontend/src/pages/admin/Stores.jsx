@@ -119,10 +119,13 @@ function Stores() {
     try {
       const submitData = {
         ...userFormData,
-        // Set default values for required fields when creating new user
         role: 'employer',
-        status: 'active',
       };
+      // status chỉ set khi TẠO MỚI — gửi 'active' trong mọi PATCH sẽ âm thầm
+      // kích hoạt lại tài khoản đã bị vô hiệu khi admin chỉ sửa tên/lương
+      if (!editingUser) {
+        submitData.status = 'active';
+      }
       
       if (editingUser) {
         // Remove password if empty when editing

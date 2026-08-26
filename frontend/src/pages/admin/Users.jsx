@@ -114,7 +114,9 @@ function Users() {
       phone: user.phone,
       password: '',
       role: user.role,
-      started_at: user.started_at || '',
+      // input type="date" chỉ nhận YYYY-MM-DD — đổ nguyên chuỗi ISO datetime
+      // vào sẽ render ô trống dù DB có giá trị
+      started_at: user.started_at ? String(user.started_at).slice(0, 10) : '',
       status: user.status,
       hourly_rate: user.hourly_rate || '',
       shift_rate: user.shift_rate || '',
@@ -287,7 +289,6 @@ function Users() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-gray-800">Tài khoản & Nhân viên</h1>
-          <p className="text-gray-600">Quản lý tài khoản và nhân viên</p>
         </div>
         <button
           onClick={() => {

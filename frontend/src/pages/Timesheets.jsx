@@ -47,8 +47,8 @@ function Timesheets() {
   const [checkoutWithdrawnAmount, setCheckoutWithdrawnAmount] = useState('');
   const [dailyHours, setDailyHours] = useState([]);
   const [dailyHoursLoading, setDailyHoursLoading] = useState(false);
-  const [viewMode, setViewMode] = useState(isAdmin() ? 'list' : 'list'); // 'list', 'daily', 'payroll'
-  const [periodViewMode, setPeriodViewMode] = useState(isAdmin() ? 'day' : 'day'); // 'day', 'month', or 'year' for admin
+  const [viewMode, setViewMode] = useState('list'); // 'list', 'daily', 'payroll'
+  const [periodViewMode, setPeriodViewMode] = useState('day'); // 'day', 'month', or 'year' for admin
   const [daysInMonth, setDaysInMonth] = useState(31);
   const [showCheckinModal, setShowCheckinModal] = useState(false);
   const [employees, setEmployees] = useState([]);

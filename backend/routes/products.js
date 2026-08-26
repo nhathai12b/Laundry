@@ -1,4 +1,4 @@
-import express from 'express';
+﻿import express from 'express';
 import { query, queryOne, execute } from '../database/db.js';
 import { authenticate, authorize } from '../middleware/auth.js';
 import { auditLog } from '../middleware/audit.js';
@@ -342,7 +342,7 @@ router.delete('/:id', authorize('admin'), auditLog('delete', 'product'), async (
     });
   } catch (error) {
     console.error('Delete product error:', error);
-    res.status(500).json({ error: error.message || 'Server error' });
+    res.status(500).json({ error: 'Lỗi máy chủ. Vui lòng thử lại.' });
   }
 });
 

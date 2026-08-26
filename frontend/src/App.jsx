@@ -22,7 +22,6 @@ const Customers = lazy(() => import('./pages/Customers'));
 const Timesheets = lazy(() => import('./pages/Timesheets'));
 const Reports = lazy(() => import('./pages/admin/Reports'));
 const Settings = lazy(() => import('./pages/admin/Settings'));
-const Employees = lazy(() => import('./pages/admin/Employees'));
 const Stores = lazy(() => import('./pages/admin/Stores'));
 const AdminManagement = lazy(() => import('./pages/admin/AdminManagement'));
 const Promotions = lazy(() => import('./pages/admin/Promotions'));
@@ -163,7 +162,6 @@ function App() {
           <Route path="pending-orders" element={<PendingOrders />} />
           <Route path="customers" element={<Customers />} />
           <Route path="timesheets" element={<Timesheets />} />
-          <Route path="employees" element={<Employees />} />
         </Route>
       </Routes>
       </Suspense>

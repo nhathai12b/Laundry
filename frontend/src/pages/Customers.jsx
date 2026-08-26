@@ -23,7 +23,8 @@ function Customers() {
     if (isAdmin()) {
       loadStores();
     }
-    loadCustomers();
+    // loadCustomers KHÔNG gọi ở đây — effect filter bên dưới đã chạy lúc mount,
+    // gọi cả 2 nơi là fetch trùng + race (response cũ đè response mới)
   }, []);
 
   useEffect(() => {
@@ -111,7 +112,6 @@ function Customers() {
       <div className="mb-4 sm:mb-6 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 sm:gap-0">
         <div className="flex-1 min-w-0">
           <h1 className="text-2xl sm:text-3xl font-bold text-gray-900 mb-1 sm:mb-2">Khách hàng</h1>
-          <p className="text-sm sm:text-base text-gray-600">Danh sách khách hàng</p>
         </div>
         {isAdmin() && stores.length > 0 && (
           <div className="w-full sm:w-auto">

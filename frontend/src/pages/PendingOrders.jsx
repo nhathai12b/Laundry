@@ -10,7 +10,6 @@ function PendingOrders() {
   const [loading, setLoading] = useState(true);
   const [showCompleteModal, setShowCompleteModal] = useState(false);
   const [orderToComplete, setOrderToComplete] = useState(null);
-  const [shouldPrint, setShouldPrint] = useState(false);
   const [printing, setPrinting] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState('cash');
   const [customAmountPaid, setCustomAmountPaid] = useState('');
@@ -48,7 +47,6 @@ function PendingOrders() {
   const handleCompleteClick = (order) => {
     setOrderToComplete(order);
     setShowCompleteModal(true);
-    setShouldPrint(false);
     setPaymentMethod('cash');
     setCustomAmountPaid('');
   };
@@ -90,7 +88,6 @@ function PendingOrders() {
 
       setShowCompleteModal(false);
       setOrderToComplete(null);
-      setShouldPrint(false);
       setPaymentMethod('cash');
       setCustomAmountPaid('');
       setPrinting(false);
@@ -144,10 +141,10 @@ function PendingOrders() {
   };
 
   const statusLabels = {
-    created: 'Mới tạo',
+    created: 'Đã tạo',
     washing: 'Đang giặt',
     drying: 'Đang sấy',
-    waiting_pickup: 'Chờ lấy',
+    waiting_pickup: 'Chờ nhận',
     completed: 'Hoàn thành',
     cancelled: 'Đã hủy',
   };
@@ -305,7 +302,6 @@ function PendingOrders() {
             if (e.target === e.currentTarget) {
               setShowCompleteModal(false);
               setOrderToComplete(null);
-              setShouldPrint(false);
               setPaymentMethod('cash');
               setCustomAmountPaid('');
             }
@@ -319,7 +315,6 @@ function PendingOrders() {
                 onClick={() => {
                   setShowCompleteModal(false);
                   setOrderToComplete(null);
-                  setShouldPrint(false);
                   setPaymentMethod('cash');
                   setCustomAmountPaid('');
                 }}
@@ -412,7 +407,6 @@ function PendingOrders() {
                 onClick={() => {
                   setShowCompleteModal(false);
                   setOrderToComplete(null);
-                  setShouldPrint(false);
                   setPaymentMethod('cash');
                   setCustomAmountPaid('');
                 }}

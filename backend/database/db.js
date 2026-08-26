@@ -33,6 +33,14 @@ pool.on('connection', (connection) => {
       console.warn('Warning setting MySQL session timezone to UTC:', error.message);
     }
   });
+  // Set 1 lần cho MỖI connection trong pool — chạy `SET SESSION` qua pool.query
+  // ở route chỉ trúng 1 connection ngẫu nhiên, query báo cáo sau đó thường chạy
+  // trên connection khác vẫn ở mặc định 1024 byte → GROUP_CONCAT bị cắt cụt
+  connection.query('SET SESSION group_concat_max_len = 10000', (error) => {
+    if (error) {
+      console.warn('Warning setting group_concat_max_len:', error.message);
+    }
+  });
 });
 
 // Initialize database - create database if not exists and execute schema
@@ -290,9 +298,11 @@ export const execute = async (sql, params = []) => {
 // Helper function for transactions
 export const transaction = async (callback) => {
   const connection = await pool.getConnection();
-  await connection.beginTransaction();
-  
+
   try {
+    // beginTransaction phải nằm TRONG try — throw ở đây mà nằm ngoài thì
+    // connection không bao giờ release, cạn pool (limit 10) là treo cả app
+    await connection.beginTransaction();
     const result = await callback({
       query: async (sql, params) => {
         const [rows] = await connection.query(sql, params);

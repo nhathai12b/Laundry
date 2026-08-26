@@ -1,5 +1,6 @@
 ﻿import { useEffect, useState } from 'react';
 import { showToast } from '../../utils/toast';
+import PageSkeleton from '../../components/PageSkeleton';
 import api from '../../utils/api';
 import { isAdmin } from '../../utils/auth';
 import { getSavedFilters, saveFilters } from '../../utils/filterStorage';
@@ -32,7 +33,8 @@ function Promotions() {
     if (isAdmin()) {
       loadStores();
     }
-    loadPromotions();
+    // loadPromotions KHÔNG gọi ở đây — effect [filterType, selectedStoreId]
+    // bên dưới đã chạy lúc mount, gọi cả 2 nơi là fetch trùng + race
   }, []);
 
   useEffect(() => {
@@ -108,8 +110,9 @@ function Promotions() {
       return;
     }
 
-    if (new Date(formData.start_date) >= new Date(formData.end_date)) {
-      showToast('Ngày kết thúc phải sau ngày bắt đầu');
+    // Cho phép start == end (khuyến mãi 1 ngày) — khớp validator backend
+    if (new Date(formData.start_date) > new Date(formData.end_date)) {
+      showToast('Ngày kết thúc không được trước ngày bắt đầu');
       return;
     }
 
@@ -122,12 +125,9 @@ function Promotions() {
         max_discount_amount: formData.max_discount_amount ? parseFloat(formData.max_discount_amount) : null,
       };
 
-      // Add store_id from form or fallback to selectedStoreId filter
-      if (formData.store_id) {
-        submitData.store_id = parseInt(formData.store_id);
-      } else if (isAdmin() && selectedStoreId && selectedStoreId !== 'all') {
-        submitData.store_id = parseInt(selectedStoreId);
-      }
+      // store_id lấy ĐÚNG theo lựa chọn trong form: người dùng chọn "Tất cả cửa
+      // hàng" mà lại fallback theo filter đang lọc là trái ý họ một cách âm thầm
+      submitData.store_id = formData.store_id ? parseInt(formData.store_id) : null;
 
       // Debug log removed for security
 
@@ -230,7 +230,7 @@ function Promotions() {
   };
 
   if (loading) {
-    return <div className="text-center py-8">Đang tải...</div>;
+    return <PageSkeleton />;
   }
 
   return (
@@ -238,7 +238,6 @@ function Promotions() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-gray-800">Khuyến mãi</h1>
-          <p className="text-gray-600">Quản lý chương trình khuyến mãi</p>
         </div>
         <div className="flex items-center gap-4">
           {isAdmin() && stores.length > 0 && (

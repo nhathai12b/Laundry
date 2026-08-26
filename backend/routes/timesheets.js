@@ -5,7 +5,7 @@ import { authenticate } from '../middleware/auth.js';
 import { authorize } from '../middleware/auth.js';
 import { getClientIp } from '../middleware/rateLimiter.js';
 import { OVERTIME_MULTIPLIER } from '../utils/constants.js';
-import { ensureOpeningFloatTx, getDrawerSummaryTx, recordClosingCountTx } from '../services/cashDrawerService.js';
+import { ensureOpeningFloatTx, getDrawerSummaryTx, recordClosingCountTx, recordCheckoutWithdrawalTx } from '../services/cashDrawerService.js';
 import * as XLSX from 'xlsx';
 
 const router = express.Router();
@@ -111,13 +111,20 @@ async function getShiftPaymentSummary(db, timesheet, userId, startAt, endAt) {
     WHERE p.paid_at >= ?
       AND p.paid_at <= ?
       AND p.payment_method IN ('cash', 'transfer')
-      AND (p.user_id = ? OR o2.assigned_to = ? OR o2.created_by = ?)
   `;
-  const params = [startAt, endAt, userId, userId, userId];
+  const params = [startAt, endAt];
 
   if (timesheet.store_id) {
+    // Scope THEO TIỆM — phải khớp với routing tiền vào két (findOpenTimesheet
+    // cũng scope theo tiệm). Lọc thêm theo user làm ca chính "mù" các khoản do
+    // tài khoản khác của cùng tiệm thu (hoặc admin thu nợ hộ): két cộng tiền
+    // nhưng revenue ca không thấy → hiện chênh lệch ảo đổ lên đầu nhân viên
     paymentsSubquery += ' AND COALESCE(p.store_id, o2.store_id) = ?';
     params.push(timesheet.store_id);
+  } else {
+    // Ca legacy không gắn tiệm: đành scope theo người
+    paymentsSubquery += ' AND (p.user_id = ? OR o2.assigned_to = ? OR o2.created_by = ?)';
+    params.push(userId, userId, userId);
   }
 
   paymentsSubquery += ' GROUP BY p.order_id';
@@ -850,6 +857,16 @@ router.post('/check-out', async (req, res) => {
         normalizedCheckIn,
         checkOut
       );
+      // Tiền rút lúc check-out vào sổ két như cash_out TRƯỚC khi chốt số —
+      // để expected giảm tương ứng, không ghi oan "thiếu két" cho nhân viên
+      if (withdrawnValue && withdrawnValue > 0) {
+        try {
+          await recordCheckoutWithdrawalTx(db, timesheet, withdrawnValue, req.user);
+        } catch (drawerError) {
+          if (drawerError.code !== 'ER_NO_SUCH_TABLE') throw drawerError;
+        }
+      }
+
       await recordClosingCountTx(db, timesheet, {
         actual_cash_amount: actualCashValue,
         cash_shortage_paid_amount: shortagePaidValue,

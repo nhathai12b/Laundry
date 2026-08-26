@@ -173,6 +173,23 @@ export async function recordCashOut(timesheetId, payload, actor) {
   });
 }
 
+// Tiền rút khỏi két lúc check-out — ghi thành cash_out TRONG transaction đóng ca
+// để expected_cash giảm tương ứng TRƯỚC khi tính chênh lệch. Không có bút toán
+// này, nhân viên rút 200k hợp lệ sẽ bị ghi "thiếu két 200k" (expected không đổi
+// nhưng số đếm thực tế đã bớt 200k).
+export async function recordCheckoutWithdrawalTx(db, timesheet, amount, actor) {
+  if (!Number.isFinite(amount) || amount <= 0) return null;
+  return insertCashDrawerTransactionTx(db, {
+    type: 'cash_out',
+    amount,
+    store_id: timesheet.store_id,
+    timesheet_id: timesheet.id,
+    user_id: actor?.id || null,
+    employee_id: timesheet.employee_id || null,
+    reason: 'Rút tiền khi check-out',
+  });
+}
+
 export async function recordClosingCountTx(db, timesheet, payload, actor) {
   const summary = await getDrawerSummaryTx(db, timesheet.id);
   // actual_cash_amount = null/undefined → chốt theo số kỳ vọng (chênh lệch 0).

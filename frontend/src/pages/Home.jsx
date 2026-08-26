@@ -135,7 +135,6 @@ function Home() {
   });
   const [showCompleteModal, setShowCompleteModal] = useState(false);
   const [orderToComplete, setOrderToComplete] = useState(null);
-  const [shouldPrint, setShouldPrint] = useState(false);
   const [printing, setPrinting] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState('cash');
   const [amountPaid, setAmountPaid] = useState('');
@@ -323,11 +322,14 @@ function Home() {
 
   const handleCompleteClick = (order) => {
     const finalAmount = parseFloat(order.final_amount || order.total_amount || 0) || 0;
+    // Điền sẵn PHẦN CÒN LẠI (trừ tiền đã trả trước) — điền full sẽ bị backend
+    // chặn "exceeds remaining" khi thu nốt tiền đơn đã trả một phần
+    const paidSoFar = parseFloat(order.paid_amount || 0) || 0;
+    const remaining = Math.max(finalAmount - paidSoFar, 0);
     setOrderToComplete(order);
     setShowCompleteModal(true);
-    setShouldPrint(false);
     setPaymentMethod('cash'); // Reset to default
-    setAmountPaid(String(finalAmount));
+    setAmountPaid(String(remaining));
     setDeliveryMethod('pickup');
   };
 
@@ -456,7 +458,6 @@ function Home() {
 
       setShowCompleteModal(false);
       setOrderToComplete(null);
-      setShouldPrint(false);
       setPaymentMethod('cash');
       setAmountPaid('');
       setDeliveryMethod('pickup');
@@ -839,7 +840,7 @@ function Home() {
     created: 'Đã tạo',
     washing: 'Đang giặt',
     drying: 'Đang sấy',
-    waiting_pickup: 'Chờ lấy',
+    waiting_pickup: 'Chờ nhận',
     completed: 'Hoàn thành',
     cancelled: 'Đã hủy',
   };
@@ -858,7 +859,9 @@ function Home() {
       {viewTab === 'home' && (
       <>
       {/* Header with Stats */}
-      <div className="grid grid-cols-3 gap-2 sm:gap-3">
+      {/* Thẻ "Tổng tiền" đã bỏ: gần trùng "Doanh thu" (chỉ khác phần đơn chưa
+          hoàn thành) — 2 thẻ rộng rãi hơn trên mobile */}
+      <div className="grid grid-cols-2 gap-2 sm:gap-3">
         <div className="bg-white rounded-lg shadow p-3 sm:p-4">
           <div className="text-xs sm:text-sm text-gray-600 mb-1">Doanh thu</div>
           <div className="text-base sm:text-lg font-bold text-green-600">
@@ -868,12 +871,6 @@ function Home() {
         <div className="bg-white rounded-lg shadow p-3 sm:p-4">
           <div className="text-xs sm:text-sm text-gray-600 mb-1">Tổng đơn</div>
           <div className="text-base sm:text-lg font-bold text-blue-600">{stats.todayOrders}</div>
-        </div>
-        <div className="bg-white rounded-lg shadow p-3 sm:p-4">
-          <div className="text-xs sm:text-sm text-gray-600 mb-1">Tổng tiền</div>
-          <div className="text-base sm:text-lg font-bold text-purple-600">
-            {new Intl.NumberFormat('vi-VN').format(parseFloat(stats.totalAmount) || 0)} đ
-          </div>
         </div>
       </div>
 
@@ -1895,7 +1892,6 @@ function Home() {
                 onClick={() => {
                   setShowCompleteModal(false);
                   setOrderToComplete(null);
-                  setShouldPrint(false);
                   setPaymentMethod('cash');
                   setAmountPaid('');
                   setDeliveryMethod('pickup');
@@ -2003,7 +1999,6 @@ function Home() {
                 onClick={() => {
                   setShowCompleteModal(false);
                   setOrderToComplete(null);
-                  setShouldPrint(false);
                   setPaymentMethod('cash');
                   setAmountPaid('');
                   setDeliveryMethod('pickup');

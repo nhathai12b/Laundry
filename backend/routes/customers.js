@@ -9,6 +9,46 @@ const router = express.Router();
 // All routes require authentication
 router.use(authenticate);
 
+// Khách "thuộc phạm vi" người gọi khi có ít nhất 1 đơn trong chuỗi (admin)
+// hoặc tại tiệm (employer/nhân viên). Root là vendor phần mềm — không xem khách.
+// Thiếu check này thì tài khoản tiệm A dò id/SĐT đọc và SỬA được khách của tiệm B.
+async function customerVisibleToActor(customerId, user) {
+  if (user.role === 'root') return false;
+  if (user.role === 'admin') {
+    const row = await queryOne(`
+      SELECT 1 FROM orders o
+      WHERE o.customer_id = ?
+        AND (
+          (o.store_id IN (SELECT id FROM stores WHERE admin_id = ?))
+          OR (o.store_id IS NULL AND (
+            o.assigned_to IN (SELECT id FROM users WHERE store_id IN (SELECT id FROM stores WHERE admin_id = ?))
+            OR o.created_by IN (SELECT id FROM users WHERE store_id IN (SELECT id FROM stores WHERE admin_id = ?))
+          ))
+        )
+      LIMIT 1
+    `, [customerId, user.id, user.id, user.id]);
+    return Boolean(row);
+  }
+  // employer / employee_login (token role vẫn là 'employer')
+  if (user.store_id) {
+    const row = await queryOne(`
+      SELECT 1 FROM orders o
+      WHERE o.customer_id = ?
+        AND (
+          o.store_id = ?
+          OR (o.store_id IS NULL AND (o.assigned_to = ? OR o.created_by = ?))
+        )
+      LIMIT 1
+    `, [customerId, user.store_id, user.id, user.id]);
+    return Boolean(row);
+  }
+  const row = await queryOne(
+    'SELECT 1 FROM orders o WHERE o.customer_id = ? AND (o.assigned_to = ? OR o.created_by = ?) LIMIT 1',
+    [customerId, user.id, user.id]
+  );
+  return Boolean(row);
+}
+
 // Get all customers
 router.get('/', async (req, res) => {
   try {
@@ -122,22 +162,9 @@ router.get('/by-phone/:phone', async (req, res) => {
       return res.json({ data: null });
     }
 
-    // Admin chuỗi: chỉ trả về khách nếu khách có đơn tại cửa hàng trong chuỗi của admin
-    if (req.user.role === 'admin' && req.user.role !== 'root') {
-      const hasOrderInChain = await queryOne(`
-        SELECT 1 FROM orders o
-        WHERE o.customer_id = ?
-          AND (
-            (o.store_id IN (SELECT id FROM stores WHERE admin_id = ?))
-            OR (o.store_id IS NULL AND (
-              o.assigned_to IN (SELECT id FROM users WHERE store_id IN (SELECT id FROM stores WHERE admin_id = ?))
-              OR o.created_by IN (SELECT id FROM users WHERE store_id IN (SELECT id FROM stores WHERE admin_id = ?))
-            ))
-          )
-      `, [customer.id, req.user.id, req.user.id, req.user.id]);
-      if (!hasOrderInChain) {
-        return res.json({ data: null });
-      }
+    // Chỉ trả về khách trong phạm vi của người gọi (admin: chuỗi; employer: tiệm)
+    if (!(await customerVisibleToActor(customer.id, req.user))) {
+      return res.json({ data: null });
     }
 
     res.json({ data: customer });
@@ -156,23 +183,8 @@ router.get('/:id', async (req, res) => {
       return res.status(404).json({ error: 'Customer not found' });
     }
 
-    // Admin chuỗi: chỉ trả về khách nếu khách có đơn tại cửa hàng trong chuỗi của admin
-    if (req.user.role === 'admin' && req.user.role !== 'root') {
-      const hasOrderInChain = await queryOne(`
-        SELECT 1 FROM orders o
-        WHERE o.customer_id = ?
-          AND (
-            (o.store_id IN (SELECT id FROM stores WHERE admin_id = ?))
-            OR (o.store_id IS NULL AND (
-              o.assigned_to IN (SELECT id FROM users WHERE store_id IN (SELECT id FROM stores WHERE admin_id = ?))
-              OR o.created_by IN (SELECT id FROM users WHERE store_id IN (SELECT id FROM stores WHERE admin_id = ?))
-            ))
-          )
-      `, [customer.id, req.user.id, req.user.id, req.user.id]);
-      if (!hasOrderInChain) {
-        return res.status(404).json({ error: 'Customer not found' });
-      }
-    } else if (req.user.role === 'root') {
+    // Scope theo người gọi (admin: chuỗi; employer/nhân viên: tiệm; root: không xem)
+    if (!(await customerVisibleToActor(customer.id, req.user))) {
       return res.status(404).json({ error: 'Customer not found' });
     }
 
@@ -226,13 +238,19 @@ router.post('/', async (req, res) => {
     if (!phoneValidation.valid) {
       return res.status(400).json({ error: phoneValidation.error });
     }
+    // Chuẩn hóa như luồng tạo đơn — nhận chuỗi bất kỳ (kể cả "0" placeholder)
+    // sẽ ghi đè khách chung/phá định danh theo SĐT
+    const identityPhone = normalizeCustomerPhoneForIdentity(phoneValidation.value);
+    if (!identityPhone) {
+      return res.status(400).json({ error: 'Số điện thoại không hợp lệ' });
+    }
 
     // Sanitize name and note
     const nameSanitized = sanitizeString(name);
     const noteSanitized = sanitizeString(note);
 
     // Check if customer exists
-    const existing = await queryOne('SELECT * FROM customers WHERE phone = ?', [phoneValidation.value]);
+    const existing = await queryOne('SELECT * FROM customers WHERE phone = ?', [identityPhone]);
 
     if (existing) {
       // Update existing
@@ -268,7 +286,7 @@ router.post('/', async (req, res) => {
       const result = await execute(`
         INSERT INTO customers (name, phone, note)
         VALUES (?, ?, ?)
-      `, [nameSanitized.value, phoneValidation.value, noteSanitized.value || null]);
+      `, [nameSanitized.value, identityPhone, noteSanitized.value || null]);
 
       const newCustomer = await queryOne('SELECT * FROM customers WHERE id = ?', [result.insertId]);
       return res.status(201).json({ data: newCustomer });
@@ -289,6 +307,12 @@ router.patch('/:id', async (req, res) => {
       return res.status(404).json({ error: 'Customer not found' });
     }
 
+    // PATCH trước đây KHÔNG có scope — bất kỳ tài khoản nào cũng sửa được
+    // khách của tenant khác (đổi SĐT phá luôn định danh + thông báo Zalo của họ)
+    if (!(await customerVisibleToActor(customer.id, req.user))) {
+      return res.status(403).json({ error: 'Bạn không có quyền sửa khách hàng này' });
+    }
+
     const updates = [];
     const values = [];
 
@@ -303,17 +327,22 @@ router.patch('/:id', async (req, res) => {
       if (!phoneValidation.valid) {
         return res.status(400).json({ error: phoneValidation.error });
       }
-      
+      // Chuẩn hóa như luồng tạo đơn — nhận chuỗi bất kỳ sẽ phá định danh theo SĐT
+      const identityPhone = normalizeCustomerPhoneForIdentity(phoneValidation.value);
+      if (!identityPhone) {
+        return res.status(400).json({ error: 'Số điện thoại không hợp lệ' });
+      }
+
       // Check phone uniqueness (except current customer)
-      if (phoneValidation.value !== customer.phone) {
-        const existing = await queryOne('SELECT id FROM customers WHERE phone = ? AND id != ?', [phoneValidation.value, req.params.id]);
+      if (identityPhone !== customer.phone) {
+        const existing = await queryOne('SELECT id FROM customers WHERE phone = ? AND id != ?', [identityPhone, req.params.id]);
         if (existing) {
           return res.status(400).json({ error: 'Số điện thoại đã được sử dụng bởi khách hàng khác' });
         }
       }
-      
+
       updates.push('phone = ?');
-      values.push(phoneValidation.value);
+      values.push(identityPhone);
     }
     
     if (note !== undefined) {

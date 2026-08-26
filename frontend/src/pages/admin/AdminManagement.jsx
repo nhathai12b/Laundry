@@ -175,6 +175,15 @@ function AdminManagement() {
     });
   };
 
+  // datetime-local cần giờ ĐỊA PHƯƠNG — đổ thẳng chuỗi UTC (toISOString) vào
+  // input rồi lưu lại sẽ dịch hạn dùng sớm 7 tiếng MỖI LẦN mở-lưu (VN = UTC+7)
+  const toLocalDatetimeInput = (value) => {
+    const d = new Date(value);
+    if (Number.isNaN(d.getTime())) return '';
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  };
+
   const handleEditAdmin = (admin) => {
     setSelectedAdmin(admin);
     setEditFormData({
@@ -182,8 +191,8 @@ function AdminManagement() {
       phone: admin.phone || '',
       password: '',
       subscription_package: admin.subscription_package || '',
-      subscription_expires_at: admin.subscription_expires_at 
-        ? new Date(admin.subscription_expires_at).toISOString().slice(0, 16)
+      subscription_expires_at: admin.subscription_expires_at
+        ? toLocalDatetimeInput(admin.subscription_expires_at)
         : '',
     });
     setShowEditModal(true);
@@ -814,7 +823,7 @@ function AdminManagement() {
                       setEditFormData(prev => ({
                         ...prev,
                         subscription_package: packageType,
-                        subscription_expires_at: expirationDate.toISOString().slice(0, 16)
+                        subscription_expires_at: toLocalDatetimeInput(expirationDate)
                       }));
                     }
                   }}

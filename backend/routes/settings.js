@@ -1,4 +1,4 @@
-import express from 'express';
+﻿import express from 'express';
 import { query, queryOne, execute, transaction } from '../database/db.js';
 import { authenticate, authorize, blockEmployeeLogin } from '../middleware/auth.js';
 import { validateEnum, sanitizeString } from '../utils/validators.js';
@@ -138,108 +138,84 @@ router.put('/', blockEmployeeLogin, async (req, res) => {
 
     // Use transaction to ensure atomicity
     await transaction(async (db) => {
-      // MySQL uses INSERT ... ON DUPLICATE KEY UPDATE with store_id
-      if (printer_ip !== undefined) {
-        const ipSanitized = sanitizeString(printer_ip);
+      // UNIQUE (key, store_id) KHÔNG bắt trùng khi store_id NULL (chuẩn SQL:
+      // NULL != NULL) → ON DUPLICATE không bao giờ kích hoạt cho setting toàn
+      // cục, mỗi lần lưu tạo thêm 1 row trùng và GET trả giá trị tùy ý.
+      // Setting toàn cục phải UPDATE-trước, INSERT-khi-chưa-có.
+      const upsertSetting = async (key, value) => {
+        if (targetStoreId === null || targetStoreId === undefined) {
+          const result = await db.execute(
+            'UPDATE settings SET value = ? WHERE `key` = ? AND store_id IS NULL',
+            [value, key]
+          );
+          if (!result.affectedRows) {
+            await db.execute(
+              'INSERT INTO settings (`key`, value, store_id) VALUES (?, ?, NULL)',
+              [key, value]
+            );
+          }
+          return;
+        }
         await db.execute(`
           INSERT INTO settings (\`key\`, value, store_id)
           VALUES (?, ?, ?)
           ON DUPLICATE KEY UPDATE value = VALUES(value)
-        `, ['printer_ip', ipSanitized.value, targetStoreId]);
+        `, [key, value, targetStoreId]);
+      };
+      // MySQL uses INSERT ... ON DUPLICATE KEY UPDATE with store_id
+      if (printer_ip !== undefined) {
+        const ipSanitized = sanitizeString(printer_ip);
+        await upsertSetting('printer_ip', ipSanitized.value);
       }
       if (printer_port !== undefined) {
         const portValidation = isValidPort(printer_port);
         const portValue = portValidation.valid ? portValidation.value : 9100;
-        await db.execute(`
-          INSERT INTO settings (\`key\`, value, store_id)
-          VALUES (?, ?, ?)
-          ON DUPLICATE KEY UPDATE value = VALUES(value)
-        `, ['printer_port', String(portValue), targetStoreId]);
+        await upsertSetting('printer_port', String(portValue));
       }
       if (paper_size !== undefined) {
         const paperSizeValidation = validateEnum(paper_size, ['58mm', '80mm', '112mm'], 'Kích thước giấy');
         const paperSizeValue = paperSizeValidation.valid ? paperSizeValidation.value : '80mm';
-        await db.execute(`
-          INSERT INTO settings (\`key\`, value, store_id)
-          VALUES (?, ?, ?)
-          ON DUPLICATE KEY UPDATE value = VALUES(value)
-        `, ['paper_size', paperSizeValue, targetStoreId]);
+        await upsertSetting('paper_size', paperSizeValue);
       }
       if (printer_com_port !== undefined) {
         const comSanitized = sanitizeString(String(printer_com_port).trim().toUpperCase().startsWith('COM')
           ? String(printer_com_port).trim().toUpperCase()
           : String(printer_com_port).trim());
-        await db.execute(`
-          INSERT INTO settings (\`key\`, value, store_id)
-          VALUES (?, ?, ?)
-          ON DUPLICATE KEY UPDATE value = VALUES(value)
-        `, ['printer_com_port', comSanitized.value, targetStoreId]);
+        await upsertSetting('printer_com_port', comSanitized.value);
       }
       if (print_method !== undefined) {
         const methodValidation = validateEnum(print_method, ['server', 'bluetooth', 'com'], 'Phương thức in');
         const methodValue = methodValidation.valid ? methodValidation.value : 'server';
-        await db.execute(`
-          INSERT INTO settings (\`key\`, value, store_id)
-          VALUES (?, ?, ?)
-          ON DUPLICATE KEY UPDATE value = VALUES(value)
-        `, ['print_method', methodValue, targetStoreId]);
+        await upsertSetting('print_method', methodValue);
       }
       if (bill_store_name !== undefined) {
         const nameSanitized = sanitizeString(bill_store_name || '');
-        await db.execute(`
-          INSERT INTO settings (\`key\`, value, store_id)
-          VALUES (?, ?, ?)
-          ON DUPLICATE KEY UPDATE value = VALUES(value)
-        `, ['bill_store_name', nameSanitized.value, targetStoreId]);
+        await upsertSetting('bill_store_name', nameSanitized.value);
       }
       if (bill_store_address !== undefined) {
         const addressSanitized = sanitizeString(bill_store_address || '');
-        await db.execute(`
-          INSERT INTO settings (\`key\`, value, store_id)
-          VALUES (?, ?, ?)
-          ON DUPLICATE KEY UPDATE value = VALUES(value)
-        `, ['bill_store_address', addressSanitized.value, targetStoreId]);
+        await upsertSetting('bill_store_address', addressSanitized.value);
       }
       if (bill_store_phone !== undefined) {
         const phoneSanitized = sanitizeString(bill_store_phone || '');
-        await db.execute(`
-          INSERT INTO settings (\`key\`, value, store_id)
-          VALUES (?, ?, ?)
-          ON DUPLICATE KEY UPDATE value = VALUES(value)
-        `, ['bill_store_phone', phoneSanitized.value, targetStoreId]);
+        await upsertSetting('bill_store_phone', phoneSanitized.value);
       }
       if (bill_footer_message !== undefined) {
         const footerSanitized = sanitizeString(bill_footer_message || 'Cảm ơn quý khách!');
-        await db.execute(`
-          INSERT INTO settings (\`key\`, value, store_id)
-          VALUES (?, ?, ?)
-          ON DUPLICATE KEY UPDATE value = VALUES(value)
-        `, ['bill_footer_message', footerSanitized.value, targetStoreId]);
+        await upsertSetting('bill_footer_message', footerSanitized.value);
       }
       if (bill_qr_image !== undefined) {
         const qrVal = typeof bill_qr_image === 'string' && bill_qr_image.length <= 60000 ? bill_qr_image : '';
-        await db.execute(`
-          INSERT INTO settings (\`key\`, value, store_id)
-          VALUES (?, ?, ?)
-          ON DUPLICATE KEY UPDATE value = VALUES(value)
-        `, ['bill_qr_image', qrVal, targetStoreId]);
+        await upsertSetting('bill_qr_image', qrVal);
       }
       if (bill_qr_content !== undefined) {
         const contentVal = typeof bill_qr_content === 'string' ? String(bill_qr_content).trim().slice(0, 500) : '';
-        await db.execute(`
-          INSERT INTO settings (\`key\`, value, store_id)
-          VALUES (?, ?, ?)
-          ON DUPLICATE KEY UPDATE value = VALUES(value)
-        `, ['bill_qr_content', contentVal, targetStoreId]);
+        await upsertSetting('bill_qr_content', contentVal);
       }
       if (bill_bottom_padding_mm !== undefined) {
         const v = parseInt(bill_bottom_padding_mm, 10);
         const val = (isNaN(v) || v < 0) ? 0 : Math.min(100, v);
-        await db.execute(`
-          INSERT INTO settings (\`key\`, value, store_id)
-          VALUES (?, ?, ?)
-          ON DUPLICATE KEY UPDATE value = VALUES(value)
-        `, ['bill_bottom_padding_mm', String(val), targetStoreId]);
+        await upsertSetting('bill_bottom_padding_mm', String(val));
       }
     });
 

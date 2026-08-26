@@ -305,14 +305,6 @@ export function sendReadyForPickupNotification(orderId) {
   return sendOrderEvent(orderId, EVENT_TYPES.READY_FOR_PICKUP);
 }
 
-export function sendDeliveredNotification(orderId) {
-  return sendOrderEvent(orderId, EVENT_TYPES.DELIVERED);
-}
-
-export function sendDebtReminderNotification(orderId) {
-  return sendOrderEvent(orderId, EVENT_TYPES.DEBT_PAYMENT_REMINDER);
-}
-
-export function sendOrderCompletedZaloNotification(orderId) {
-  return sendDeliveredNotification(orderId);
-}
+// (sendDeliveredNotification / sendDebtReminderNotification /
+// sendOrderCompletedZaloNotification đã xóa: không nơi nào import — chính sách
+// Zalo chỉ gửi đúng 2 tin: nhận đơn + chờ nhận)

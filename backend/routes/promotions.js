@@ -84,10 +84,12 @@ router.get('/:id', authorize('admin'), async (req, res) => {
     `;
     const params = [req.params.id];
 
-    // Filter by admin: only show promotions from stores owned by this admin
+    // Filter by admin: khuyến mãi thuộc store trong chuỗi HOẶC khuyến mãi
+    // toàn chuỗi (store_id NULL) do chính admin tạo — danh sách hiển thị cả 2
+    // loại, thiếu vế sau thì bấm vào khuyến mãi NULL-store bị 404 vô lý
     if (req.user.role === 'admin' && req.user.role !== 'root') {
-      querySql += ' AND s.admin_id = ?';
-      params.push(req.user.id);
+      querySql += ' AND (s.admin_id = ? OR (p.store_id IS NULL AND p.created_by = ?))';
+      params.push(req.user.id, req.user.id);
     } else if (req.user.role === 'root') {
       // Root admin is software vendor, not store operator - return 404
       return res.status(404).json({ error: 'Promotion not found' });
@@ -270,8 +272,15 @@ router.patch('/:id', authorize('admin'), auditLog('update', 'promotion'), async 
       return res.status(404).json({ error: 'Promotion not found' });
     }
 
-    // For admin (not root), verify promotion belongs to their store chain
-    if (req.user.role === 'admin' && promotion.store_admin_id !== req.user.id) {
+    // Root là vendor phần mềm — không sửa khuyến mãi của tenant (đồng bộ với
+    // POST/DELETE; thiếu check này root sửa được khuyến mãi của mọi chuỗi)
+    if (req.user.role === 'root') {
+      return res.status(403).json({ error: 'Root admin không thể sửa khuyến mãi' });
+    }
+    // Thuộc chuỗi của admin, HOẶC khuyến mãi toàn chuỗi (store_id NULL) do chính admin tạo
+    const ownsPromotion = promotion.store_admin_id === req.user.id
+      || (promotion.store_id === null && promotion.created_by === req.user.id);
+    if (!ownsPromotion) {
       return res.status(403).json({ error: 'Bạn chỉ có thể sửa khuyến mãi trong chuỗi cửa hàng của mình' });
     }
 
@@ -286,11 +295,25 @@ router.patch('/:id', authorize('admin'), auditLog('update', 'promotion'), async 
       max_discount_amount,
       start_date,
       end_date,
-      status
+      status,
+      store_id
     } = req.body;
 
     const updates = [];
     const values = [];
+
+    // store_id trước đây bị bỏ qua im lặng: form sửa có ô "Cửa hàng" nhưng đổi
+    // gì backend cũng không lưu (báo "Cập nhật thành công" mà không đổi gì)
+    if (store_id !== undefined) {
+      if (store_id) {
+        const store = await queryOne('SELECT id FROM stores WHERE id = ? AND admin_id = ?', [store_id, req.user.id]);
+        if (!store) {
+          return res.status(400).json({ error: 'Cửa hàng không hợp lệ hoặc không thuộc quyền quản lý của bạn' });
+        }
+      }
+      updates.push('store_id = ?');
+      values.push(store_id || null);
+    }
 
     if (name !== undefined) {
       const nameValidation = validateRequiredString(name, 'Tên khuyến mãi');
@@ -499,8 +522,10 @@ router.post('/applicable', async (req, res) => {
       }
     }
     // If no customer info provided, orderCount remains 0
-    // Use DATE format for comparison (YYYY-MM-DD) since start_date and end_date are DATE columns
-    const now = new Date().toISOString().slice(0, 10); // YYYY-MM-DD format
+    // Ngày theo giờ VN (UTC+7) — toISOString thuần là ngày UTC: từ 0h đến 7h
+    // sáng VN vẫn là "hôm qua", khuyến mãi bắt đầu hôm nay không hiện còn
+    // khuyến mãi đã hết hạn hôm qua vẫn được áp
+    const now = new Date(Date.now() + 7 * 60 * 60 * 1000).toISOString().slice(0, 10);
 
     // Build query with store filter if provided
     let querySql = `

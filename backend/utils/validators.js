@@ -158,8 +158,9 @@ export const validateDateRange = (startDate, endDate) => {
     return { valid: false, error: 'Ngày kết thúc không hợp lệ' };
   }
   
-  if (start >= end) {
-    return { valid: false, error: 'Ngày kết thúc phải sau ngày bắt đầu' };
+  // Cho phép start == end: khuyến mãi 1 ngày là hợp lệ (DATE với biên bao gồm)
+  if (start > end) {
+    return { valid: false, error: 'Ngày kết thúc không được trước ngày bắt đầu' };
   }
   
   return { valid: true, error: null };

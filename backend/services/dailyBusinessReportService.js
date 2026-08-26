@@ -166,6 +166,7 @@ async function getDebtSummary(startAt, endAt, storeId, adminId) {
     SELECT COALESCE(SUM(o.debt_amount), 0) AS outstanding_debt_amount
     FROM orders o
     WHERE COALESCE(o.debt_amount, 0) > 0
+      AND o.status = 'completed'
       ${storeFilter('o', storeId, adminId)}
   `, outstandingParams);
 
