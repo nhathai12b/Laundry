@@ -143,9 +143,11 @@ function Settings() {
         return;
       }
 
-      // Update password
+      // Update password — kèm current_password để backend tự xác thực (không
+      // chỉ dựa vào bước gọi /auth/login phía trên, dễ bị bỏ qua nếu gọi API trực tiếp)
       await api.patch(`/users/${auth.user.id}`, {
-        password: passwordData.newPassword
+        password: passwordData.newPassword,
+        current_password: passwordData.currentPassword,
       });
 
       setPasswordMessage('Đổi mật khẩu thành công!');

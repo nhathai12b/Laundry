@@ -2,6 +2,7 @@
 import { query, queryOne, execute } from '../database/db.js';
 import { authenticate } from '../middleware/auth.js';
 import { authorize } from '../middleware/auth.js';
+import { blockEmployeeLogin } from '../middleware/auth.js';
 import { validateId, validatePositiveInteger, validateEnum } from '../utils/validators.js';
 import { formatDateTimeUTC } from '../utils/helpers.js';
 import { buildDailyBusinessReport } from '../services/dailyBusinessReportService.js';
@@ -178,7 +179,7 @@ async function resolveDailyBusinessScope(req) {
   throw error;
 }
 
-router.get('/daily-business', authorize('admin', 'employer'), async (req, res) => {
+router.get('/daily-business', authorize('admin', 'employer'), blockEmployeeLogin, async (req, res) => {
   try {
     const { storeId, adminId } = await resolveDailyBusinessScope(req);
 
@@ -191,7 +192,7 @@ router.get('/daily-business', authorize('admin', 'employer'), async (req, res) =
     res.json({ data: report });
   } catch (error) {
     console.error('Daily business report error:', error);
-    res.status(error.statusCode || 500).json({ error: error.message || 'Server error' });
+    res.status(error.statusCode || 500).json({ error: error.statusCode ? error.message : 'Lỗi máy chủ. Vui lòng thử lại.' });
   }
 });
 
@@ -718,7 +719,7 @@ router.get('/revenue-by-store', authorize('admin'), async (req, res) => {
 
 // Export reports (Admin only)
 // Export reports to Excel
-router.get('/export', authorize('admin', 'employer'), async (req, res) => {
+router.get('/export', authorize('admin', 'employer'), blockEmployeeLogin, async (req, res) => {
   try {
     // Root admin is software vendor, not store operator - return empty
     if (req.user.role === 'root') {
@@ -1388,7 +1389,7 @@ router.get('/revenue-by-category-daily', authorize('admin', 'employer'), async (
 });
 
 // Get revenue by employee by day in month
-router.get('/revenue-by-employee-daily', authorize('admin', 'employer'), async (req, res) => {
+router.get('/revenue-by-employee-daily', authorize('admin', 'employer'), blockEmployeeLogin, async (req, res) => {
   try {
     // Root admin is software vendor, not store operator - return empty
     if (req.user.role === 'root') {
@@ -1616,7 +1617,7 @@ router.get('/revenue-by-payment-daily', authorize('admin'), async (req, res) => 
 // NOTE: Duplicate routes below (815, 877, 937) have been removed - using routes above (522, 601, 676) instead
 
 // Get revenue by shift daily (grouped by day and employee)
-router.get('/revenue-by-shift-daily', authorize('admin', 'employer'), async (req, res) => {
+router.get('/revenue-by-shift-daily', authorize('admin', 'employer'), blockEmployeeLogin, async (req, res) => {
   try {
     // Root admin is software vendor, not store operator - return empty
     if (req.user.role === 'root') {
@@ -1944,7 +1945,7 @@ router.get('/revenue-daily', authorize('admin', 'employer'), async (req, res) =>
 });
 
 // Get invoices (orders) by day in month
-router.get('/invoices-daily', authorize('admin', 'employer'), async (req, res) => {
+router.get('/invoices-daily', authorize('admin', 'employer'), blockEmployeeLogin, async (req, res) => {
   try {
     // Root admin is software vendor, not store operator - return empty
     if (req.user.role === 'root') {

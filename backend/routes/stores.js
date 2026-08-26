@@ -172,10 +172,17 @@ router.get('/:id', async (req, res) => {
     let querySql = 'SELECT * FROM stores WHERE id = ?';
     const params = [req.params.id];
 
-    // For admin, only allow access to their own stores
+    // Scope theo role — thiếu nhánh employer thì bất kỳ tài khoản tiệm nào
+    // (kể cả token nhân viên cá nhân) cũng đọc được store BẤT KỲ bằng cách
+    // dò id tuần tự (tên, địa chỉ, SĐT, tọa độ GPS, shared_account_id của tenant khác)
     if (req.user.role === 'admin') {
       querySql += ' AND admin_id = ?';
       params.push(req.user.id);
+    } else if (req.user.role === 'employer') {
+      querySql += ' AND (id = ? OR shared_account_id = ?)';
+      params.push(req.user.store_id || 0, req.user.id);
+    } else {
+      return res.status(404).json({ error: 'Store not found' });
     }
 
     const store = await queryOne(querySql, params);

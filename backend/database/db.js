@@ -156,6 +156,16 @@ async function initializeDatabase() {
         // ca đã đóng = NULL (NULL không tính vào unique) — hai request check-in
         // đồng thời cùng (store, employee) thì request sau fail ER_DUP_ENTRY
         { table: 'timesheets', column: 'open_slot_flag', ddl: 'TINYINT AS (IF(check_out IS NULL, 1, NULL)) STORED' },
+        // MySQL coi NULL != NULL trong unique index — index theo employee_id
+        // thẳng sẽ KHÔNG chặn được ca "tài khoản chung, chưa chọn tên nhân
+        // viên" (employee_id NULL), chính là ca dễ double check-in nhất (mọi
+        // nhân viên chưa có login riêng đều check-in qua slot này). Quy đổi
+        // NULL → -1 (employee.id luôn dương) để 2 row cùng NULL vẫn va chạm.
+        // VIRTUAL (không STORED): employee_id có FOREIGN KEY tới employees(id)
+        // — thêm cột STORED phụ thuộc cột có FK bị MySQL/InnoDB từ chối với
+        // lỗi 1215 "Cannot add foreign key constraint" (giới hạn đã biết của
+        // InnoDB, đã test tái hiện). VIRTUAL vẫn index được bình thường.
+        { table: 'timesheets', column: 'employee_slot_key', ddl: 'INT AS (COALESCE(employee_id, -1)) VIRTUAL' },
         // Cột generated cho unique index chống gửi Zalo trùng: row 'sent' = 1,
         // row 'failed' = NULL (không ràng buộc, cho phép thử lại)
         { table: 'order_notifications', column: 'sent_flag', ddl: "TINYINT AS (IF(status = 'sent', 1, NULL)) STORED" },
@@ -174,6 +184,23 @@ async function initializeDatabase() {
           if (error.code !== 'ER_NO_SUCH_TABLE') {
             console.warn(`Warning ensuring column ${col.table}.${col.column}: ${error.message}`);
           }
+        }
+      }
+
+      // Dọn index chống-double-check-in phiên bản cũ (lỗi: không chặn được
+      // slot vô danh employee_id NULL) nếu một lần chạy trước đã lỡ tạo nó
+      try {
+        const [oldIdx] = await connection.query(`
+          SELECT COUNT(*) AS count FROM information_schema.statistics
+          WHERE table_schema = ? AND table_name = 'timesheets' AND index_name = 'uq_timesheets_open_slot'
+        `, [dbName]);
+        if (oldIdx[0].count > 0) {
+          await connection.query('DROP INDEX uq_timesheets_open_slot ON timesheets');
+          console.log('✅ Dropped outdated index uq_timesheets_open_slot (replaced by uq_timesheets_open_slot_v2)');
+        }
+      } catch (error) {
+        if (error.code !== 'ER_NO_SUCH_TABLE') {
+          console.warn(`Warning dropping outdated index uq_timesheets_open_slot: ${error.message}`);
         }
       }
 
@@ -196,9 +223,10 @@ async function initializeDatabase() {
         { name: 'idx_orders_store_created', table: 'orders', columns: 'store_id, created_at' },
         { name: 'idx_order_payments_paid_at', table: 'order_payments', columns: 'paid_at' },
         { name: 'idx_cash_drawer_store_occurred', table: 'cash_drawer_transactions', columns: 'store_id, occurred_at' },
-        // UNIQUE: chặn 2 ca mở cùng lúc cho cùng 1 nhân viên tại 1 tiệm (race
-        // double check-in từ 2 thiết bị). employee_id NULL không bị ràng buộc.
-        { name: 'uq_timesheets_open_slot', table: 'timesheets', columns: 'store_id, employee_id, open_slot_flag', unique: true },
+        // UNIQUE: chặn 2 ca mở cùng lúc cho cùng 1 nhân viên (hoặc cùng 1 slot
+        // vô danh) tại 1 tiệm — race double check-in từ 2 thiết bị. Dùng
+        // employee_slot_key (đã quy đổi NULL→-1) thay vì employee_id thẳng.
+        { name: 'uq_timesheets_open_slot_v2', table: 'timesheets', columns: 'store_id, employee_slot_key, open_slot_flag', unique: true },
         // UNIQUE: mỗi đơn chỉ có 1 row 'sent' cho mỗi loại sự kiện Zalo —
         // 2 request đồng thời thì request sau fail ER_DUP_ENTRY, khách không nhận tin trùng
         { name: 'uq_order_notifications_sent', table: 'order_notifications', columns: 'order_id, event_type, sent_flag', unique: true }

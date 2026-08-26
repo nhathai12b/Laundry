@@ -253,6 +253,15 @@ router.post('/', async (req, res) => {
     const existing = await queryOne('SELECT * FROM customers WHERE phone = ?', [identityPhone]);
 
     if (existing) {
+      // customers là bảng DÙNG CHUNG toàn hệ thống (khóa theo SĐT, không có
+      // store_id/admin_id) — nếu khách này chưa từng có đơn trong phạm vi của
+      // actor thì KHÔNG được ghi đè tên/note: PATCH /:id đã chặn việc này,
+      // POST (upsert) trước đây bỏ sót cùng lỗ hổng — tenant B gửi đúng SĐT
+      // của khách tenant A là sửa được thông tin khách của A.
+      if (!(await customerVisibleToActor(existing.id, req.user))) {
+        return res.json({ data: existing });
+      }
+
       // Update existing
       const updates = [];
       const values = [];

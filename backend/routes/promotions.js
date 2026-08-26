@@ -65,9 +65,11 @@ router.get('/', authorize('admin'), async (req, res) => {
     res.json({ data: promotions });
   } catch (error) {
     console.error('Get promotions error:', error);
-    const errorMessage = error.code === 'ER_NO_SUCH_TABLE' 
+    // KHÔNG forward error.message ra ngoài: lỗi DB thật (SQL/tên cột) sẽ lộ
+    // cấu trúc nội bộ cho client — chỉ 1 mã lỗi biết trước (thiếu bảng) mới an toàn để show
+    const errorMessage = error.code === 'ER_NO_SUCH_TABLE'
       ? 'Bảng promotions chưa được tạo. Vui lòng kiểm tra cơ sở dữ liệu.'
-      : error.message || 'Lỗi máy chủ';
+      : 'Lỗi máy chủ. Vui lòng thử lại.';
     res.status(500).json({ error: errorMessage });
   }
 });

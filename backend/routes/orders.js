@@ -29,7 +29,11 @@ const isoToMysqlUtc = (value) => {
 
 // export: print.js dùng chung để chặn in bill chéo tenant
 export async function userCanAccessOrder(order, user) {
-  if (user.role === 'root') return true;
+  // Root là vendor phần mềm, không vận hành cửa hàng — mọi route khác trong
+  // file này đều chặn root tường minh ("Root admin không thể..."). `return true`
+  // ở đây làm NGƯỢC LẠI: root đọc/sửa/thu tiền/in bill được MỌI đơn của MỌI
+  // tenant chỉ bằng cách dò id tuần tự.
+  if (user.role === 'root') return false;
 
   if (user.role === 'admin') {
     if (order.store_id) {
@@ -555,7 +559,12 @@ router.post('/', auditLog('create', 'order'), async (req, res) => {
     res.status(201).json({ data: { ...newOrder, items: orderItemsWithProduct } });
   } catch (error) {
     console.error('Create order error:', error);
-    const errorMessage = error.message || 'Server error';
+    // Các throw new Error(...) validate hàng/số lượng/sản phẩm trong khối tạo
+    // đơn phía trên đều là message tiếng Việt tự viết, an toàn để hiện thẳng.
+    // Chỉ chặn khi là lỗi MySQL thật (error.code/.sqlMessage) — loại đó mới có
+    // nguy cơ lộ tên cột/bảng nội bộ.
+    const isRawDbError = Boolean(error.code || error.sqlMessage);
+    const errorMessage = isRawDbError ? 'Lỗi máy chủ. Vui lòng thử lại.' : (error.message || 'Lỗi máy chủ. Vui lòng thử lại.');
     res.status(error.statusCode || 500).json({ error: errorMessage });
   }
 });
@@ -696,6 +705,27 @@ router.patch('/:id', auditLog('update', 'order'), async (req, res) => {
       }
 
       if (assigned_to !== undefined) {
+        // Cùng luật với POST / — thiếu check này thì người có quyền sửa đơn
+        // (chỉ cần userCanAccessOrder qua) gán được đơn cho user_id BẤT KỲ ở
+        // tenant khác, sau đó user đó thấy đơn xuất hiện trong "đơn của tôi"
+        if (assigned_to && req.user.role === 'admin') {
+          const assignedUser = await db.queryOne(`
+            SELECT u.id FROM users u
+            INNER JOIN stores s ON u.store_id = s.id
+            WHERE u.id = ? AND s.admin_id = ?
+          `, [assigned_to, req.user.id]);
+          if (!assignedUser) {
+            throw Object.assign(
+              new Error('Bạn chỉ có thể gán đơn hàng cho nhân viên trong chuỗi cửa hàng của mình'),
+              { statusCode: 403 }
+            );
+          }
+        } else if (assigned_to && req.user.role === 'employer' && Number(assigned_to) !== req.user.id) {
+          throw Object.assign(
+            new Error('Bạn chỉ có thể gán đơn hàng cho tài khoản cửa hàng của mình'),
+            { statusCode: 403 }
+          );
+        }
         updates.push('assigned_to = ?');
         values.push(assigned_to);
       }

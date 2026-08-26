@@ -1,12 +1,22 @@
 import express from 'express';
 import { query, queryOne, execute, transaction } from '../database/db.js';
-import { hashPassword } from '../utils/helpers.js';
+import { hashPassword, comparePassword } from '../utils/helpers.js';
 import { authenticate, authorize } from '../middleware/auth.js';
 import { auditLog } from '../middleware/audit.js';
+import { createRateLimiter } from '../middleware/rateLimiter.js';
 import { validatePositiveNumber, sanitizeString, validateRequiredString } from '../utils/validators.js';
 import { validatePasswordStrength, containsUserInfo } from '../utils/passwordValidator.js';
 
 const router = express.Router();
+
+// Đổi mật khẩu chỉ cần JWT hợp lệ (không có bước xác thực nào khác) — token
+// bị đánh cắp (XSS, log lộ, máy dùng chung) là chiếm được tài khoản vĩnh viễn
+// nếu không giới hạn số lần thử. Giới hạn theo IP, chỉ áp khi request có đổi password.
+const passwordChangeRateLimiter = createRateLimiter('password-change', 5, 15 * 60 * 1000);
+const rateLimitPasswordChange = (req, res, next) => {
+  if (req.body?.password) return passwordChangeRateLimiter(req, res, next);
+  next();
+};
 
 /**
  * Can a non-root admin manage this target user?
@@ -283,9 +293,9 @@ router.post('/', authorize('admin'), auditLog('create', 'user', (req) => req.bod
 });
 
 // Update user (Admin only)
-router.patch('/:id', authorize('admin'), auditLog('update', 'user'), async (req, res) => {
+router.patch('/:id', authorize('admin'), rateLimitPasswordChange, auditLog('update', 'user'), async (req, res) => {
   try {
-    const { name, phone, password, role, started_at, status, hourly_rate, shift_rate, subscription_package, subscription_expires_at } = req.body;
+    const { name, phone, password, current_password, role, started_at, status, hourly_rate, shift_rate, subscription_package, subscription_expires_at } = req.body;
 
     // Get old data for audit
     const oldUser = await queryOne('SELECT * FROM users WHERE id = ?', [req.params.id]);
@@ -302,6 +312,17 @@ router.patch('/:id', authorize('admin'), auditLog('update', 'user'), async (req,
       // Admin thường tự đổi mật khẩu: chỉ cho phép gửi password
       if (!password) {
         return res.status(400).json({ error: 'Chỉ có thể đổi mật khẩu. Gửi field password.' });
+      }
+      // Xác thực mật khẩu hiện tại NGAY TRÊN SERVER — trước đây chỉ có frontend
+      // tự gọi /auth/login để "verify" rồi mới PATCH, một request PATCH trực
+      // tiếp (curl/token bị đánh cắp) bỏ qua hoàn toàn bước này và đổi được
+      // mật khẩu mà không cần biết mật khẩu cũ.
+      if (!current_password) {
+        return res.status(400).json({ error: 'Vui lòng nhập mật khẩu hiện tại.' });
+      }
+      const currentPasswordOk = await comparePassword(current_password, oldUser.password_hash);
+      if (!currentPasswordOk) {
+        return res.status(400).json({ error: 'Mật khẩu hiện tại không đúng.' });
       }
       const selfPasswordCheck = validatePasswordStrength(password);
       if (!selfPasswordCheck.valid) {

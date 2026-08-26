@@ -68,9 +68,24 @@ async function getTimesheetForActorTx(db, timesheetId, actor, requireOpen = true
   if (actor?.role === 'employer') {
     conditions.push('t.user_id = ?');
     params.push(actor.id);
+    // Token nhân viên cá nhân (employee_login) chỉ được thao tác trên ĐÚNG ca
+    // của mình — thiếu điều kiện này thì 2 nhân viên dùng chung 1 tài khoản
+    // tiệm (2 ca mở song song) có thể đọc/ghi két của nhau (cash-in/cash-out/
+    // xem số dư) bằng cách truyền timesheet_id của đồng nghiệp. Cùng luật với
+    // ownShiftFilter ở timesheets.js check-out.
+    if (actor.employee_login) {
+      conditions.push('t.employee_id = ?');
+      params.push(actor.employee_id);
+    }
   } else if (actor?.role === 'admin') {
     conditions.push('t.store_id IN (SELECT id FROM stores WHERE admin_id = ?)');
     params.push(actor.id);
+  } else {
+    // role khác employer/admin (root, hoặc actor rỗng) — không nhánh nào ở
+    // trên khớp thì query chỉ còn `WHERE t.id = ?`, cho phép đọc/ghi ca của
+    // BẤT KỲ tenant nào. cashDrawer.js chỉ có `authenticate`, không có
+    // authorize(), nên route này reachable bởi root.
+    conditions.push('1 = 0');
   }
 
   if (requireOpen) {
@@ -303,13 +318,20 @@ export async function getDrawerDetails(timesheetId, actor, requireOpen = false) 
 export async function getCurrentDrawer(actor) {
   if (!actor?.id) return null;
 
+  // Token nhân viên cá nhân: phải lấy ĐÚNG ca của mình, không phải ca mở cũ
+  // nhất của tiệm — nếu không, 2 nhân viên cùng đứng ca sẽ thấy "két hiện tại"
+  // của người kia (getTimesheetForActorTx bên dưới cũng chặn theo employee_id,
+  // nhưng nếu bước chọn id ở đây chọn nhầm ca thì luôn 404 "Timesheet not found"
+  // thay vì hiện đúng két của họ)
+  const ownShiftFilter = actor.employee_login ? ' AND employee_id = ?' : '';
+  const ownShiftParams = actor.employee_login ? [actor.employee_id] : [];
   const timesheet = await queryOne(`
     SELECT id
     FROM timesheets
-    WHERE user_id = ? AND check_out IS NULL
+    WHERE user_id = ? AND check_out IS NULL${ownShiftFilter}
     ORDER BY check_in ASC
     LIMIT 1
-  `, [actor.id]);
+  `, [actor.id, ...ownShiftParams]);
 
   if (!timesheet) return null;
   return getDrawerDetails(timesheet.id, actor, true);

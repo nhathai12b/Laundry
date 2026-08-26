@@ -207,6 +207,13 @@ router.get('/', async (req, res) => {
     `;
     const params = [];
 
+    // Root là vendor phần mềm, không vận hành cửa hàng — không nhánh nào bên
+    // dưới khớp với role 'root' nên query từng chạy KHÔNG lọc gì (WHERE 1=1),
+    // trả về chấm công của TOÀN BỘ tenant trong hệ thống
+    if (req.user.role === 'root') {
+      return res.json({ data: [] });
+    }
+
     const storeIdParam = req.query.store_id;
     if (req.user.role === 'admin') {
       if (storeIdParam && storeIdParam !== 'all') {
@@ -225,9 +232,6 @@ router.get('/', async (req, res) => {
     } else if (req.user.role === 'employer') {
       sqlQuery += ' AND t.user_id = ?';
       params.push(req.user.id);
-    } else if (user_id) {
-      sqlQuery += ' AND t.user_id = ?';
-      params.push(user_id);
     }
 
     if (start_at && end_at) {
@@ -650,7 +654,7 @@ router.post('/check-in', async (req, res) => {
       `, [result.insertId]);
       });
     } catch (error) {
-      // Unique index uq_timesheets_open_slot: 2 request check-in đồng thời
+      // Unique index uq_timesheets_open_slot_v2: 2 request check-in đồng thời
       // (2 thiết bị) cho cùng nhân viên — pre-check phía trên đều pass, request
       // chậm hơn fail ở INSERT thay vì tạo ca trùng (double giờ công)
       if (error?.code === 'ER_DUP_ENTRY') {
@@ -677,20 +681,27 @@ router.get('/expected-revenue', async (req, res) => {
 
     const timesheetIdParam = req.query.timesheet_id ? parseInt(req.query.timesheet_id, 10) : null;
 
+    // Token nhân viên cá nhân chỉ được xem doanh thu/két dự kiến của CHÍNH ca
+    // mình — thiếu điều kiện này thì truyền timesheet_id của đồng nghiệp sẽ
+    // đọc được số tiền dự kiến + tóm tắt két của ca họ (cùng luật ownShiftFilter
+    // đang áp cho check-out ngay bên dưới)
+    const ownShiftFilter = req.user.employee_login ? ' AND employee_id = ?' : '';
+    const ownShiftParams = req.user.employee_login ? [req.user.employee_id] : [];
+
     let timesheet;
     if (timesheetIdParam && !Number.isNaN(timesheetIdParam)) {
       timesheet = await queryOne(`
         SELECT * FROM timesheets
-        WHERE id = ? AND user_id = ? AND check_out IS NULL
-      `, [timesheetIdParam, req.user.id]);
+        WHERE id = ? AND user_id = ? AND check_out IS NULL${ownShiftFilter}
+      `, [timesheetIdParam, req.user.id, ...ownShiftParams]);
     }
     if (!timesheet) {
       timesheet = await queryOne(`
         SELECT * FROM timesheets
-        WHERE user_id = ? AND check_out IS NULL
+        WHERE user_id = ? AND check_out IS NULL${ownShiftFilter}
         ORDER BY check_in ASC
         LIMIT 1
-      `, [req.user.id]);
+      `, [req.user.id, ...ownShiftParams]);
     }
 
     if (!timesheet) {
@@ -929,6 +940,12 @@ router.post('/check-out', async (req, res) => {
 // Get summary (Admin only)
 router.get('/summary', authorize('admin'), async (req, res) => {
   try {
+    // authorize('admin') cho phép cả root đi qua nhưng root không khớp nhánh
+    // scope nào bên dưới (chỉ check role === 'admin') → chạy KHÔNG lọc, trả về
+    // chấm công của TOÀN BỘ tenant
+    if (req.user.role === 'root') {
+      return res.status(403).json({ error: 'Root admin không thể xem báo cáo chấm công' });
+    }
     const { user_id, month, year } = req.query;
 
     if (!month || !year) {
@@ -998,6 +1015,9 @@ router.get('/summary', authorize('admin'), async (req, res) => {
 // Get revenue by shift (Admin only)
 router.get('/revenue-by-shift', authorize('admin'), async (req, res) => {
   try {
+    if (req.user.role === 'root') {
+      return res.status(403).json({ error: 'Root admin không thể xem báo cáo doanh thu theo ca' });
+    }
     const { month, year, user_id } = req.query;
 
     if (!month || !year) {
@@ -1066,6 +1086,9 @@ router.get('/revenue-by-shift', authorize('admin'), async (req, res) => {
 
 router.get('/payroll', authorize('admin'), async (req, res) => {
   try {
+    if (req.user.role === 'root') {
+      return res.status(403).json({ error: 'Root admin không thể xem bảng lương' });
+    }
     const { period, week, month, year, user_id } = req.query;
 
     if (!period || !['week', 'month'].includes(period)) {
@@ -1319,6 +1342,9 @@ router.get('/payroll', authorize('admin'), async (req, res) => {
 // Get daily hours for each employee in a month (Admin only)
 router.get('/daily-hours', authorize('admin'), async (req, res) => {
   try {
+    if (req.user.role === 'root') {
+      return res.status(403).json({ error: 'Root admin không thể xem bảng chấm công theo ngày' });
+    }
     const { month, year, user_id } = req.query;
 
     if (!month || !year) {
@@ -1512,6 +1538,11 @@ router.get('/daily-hours', authorize('admin'), async (req, res) => {
 // Export timesheets to Excel
 router.get('/export', async (req, res) => {
   try {
+    // Root là vendor phần mềm — không có nhánh scope nào khớp bên dưới nên
+    // export trước đây chạy KHÔNG lọc gì, xuất Excel chấm công của TOÀN HỆ THỐNG
+    if (req.user.role === 'root') {
+      return res.status(403).json({ error: 'Root admin không thể xuất báo cáo chấm công' });
+    }
     const { user_id, date, month, year, start_date, end_date, start_at, end_at, store_id } = req.query;
     const timezoneOffsetMinutes = Number.parseInt(req.query.timezone_offset_minutes ?? '0', 10);
     const exportOffset = Number.isNaN(timezoneOffsetMinutes) ? 0 : timezoneOffsetMinutes;
@@ -1555,9 +1586,6 @@ router.get('/export', async (req, res) => {
     } else if (req.user.role === 'employer') {
       sqlQuery += ' AND t.user_id = ?';
       params.push(req.user.id);
-    } else if (user_id) {
-      sqlQuery += ' AND t.user_id = ?';
-      params.push(user_id);
     }
 
     if (start_at && end_at) {

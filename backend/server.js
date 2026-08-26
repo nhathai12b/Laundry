@@ -72,27 +72,28 @@ const corsOptions = {
   allowedHeaders: ['Content-Type', 'Authorization', 'X-API-Key'],
 };
 
-// In development, allow all localhost origins
-if (process.env.NODE_ENV === 'production') {
-  // Production: only allow specific FRONTEND_URL
-  corsOptions.origin = process.env.FRONTEND_URL || 'http://localhost:3000';
+// Quyết định theo SỰ HIỆN DIỆN của FRONTEND_URL, không chỉ theo NODE_ENV:
+// nếu deploy quên set NODE_ENV=production (rất dễ xảy ra với PM2/systemd/docker
+// không set biến này), nhánh cũ rơi vào "development" và callback(null, true)
+// cuối cùng phản xạ (reflect) BẤT KỲ origin nào kèm credentials:true — biến
+// mọi request có Authorization header từ site khác thành CORS hợp lệ.
+if (process.env.FRONTEND_URL) {
+  // Có cấu hình origin thật (production hoặc staging đã set biến) — chỉ cho
+  // đúng origin đó, không reflect origin bất kỳ dù NODE_ENV có bị quên hay không
+  corsOptions.origin = process.env.FRONTEND_URL;
+} else if (process.env.NODE_ENV === 'production') {
+  // Production nhưng quên set FRONTEND_URL — không đoán bừa 'localhost:3000'
+  // (chắc chắn sai trên VPS thật), chặn hẳn để lộ ra ngay thay vì âm thầm CORS lỗi
+  console.error('⚠️  FRONTEND_URL chưa được set trong production — CORS sẽ chặn mọi origin. Vui lòng cấu hình FRONTEND_URL.');
+  corsOptions.origin = false;
 } else {
-  // Development: allow all localhost origins
+  // Dev thật (không FRONTEND_URL, không NODE_ENV=production): chỉ localhost
   corsOptions.origin = (origin, callback) => {
-    // Allow requests with no origin (like mobile apps or curl requests)
-    if (!origin) return callback(null, true);
-    
-    // Allow all localhost and 127.0.0.1 origins in development
+    if (!origin) return callback(null, true); // curl/mobile app, không có Origin header
     if (origin.match(/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/)) {
       return callback(null, true);
     }
-    
-    // Also allow FRONTEND_URL if specified
-    if (process.env.FRONTEND_URL && origin === process.env.FRONTEND_URL) {
-      return callback(null, true);
-    }
-    
-    callback(null, true); // Allow all in development
+    callback(new Error('Not allowed by CORS'));
   };
 }
 
