@@ -249,10 +249,15 @@ router.patch('/:id', blockEmployeeLogin, async (req, res) => {
       // két đến nửa đêm, tiền được ghi cho người đã nghỉ việc (DELETE đã chặn
       // tương tự — PATCH status phải cùng luật)
       if (status === 'inactive' && employee.status === 'active') {
+        // KHÔNG .catch() nuốt lỗi ở đây — bảng timesheets luôn tồn tại (không
+        // phải cột optional chưa migrate như hasHistory() bên dưới), nên lỗi
+        // ở query này là bất thường (mất kết nối, timeout...) và phải ném ra
+        // (fail-closed) thay vì coi như "không có ca mở" rồi cho vô hiệu hóa
+        // nhầm nhân viên đang giữ két tiền — cùng luật với DELETE /:id.
         const openShift = await queryOne(
           'SELECT id FROM timesheets WHERE employee_id = ? AND check_out IS NULL LIMIT 1',
           [employee.id]
-        ).catch(() => null);
+        );
         if (openShift) {
           return res.status(400).json({
             error: 'Nhân viên đang có ca làm việc chưa check-out. Vui lòng check-out ca trước khi vô hiệu hóa.',

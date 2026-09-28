@@ -2,14 +2,33 @@
 import PageSkeleton from '../../components/PageSkeleton';
 import { showToast } from '../../utils/toast';
 import api from '../../utils/api';
-import { getSavedFilters, saveFilters } from '../../utils/filterStorage';
+import MoneyInput from '../../components/MoneyInput';
+// Khóa localStorage RIÊNG cho trang này — không dùng chung getSavedFilters/
+// saveFilters với Reports/Promotions/Timesheets. Trang này luôn ép về 1 cửa
+// hàng cụ thể (bỏ "Tất cả cửa hàng"), nếu ghi vào key CHUNG thì chỉ cần ghé
+// qua trang Sản phẩm là filter "Tất cả cửa hàng" admin đã chọn ở Báo cáo/
+// Khuyến mãi/Chấm công bị âm thầm ép về 1 cửa hàng, không có cảnh báo gì.
+const PRODUCTS_STORE_KEY = 'laundry66_products_store_id';
+const getSavedProductsStoreId = () => {
+  try {
+    return localStorage.getItem(PRODUCTS_STORE_KEY) || '';
+  } catch {
+    return '';
+  }
+};
+const saveProductsStoreId = (storeId) => {
+  try {
+    localStorage.setItem(PRODUCTS_STORE_KEY, storeId || '');
+  } catch {
+    // localStorage không khả dụng (chế độ ẩn danh...) — bỏ qua, không chặn tính năng
+  }
+};
 
 function Products() {
-  const savedFilters = getSavedFilters();
   const [products, setProducts] = useState([]);
   const [allProducts, setAllProducts] = useState([]);
   const [stores, setStores] = useState([]);
-  const [selectedStoreId, setSelectedStoreId] = useState(savedFilters.selectedStoreId);
+  const [selectedStoreId, setSelectedStoreId] = useState(getSavedProductsStoreId);
   const [loading, setLoading] = useState(true);
 
   // Default to first store when stores load (bỏ "tất cả cửa hàng")
@@ -22,11 +41,15 @@ function Products() {
   }, [stores]);
   const [showModal, setShowModal] = useState(false);
   const [editingProduct, setEditingProduct] = useState(null);
+  // commission_type: 'none' | 'percent' (% giá bán) | 'fixed' (đ cố định / đơn vị)
+  // — mỗi sản phẩm chỉ một loại; backend cũng từ chối nếu gửi cả hai > 0
   const [formData, setFormData] = useState({
     name: '',
     unit: 'kg',
     price: '',
+    commission_type: 'none',
     commission_percent: '',
+    commission_amount: '',
     status: 'active',
     store_id: '',
   });
@@ -37,14 +60,17 @@ function Products() {
   }, []);
 
   useEffect(() => {
-    // Filter products by selected store (only show active products)
+    // Lọc theo cửa hàng — KHÔNG lọc bỏ sản phẩm 'inactive': làm vậy thì sau
+    // khi ngưng bán, sản phẩm biến mất khỏi danh sách vĩnh viễn, không còn
+    // cách nào mở lại modal Sửa để bật bán lại (cùng cách hiển thị với
+    // Promotions.jsx: vẫn hiện, có nút Sửa/badge trạng thái).
     if (!selectedStoreId || selectedStoreId === 'all') return;
-    setProducts(allProducts.filter(p => p.store_id === parseInt(selectedStoreId) && p.status === 'active'));
+    setProducts(allProducts.filter(p => p.store_id === parseInt(selectedStoreId)));
   }, [selectedStoreId, allProducts]);
 
-  // Save store filter whenever it changes
+  // Save store filter whenever it changes — key riêng, xem comment ở khai báo PRODUCTS_STORE_KEY
   useEffect(() => {
-    saveFilters(selectedStoreId, savedFilters.selectedMonth, savedFilters.selectedYear);
+    saveProductsStoreId(selectedStoreId);
   }, [selectedStoreId]);
 
   const loadStores = async () => {
@@ -61,9 +87,9 @@ function Products() {
       const response = await api.get('/products');
       const productsData = response.data.data || [];
       setAllProducts(productsData);
-      // Apply current filter (only show active products)
+      // Apply current store filter (giữ cả sản phẩm inactive — xem comment ở effect phía trên)
       if (selectedStoreId && selectedStoreId !== 'all') {
-        setProducts(productsData.filter(p => p.store_id === parseInt(selectedStoreId) && p.status === 'active'));
+        setProducts(productsData.filter(p => p.store_id === parseInt(selectedStoreId)));
       }
     } catch (error) {
       console.error('Error loading products:', error);
@@ -75,11 +101,18 @@ function Products() {
   const handleSubmit = async (e) => {
     e.preventDefault();
     try {
+      // Luôn gửi CẢ HAI field: loại không chọn gửi null để xoá giá trị cũ khi
+      // admin đổi từ % sang tiền cố định (hoặc ngược lại / bỏ hoa hồng)
       const submitData = {
         name: formData.name,
         unit: formData.unit,
         price: formData.price,
-        commission_percent: formData.commission_percent === '' ? null : formData.commission_percent,
+        commission_percent: formData.commission_type === 'percent' && formData.commission_percent !== ''
+          ? formData.commission_percent
+          : null,
+        commission_amount: formData.commission_type === 'fixed' && formData.commission_amount !== ''
+          ? formData.commission_amount
+          : null,
         status: formData.status,
       };
       
@@ -102,11 +135,16 @@ function Products() {
 
   const handleEdit = (product) => {
     setEditingProduct(product);
+    const amount = Number(product.commission_amount) || 0;
+    const percent = Number(product.commission_percent) || 0;
     setFormData({
       name: product.name,
       unit: product.unit,
       price: product.price,
-      commission_percent: product.commission_percent ?? '',
+      commission_type: amount > 0 ? 'fixed' : (percent > 0 ? 'percent' : 'none'),
+      commission_percent: percent > 0 ? String(percent) : '',
+      // MoneyInput nhận chuỗi số nguyên (đ) — DB trả DECIMAL dạng "10000.00"
+      commission_amount: amount > 0 ? String(Math.round(amount)) : '',
       status: product.status,
       store_id: product.store_id || '',
     });
@@ -133,7 +171,9 @@ function Products() {
       name: '',
       unit: 'kg',
       price: '',
+      commission_type: 'none',
       commission_percent: '',
+      commission_amount: '',
       status: 'active',
       store_id: selectedStoreId && selectedStoreId !== 'all' ? selectedStoreId : (stores[0]?.id ? String(stores[0].id) : ''),
     });
@@ -204,10 +244,12 @@ function Products() {
                     <span className="font-medium">Giá:</span>{' '}
                     {new Intl.NumberFormat('vi-VN').format(product.price)} đ
                   </p>
-                  {Number(product.commission_percent) > 0 && (
+                  {(Number(product.commission_amount) > 0 || Number(product.commission_percent) > 0) && (
                     <p>
                       <span className="inline-block px-2 py-0.5 bg-amber-100 text-amber-800 border border-amber-300 rounded text-xs font-semibold">
-                        🎁 Hoa hồng NV: {Number(product.commission_percent)}%
+                        🎁 Hoa hồng NV: {Number(product.commission_amount) > 0
+                          ? `${new Intl.NumberFormat('vi-VN').format(Number(product.commission_amount))} đ/${product.unit}`
+                          : `${Number(product.commission_percent)}%`}
                       </span>
                     </p>
                   )}
@@ -303,26 +345,69 @@ function Products() {
                 />
               </div>
               <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">
-                <label className="block text-sm font-semibold text-amber-900 mb-1">
-                  🎁 Hoa hồng nhân viên (%)
+                <label className="block text-sm font-semibold text-amber-900 mb-2">
+                  🎁 Hoa hồng nhân viên
                 </label>
-                <div className="relative">
-                  <input
-                    type="number"
-                    inputMode="decimal"
-                    min="0"
-                    max="100"
-                    step="any"
-                    value={formData.commission_percent}
-                    onChange={(e) => setFormData({ ...formData, commission_percent: e.target.value })}
-                    className="w-full px-3 py-2 pr-10 border rounded-lg"
-                    placeholder="VD: 5"
-                  />
-                  <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm font-semibold pointer-events-none">%</span>
+                <div className="grid grid-cols-3 gap-2 mb-3">
+                  {[
+                    { value: 'none', label: 'Không có' },
+                    { value: 'percent', label: 'Theo % giá bán' },
+                    { value: 'fixed', label: 'Tiền cố định' },
+                  ].map((opt) => (
+                    <button
+                      key={opt.value}
+                      type="button"
+                      onClick={() => setFormData({ ...formData, commission_type: opt.value })}
+                      className={`px-2 py-2 rounded-lg text-xs sm:text-sm font-medium border transition-colors ${
+                        formData.commission_type === opt.value
+                          ? 'bg-amber-600 text-white border-amber-600'
+                          : 'bg-white text-gray-700 border-gray-300 hover:bg-amber-100'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
                 </div>
-                <p className="text-xs text-amber-800 mt-1">
-                  Nhân viên xử lý đơn chứa sản phẩm này được cộng bonus = % × giá trị dòng hàng (tính khi đơn hoàn thành). Để trống = không có hoa hồng.
-                </p>
+                {formData.commission_type === 'percent' && (
+                  <>
+                    <div className="relative">
+                      <input
+                        type="number"
+                        inputMode="decimal"
+                        min="0"
+                        max="100"
+                        step="any"
+                        value={formData.commission_percent}
+                        onChange={(e) => setFormData({ ...formData, commission_percent: e.target.value })}
+                        className="w-full px-3 py-2 pr-10 border rounded-lg"
+                        placeholder="VD: 5"
+                      />
+                      <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm font-semibold pointer-events-none">%</span>
+                    </div>
+                    <p className="text-xs text-amber-800 mt-1">
+                      Nhân viên xử lý đơn được cộng = % × (giá × số lượng) của dòng hàng này, tính khi đơn hoàn thành.
+                    </p>
+                  </>
+                )}
+                {formData.commission_type === 'fixed' && (
+                  <>
+                    <div className="relative">
+                      <MoneyInput
+                        value={formData.commission_amount}
+                        onChange={(v) => setFormData({ ...formData, commission_amount: v })}
+                        className="w-full px-3 py-2 pr-16 border rounded-lg"
+                        placeholder="VD: 10.000"
+                      />
+                      <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm font-semibold pointer-events-none">đ/{formData.unit}</span>
+                    </div>
+                    <p className="text-xs text-amber-800 mt-1">
+                      Nhân viên xử lý đơn được cộng = số tiền này × số lượng ({formData.unit}) của dòng hàng, tính khi đơn hoàn thành.
+                    </p>
+                  </>
+                )}
+                {formData.commission_type === 'none' && (
+                  <p className="text-xs text-amber-800">Sản phẩm này không tính hoa hồng cho nhân viên.</p>
+                )}
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Trạng thái</label>

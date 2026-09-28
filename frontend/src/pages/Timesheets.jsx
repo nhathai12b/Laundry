@@ -53,6 +53,16 @@ function Timesheets() {
   const [showCheckinModal, setShowCheckinModal] = useState(false);
   const [employees, setEmployees] = useState([]);
   const [selectedEmployee, setSelectedEmployee] = useState('');
+  // Ca đang mở tại TIỆM (mọi tài khoản/nhân viên) — khác openShifts (chỉ ca của
+  // tài khoản này; token cá nhân chỉ thấy ca của chính mình). Dùng để quyết định
+  // "mở ca" hay "check-in thêm" (chỉ người mở ca đầu tiên nhập quỹ đầu ca) và
+  // để người giữ két chọn người bàn giao khi check-out. shifts[0] = ca giữ két.
+  const [storeOpenShifts, setStoreOpenShifts] = useState([]);
+  const [storeOpenShiftsLoading, setStoreOpenShiftsLoading] = useState(false);
+  const [handoverToId, setHandoverToId] = useState('');
+  // Người dùng đã tự sửa ô "Tiền mặt thực đếm" chưa — chưa thì ô này bám theo
+  // (TMK dự kiến − tiền rút) mỗi khi đổi số tiền rút
+  const [countedTouched, setCountedTouched] = useState(false);
   const [checkinNote, setCheckinNote] = useState('');
   const [checkoutOutAt, setCheckoutOutAt] = useState('');
   const [closingTimesheetId, setClosingTimesheetId] = useState(null);
@@ -200,6 +210,30 @@ function Timesheets() {
     }
   };
 
+  const loadStoreOpenShifts = async () => {
+    setStoreOpenShiftsLoading(true);
+    try {
+      const response = await api.get('/timesheets/store-open-shifts');
+      const shifts = response.data.data || [];
+      setStoreOpenShifts(shifts);
+      return shifts;
+    } catch (error) {
+      console.error('Error loading store open shifts:', error);
+      setStoreOpenShifts([]);
+      return [];
+    } finally {
+      setStoreOpenShiftsLoading(false);
+    }
+  };
+
+  // Tải lại mỗi lần mở modal check-in
+  useEffect(() => {
+    if (showCheckinModal) {
+      loadStoreOpenShifts();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showCheckinModal]);
+
   const loadCashDrawerSummary = async (timesheetId) => {
     if (!timesheetId) return;
     try {
@@ -242,8 +276,9 @@ function Timesheets() {
     const employeeIdFromToken = getEmployeeId();
     positionPromiseRef.current = getPositionBestEffort(); // warm-up GPS
     setShowCheckinModal(true);
-    // Tài khoản cá nhân: luôn là chính mình. Tài khoản cửa hàng dùng chung:
-    // ca đầu dùng nhân viên đã chọn khi login (nếu có), người vào thêm tự chọn tên.
+    // Tài khoản cá nhân: luôn là chính mình. Tài khoản cửa hàng (nhiều nhân viên
+    // cùng dùng): ca đầu dùng nhân viên đã chọn khi login (nếu có), người vào
+    // thêm tự chọn tên.
     setSelectedEmployee(employeeIdFromToken || '');
     setCheckinNote('');
     setOpeningCashAmount('');
@@ -253,10 +288,16 @@ function Timesheets() {
     if (checkInSubmitting) return;
     setCheckInSubmitting(true);
     try {
+      if (storeOpenShiftsLoading) {
+        showToast('Đang kiểm tra ca đang mở tại tiệm, vui lòng thử lại sau giây lát.');
+        return;
+      }
       const employeeIdFromToken = getEmployeeId();
-      const isAdditional = openShifts.length > 0;
+      // Theo TIỆM, không theo tài khoản: tiệm đã có người đứng ca (dù họ dùng
+      // token đăng nhập riêng) thì đây là check-in thêm — không nhập quỹ đầu ca
+      const isAdditional = storeOpenShifts.length > 0;
       // Tài khoản cá nhân: luôn gửi employee_id của chính mình (backend cũng khóa cứng).
-      // Tài khoản dùng chung: người vào thêm phải chọn tên trong form.
+      // Tài khoản cửa hàng: người vào thêm phải chọn tên trong form.
       const employeeIdToSend = employeeIdFromToken || selectedEmployee || undefined;
 
       if (!employeeIdFromToken && isAdditional && !employeeIdToSend) {
@@ -299,6 +340,17 @@ function Timesheets() {
     setClosingShift(ts);
     setClosingTimesheetId(ts.id);
     setCheckoutOutAt('');
+    setCheckoutWithdrawnAmount('');
+    setCountedTouched(false);
+    // Người giữ két (ca mở cũ nhất của tiệm) mà còn người khác đứng ca → mặc
+    // định bàn giao cho người vào ca sớm nhất còn lại (người sẽ trở thành ca
+    // chính tiếp theo). Không có ai khác → không bàn giao, kết sổ như cũ.
+    setHandoverToId('');
+    const shiftsAtStore = await loadStoreOpenShifts();
+    const othersAtStore = shiftsAtStore.filter((s) => s.id !== ts.id);
+    if (shiftsAtStore[0]?.id === ts.id && othersAtStore.length > 0) {
+      setHandoverToId(String(othersAtStore[0].id));
+    }
     try {
       const response = await api.get(`/timesheets/expected-revenue?timesheet_id=${ts.id}`);
       setExpectedRevenue(response.data.data.expected_revenue || 0);
@@ -360,11 +412,13 @@ function Timesheets() {
           ? parseFloat(checkoutWithdrawnAmount)
           : null,
         note: checkoutNote || null,
+        handover_to_timesheet_id: handoverToId ? parseInt(handoverToId, 10) : null,
       });
-      
-      // Success log removed for security
-      
+
+      const handover = response.data?.handover;
+
       setShowCheckoutModal(false);
+      setHandoverToId('');
       setRevenueAmount('');
       setCheckoutNote('');
       setCheckoutWithdrawnAmount('');
@@ -382,7 +436,12 @@ function Timesheets() {
       if (isAdmin() && viewMode === 'daily') {
         loadDailyHours();
       }
-      showToast('Check-out thành công!');
+      showToast(
+        handover
+          ? `Check-out thành công! Đã bàn giao ${formatMoney(handover.amount || 0)} cho ${handover.employee_name || 'ca tiếp theo'}.`
+          : 'Check-out thành công!',
+        'success'
+      );
     } catch (error) {
       // Error details removed for security
       const errorMessage = error.response?.data?.error || error.message || 'Lỗi không xác định';
@@ -1602,7 +1661,7 @@ function Timesheets() {
                   {closingShift.employee_name ? ` — ${closingShift.employee_name}` : ''}
                 </p>
               )}
-              {closingShift && openShifts.length > 1 && openShifts[0]?.id !== closingShift.id && (
+              {closingShift && storeOpenShifts.length > 1 && storeOpenShifts[0]?.id !== closingShift.id && (
                 <p className="text-[11px] text-blue-700 mt-1 bg-blue-50 border border-blue-200 rounded px-2 py-1">
                   Đây là <strong>ca phụ</strong> — chỉ chấm giờ công. Doanh thu &amp; két tiền được tính khi ca chính check-out.
                 </p>
@@ -1651,7 +1710,18 @@ function Timesheets() {
                   </label>
                   <MoneyInput
                     value={checkoutWithdrawnAmount}
-                    onChange={setCheckoutWithdrawnAmount}
+                    onChange={(v) => {
+                      setCheckoutWithdrawnAmount(v);
+                      // Backend ghi tiền rút như cash_out TRƯỚC khi chốt két, nên số
+                      // "thực đếm" phải là tiền còn lại SAU khi rút. Chưa ai tự sửa ô
+                      // đếm → cập nhật gợi ý = dự kiến − rút, tránh xác nhận với số
+                      // đếm cũ rồi bị ghi "thừa két" ảo đúng bằng số vừa rút (và bàn
+                      // giao nhầm số đó cho ca sau).
+                      if (!countedTouched) {
+                        const expected = parseFloat(cashDrawerSummary?.expected_cash_amount) || 0;
+                        setRevenueAmount(String(Math.max(Math.round(expected - (parseFloat(v) || 0)), 0)));
+                      }
+                    }}
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base focus:border-amber-500 focus:ring-1 focus:ring-amber-200 transition-all touch-manipulation"
                     placeholder="Nhập số tiền rút khi kết thúc ca"
                   />
@@ -1659,11 +1729,14 @@ function Timesheets() {
 
                 <div>
                   <label className="block text-xs sm:text-sm font-medium text-gray-700 mb-1">
-                    Tiền mặt thực đếm trong két (đ) *
+                    Tiền mặt thực đếm trong két <span className="text-gray-500 font-normal">(SAU khi đã rút)</span> (đ) *
                   </label>
                   <MoneyInput
                     value={revenueAmount}
-                    onChange={setRevenueAmount}
+                    onChange={(v) => {
+                      setCountedTouched(true);
+                      setRevenueAmount(v);
+                    }}
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base focus:border-blue-500 focus:ring-1 focus:ring-blue-200 transition-all touch-manipulation"
                     placeholder="Nhập số tiền mặt đang có trong két"
                     required
@@ -1687,25 +1760,75 @@ function Timesheets() {
                     <span>Trừ khỏi két</span>
                     <strong>{formatMoney(cashDrawerSummary?.cash_out_amount || 0)}</strong>
                   </div>
+                  {(parseFloat(checkoutWithdrawnAmount) || 0) > 0 && (
+                    <div className="flex justify-between gap-3 text-xs text-amber-800">
+                      <span>Rút khi check-out</span>
+                      <strong>−{formatMoney(parseFloat(checkoutWithdrawnAmount) || 0)}</strong>
+                    </div>
+                  )}
                   <div className="flex justify-between gap-3 border-t border-emerald-200 pt-2 text-sm text-emerald-950">
-                    <span className="font-medium">TMK dự kiến</span>
-                    <strong>{formatMoney(cashDrawerSummary?.expected_cash_amount || 0)}</strong>
-                  </div>
-                </div>
-                <div className={`rounded-lg border p-2.5 ${
-                  (parseFloat(revenueAmount) || 0) - (parseFloat(cashDrawerSummary?.expected_cash_amount) || 0) < 0
-                    ? 'border-red-200 bg-red-50 text-red-800'
-                    : (parseFloat(revenueAmount) || 0) - (parseFloat(cashDrawerSummary?.expected_cash_amount) || 0) > 0
-                      ? 'border-blue-200 bg-blue-50 text-blue-800'
-                      : 'border-gray-200 bg-gray-50 text-gray-700'
-                }`}>
-                  <div className="flex justify-between gap-3 text-sm">
-                    <span>Chênh lệch két</span>
+                    <span className="font-medium">
+                      TMK dự kiến{(parseFloat(checkoutWithdrawnAmount) || 0) > 0 ? ' (sau khi rút)' : ''}
+                    </span>
                     <strong>
-                      {formatMoney((parseFloat(revenueAmount) || 0) - (parseFloat(cashDrawerSummary?.expected_cash_amount) || 0))}
+                      {formatMoney(Math.max((parseFloat(cashDrawerSummary?.expected_cash_amount) || 0) - (parseFloat(checkoutWithdrawnAmount) || 0), 0))}
                     </strong>
                   </div>
                 </div>
+                {(() => {
+                  // So tiền đếm với dự kiến SAU khi rút — cùng cách backend tính
+                  // cash_difference (withdrawn ghi cash_out trước closing_count)
+                  const expectedAfterWithdraw = Math.max(
+                    (parseFloat(cashDrawerSummary?.expected_cash_amount) || 0) - (parseFloat(checkoutWithdrawnAmount) || 0),
+                    0
+                  );
+                  const diff = (parseFloat(revenueAmount) || 0) - expectedAfterWithdraw;
+                  return (
+                    <div className={`rounded-lg border p-2.5 ${
+                      diff < 0
+                        ? 'border-red-200 bg-red-50 text-red-800'
+                        : diff > 0
+                          ? 'border-blue-200 bg-blue-50 text-blue-800'
+                          : 'border-gray-200 bg-gray-50 text-gray-700'
+                    }`}>
+                      <div className="flex justify-between gap-3 text-sm">
+                        <span>Chênh lệch két</span>
+                        <strong>{formatMoney(diff)}</strong>
+                      </div>
+                    </div>
+                  );
+                })()}
+                {(() => {
+                  if (!closingShift) return null;
+                  const isDrawerHolder = storeOpenShifts.length > 0 && storeOpenShifts[0]?.id === closingShift.id;
+                  const othersOnShift = storeOpenShifts.filter((s) => s.id !== closingShift.id);
+                  if (!isDrawerHolder || othersOnShift.length === 0) return null;
+                  const handoverAmount = parseFloat(revenueAmount) || 0;
+                  return (
+                    <div className="bg-indigo-50 border border-indigo-200 rounded-lg p-2.5 sm:p-3 space-y-2">
+                      <label className="block text-xs sm:text-sm font-medium text-indigo-900">
+                        Bàn giao két cho người còn đứng ca
+                      </label>
+                      <select
+                        value={handoverToId}
+                        onChange={(e) => setHandoverToId(e.target.value)}
+                        className="w-full px-3 py-2 border border-indigo-300 rounded-lg text-sm bg-white focus:border-indigo-500 focus:ring-1 focus:ring-indigo-200"
+                      >
+                        <option value="">Không bàn giao — kết sổ riêng</option>
+                        {othersOnShift.map((s) => (
+                          <option key={s.id} value={s.id}>
+                            {s.employee_name || 'Ca không tên'} — vào ca {formatLocalDate(s.check_in, 'HH:mm')}
+                          </option>
+                        ))}
+                      </select>
+                      <p className="text-[11px] text-indigo-800">
+                        {handoverToId
+                          ? <>Tiền mặt thực đếm <strong>{formatMoney(handoverAmount)}</strong> sẽ trở thành quỹ đầu ca của người nhận — họ không cần nhập lại.</>
+                          : 'Không bàn giao: két của người còn lại bắt đầu từ 0 — tiền còn trong két phải được mang đi hoặc kết sổ riêng.'}
+                      </p>
+                    </div>
+                  );
+                })()}
                 <div>
                   <label className="block text-xs sm:text-sm font-medium text-gray-700 mb-1">
                     Nhân viên bù tiền thiếu <span className="text-gray-500 font-normal">(nếu có)</span>
@@ -1742,6 +1865,7 @@ function Timesheets() {
                   type="button"
                   onClick={() => {
                     setShowCheckoutModal(false);
+                    setHandoverToId('');
                     setRevenueAmount('');
                     setCheckoutNote('');
                     setCheckoutWithdrawnAmount('');
@@ -1834,7 +1958,7 @@ function Timesheets() {
           <div className="bg-white rounded-lg max-w-md w-full max-h-[90vh] flex flex-col my-auto shadow-2xl">
             <div className="flex items-center justify-between p-4 sm:p-5 pb-3 border-b border-gray-200 flex-shrink-0">
               <h2 className="text-base sm:text-lg font-bold truncate pr-2">
-                {openShifts.length > 0 ? 'Check-in thêm nhân viên' : 'Mở ca làm việc'}
+                {storeOpenShifts.length > 0 ? 'Check-in thêm nhân viên' : 'Mở ca làm việc'}
               </h2>
               <button
                 onClick={() => {
@@ -1852,9 +1976,9 @@ function Timesheets() {
               <div className="space-y-3 min-w-0 py-2">
               {(() => {
                 const employeeIdFromToken = getEmployeeId();
-                const isAdditional = openShifts.length > 0;
-                // Nhân viên đang có ca mở thì không thể check-in thêm lần nữa
-                const busyEmployeeIds = new Set(openShifts.map((s) => s.employee_id).filter(Boolean));
+                const isAdditional = storeOpenShifts.length > 0;
+                // Nhân viên đang có ca mở tại tiệm thì không thể check-in thêm lần nữa
+                const busyEmployeeIds = new Set(storeOpenShifts.map((s) => s.employee_id).filter(Boolean));
                 const availableEmployees = employees.filter((emp) => !busyEmployeeIds.has(emp.id));
                 const selectedEmployeeInfo = employees.find(emp => emp.id === parseInt(selectedEmployee || employeeIdFromToken || '0'));
 
@@ -1940,7 +2064,7 @@ function Timesheets() {
                   </div>
                 );
               })()}
-              {openShifts.length === 0 && (
+              {!storeOpenShiftsLoading && storeOpenShifts.length === 0 && (
                 <div className="min-w-0">
                   <label className="block text-xs sm:text-sm font-medium text-gray-700 mb-1">
                     Nhập quỹ đầu ca <span className="text-gray-500 text-[10px]">(tiền lẻ trong két)</span>
@@ -1970,7 +2094,7 @@ function Timesheets() {
             <div className="flex flex-row gap-2 px-4 sm:px-5 pb-4 pt-2 border-t border-gray-200 flex-shrink-0">
               <button
                 onClick={handleCheckIn}
-                disabled={checkInSubmitting}
+                disabled={checkInSubmitting || storeOpenShiftsLoading}
                 className="flex-1 min-w-0 bg-gradient-to-r from-green-500 to-green-600 text-white py-2.5 rounded-lg hover:from-green-600 hover:to-green-700 active:from-green-700 active:to-green-800 font-medium text-sm shadow-md transition-all touch-manipulation disabled:opacity-60 disabled:cursor-not-allowed"
               >
                 {checkInSubmitting ? '⏳ Đang xử lý...' : '✓ Xác nhận'}

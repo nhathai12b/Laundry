@@ -3,6 +3,7 @@ import { showToast } from '../../utils/toast';
 import api from '../../utils/api';
 import { isRoot, getAuth } from '../../utils/auth';
 import PasswordRequirements from '../../components/PasswordRequirements';
+import ChangePasswordModal from '../../components/ChangePasswordModal';
 
 function AdminManagement() {
   const [pendingAdmins, setPendingAdmins] = useState([]);
@@ -32,8 +33,14 @@ function AdminManagement() {
     subscription_expires_at: '',
   });
   const [stores, setStores] = useState([]);
+  const [showChangePasswordModal, setShowChangePasswordModal] = useState(false);
+  const [creatingAdmin, setCreatingAdmin] = useState(false);
 
   useEffect(() => {
+    // Trang chỉ dành cho root — route đã chặn ở App.jsx, nhưng vẫn tự vệ ở
+    // đây (cùng pattern với Reports.jsx) để không bắn GET /users, /stores khi
+    // component vì lý do gì đó vẫn mount cho admin thường.
+    if (!isRoot()) return;
     if (activeTab === 'pending') {
       loadPendingAdmins();
     } else {
@@ -134,6 +141,7 @@ function AdminManagement() {
 
   const handleCreateAdmin = async (e) => {
     e.preventDefault();
+    if (creatingAdmin) return;
     if (!formData.name || !formData.password) {
       showToast('Vui lòng điền đầy đủ thông tin bắt buộc (Tên, Mật khẩu)');
       return;
@@ -142,6 +150,7 @@ function AdminManagement() {
     // Phone không bắt buộc cho admin, chỉ trim nếu có
     const phone = formData.phone ? formData.phone.trim() : '';
 
+    setCreatingAdmin(true);
     try {
       const submitData = {
         name: formData.name.trim(),
@@ -163,6 +172,8 @@ function AdminManagement() {
       const errorMessage = error.response?.data?.error || error.message || 'Tạo admin thất bại';
       showToast(errorMessage);
       console.error('Create admin error:', error);
+    } finally {
+      setCreatingAdmin(false);
     }
   };
 
@@ -298,15 +309,23 @@ function AdminManagement() {
           <h1 className="text-2xl font-bold text-gray-800">Quản lý Admin</h1>
           <p className="text-gray-600">Tạo và phê duyệt admin cho chuỗi cửa hàng</p>
         </div>
-        <button
-          onClick={() => {
-            resetForm();
-            setShowModal(true);
-          }}
-          className="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700"
-        >
-          + Tạo Admin mới
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowChangePasswordModal(true)}
+            className="bg-gray-100 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-200 font-medium text-sm"
+          >
+            Đổi mật khẩu
+          </button>
+          <button
+            onClick={() => {
+              resetForm();
+              setShowModal(true);
+            }}
+            className="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700"
+          >
+            + Tạo Admin mới
+          </button>
+        </div>
       </div>
 
       {/* Tabs */}
@@ -500,7 +519,7 @@ function AdminManagement() {
                               >
                                 Sửa
                               </button>
-                              {admin.role !== 'root' && (
+                              {admin.role !== 'root' && admin.status !== 'pending' && (
                                 <button
                                   onClick={() => handleExtendClick(admin)}
                                   className="bg-green-600 text-white px-3 py-1 rounded text-sm hover:bg-green-700"
@@ -725,12 +744,14 @@ function AdminManagement() {
               <div className="flex gap-3 pt-4">
                 <button
                   type="submit"
-                  className="flex-1 bg-blue-600 text-white py-2.5 rounded-lg hover:bg-blue-700 font-medium"
+                  disabled={creatingAdmin}
+                  className="flex-1 bg-blue-600 text-white py-2.5 rounded-lg hover:bg-blue-700 font-medium disabled:opacity-60 disabled:cursor-not-allowed"
                 >
-                  Tạo Admin
+                  {creatingAdmin ? 'Đang tạo...' : 'Tạo Admin'}
                 </button>
                 <button
                   type="button"
+                  disabled={creatingAdmin}
                   onClick={() => {
                     setShowModal(false);
                     resetForm();
@@ -923,6 +944,8 @@ function AdminManagement() {
           </div>
         </div>
       )}
+
+      <ChangePasswordModal isOpen={showChangePasswordModal} onClose={() => setShowChangePasswordModal(false)} />
     </div>
   );
 }

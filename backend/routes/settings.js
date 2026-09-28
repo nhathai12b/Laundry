@@ -3,6 +3,7 @@ import { query, queryOne, execute, transaction } from '../database/db.js';
 import { authenticate, authorize, blockEmployeeLogin } from '../middleware/auth.js';
 import { validateEnum, sanitizeString } from '../utils/validators.js';
 import { isValidIP, isValidPort } from '../utils/ipValidator.js';
+import { resolveCurrentStoreId } from '../services/workingStoreService.js';
 
 const router = express.Router();
 
@@ -16,23 +17,31 @@ router.get('/', async (req, res) => {
     
     // Determine store_id based on user role
     if (req.user.role === 'employer') {
-      // For employer, get their store_id from users table
-      const user = await queryOne('SELECT store_id FROM users WHERE id = ? AND role = ?', [req.user.id, 'employer']);
-      if (user && user.store_id) {
-        storeId = user.store_id;
-      }
+      // Cửa hàng của tài khoản (users.store_id trong token) — hoá đơn in đúng
+      // thông tin cửa hàng
+      storeId = await resolveCurrentStoreId(req.user);
     } else if (req.user.role === 'admin' && req.user.role !== 'root') {
-      // For admin, chỉ được xem settings cửa hàng trong chuỗi của mình
-      const rawStoreId = req.query.store_id || req.user.store_id || null;
+      // For admin, chỉ được xem settings cửa hàng trong chuỗi của mình.
+      // req.user.store_id LUÔN null cho admin (admin không gắn 1 cửa hàng cố
+      // định) — dùng nó làm fallback từng khiến MỌI admin không truyền
+      // store_id rơi vào CÙNG 1 row store_id IS NULL dùng chung toàn hệ
+      // thống (đọc được/ghi đè cấu hình in bill của admin khác). -1 là giá
+      // trị canh gác không khớp bất kỳ store_id thật nào lẫn IS NULL.
+      const rawStoreId = req.query.store_id || null;
       if (rawStoreId) {
         const store = await queryOne('SELECT id FROM stores WHERE id = ? AND admin_id = ?', [rawStoreId, req.user.id]);
-        storeId = store ? rawStoreId : null;
+        storeId = store ? Number(rawStoreId) : -1;
       } else {
-        storeId = null;
+        const firstStore = await queryOne('SELECT id FROM stores WHERE admin_id = ? ORDER BY id ASC LIMIT 1', [req.user.id]);
+        storeId = firstStore ? firstStore.id : -1;
       }
     } else if (req.user.role === 'root') {
-      // Root can specify store_id in query
-      storeId = req.query.store_id || null;
+      // Root là vendor phần mềm, không vận hành cửa hàng — không cho đọc
+      // settings in/hoá đơn của BẤT KỲ cửa hàng nào (nhất quán với orders.js,
+      // reports.js, products.js, promotions.js, ... trong toàn hệ thống).
+      // Trước đây route này để root truyền store_id bất kỳ không kiểm tra
+      // admin_id, đọc được cấu hình của mọi tenant.
+      return res.json({ data: {}, store_id: null });
     }
     
     // Query settings for the store (store_id can be null for global settings)
@@ -114,26 +123,29 @@ router.put('/', blockEmployeeLogin, async (req, res) => {
     
     // Determine store_id based on user role
     if (req.user.role === 'employer') {
-      // For employer, get their store_id from users table
-      const user = await queryOne('SELECT store_id FROM users WHERE id = ? AND role = ?', [req.user.id, 'employer']);
-      if (user && user.store_id) {
-        targetStoreId = user.store_id;
+      // Lưu settings cho cửa hàng của tài khoản
+      const currentStoreId = await resolveCurrentStoreId(req.user);
+      if (currentStoreId) {
+        targetStoreId = currentStoreId;
       } else {
         return res.status(400).json({ error: 'Employer account không có cửa hàng được gán' });
       }
     } else if (req.user.role === 'admin' && req.user.role !== 'root') {
-      // For admin, use store_id from body or token
-      targetStoreId = store_id || req.user.store_id || null;
-      // Verify store belongs to admin
-      if (targetStoreId) {
-        const store = await queryOne('SELECT id FROM stores WHERE id = ? AND admin_id = ?', [targetStoreId, req.user.id]);
-        if (!store) {
-          return res.status(403).json({ error: 'Bạn không có quyền cập nhật settings cho cửa hàng này' });
-        }
+      // req.user.store_id LUÔN null cho admin — bắt buộc phải chọn store_id
+      // tường minh khi LƯU, không fallback ngầm về row store_id IS NULL dùng
+      // chung toàn hệ thống (đọc lại xem GET / phía trên để biết lý do).
+      targetStoreId = store_id || null;
+      if (!targetStoreId) {
+        return res.status(400).json({ error: 'Vui lòng chọn cửa hàng để lưu cài đặt.' });
+      }
+      const store = await queryOne('SELECT id FROM stores WHERE id = ? AND admin_id = ?', [targetStoreId, req.user.id]);
+      if (!store) {
+        return res.status(403).json({ error: 'Bạn không có quyền cập nhật settings cho cửa hàng này' });
       }
     } else if (req.user.role === 'root') {
-      // Root can set store_id explicitly
-      targetStoreId = store_id || null;
+      // Root là vendor phần mềm, không vận hành cửa hàng — không cho cập nhật
+      // settings của bất kỳ cửa hàng nào (xem GET / phía trên).
+      return res.status(403).json({ error: 'Root admin không thể cập nhật settings cửa hàng.' });
     }
 
     // Use transaction to ensure atomicity

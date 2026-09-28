@@ -3,95 +3,40 @@ import { query, queryOne, execute } from '../database/db.js';
 import { authenticate } from '../middleware/auth.js';
 import { authorize } from '../middleware/auth.js';
 import { hashPassword } from '../utils/helpers.js';
-import { validatePasswordStrength, containsUserInfo } from '../utils/passwordValidator.js';
+import { validatePasswordStrength } from '../utils/passwordValidator.js';
 
 const router = express.Router();
 
 // All routes require authentication
 router.use(authenticate);
 
+// Mỗi cửa hàng có ĐÚNG một tài khoản đăng nhập riêng (users.role = 'employer',
+// users.store_id = stores.id). Không có cơ chế "dùng chung tài khoản" giữa các
+// cửa hàng — chấm công, két tiền, báo cáo tách biệt hoàn toàn theo từng tiệm.
+const STORE_WITH_ACCOUNT_SQL = `
+  SELECT s.*,
+         u_own.id as own_account_user_id,
+         u_own.name as own_account_name,
+         u_own.phone as own_account_phone
+  FROM stores s
+  LEFT JOIN users u_own ON s.id = u_own.store_id AND u_own.role = 'employer'
+`;
+
 // Get all stores
 router.get('/', async (req, res) => {
   try {
-    let stores;
-    if (req.user.role === 'root') {
-      // Root admin is software vendor, not store operator - return empty
-      stores = [];
-    } else if (req.user.role === 'admin') {
-      // Admin can ONLY see stores from their chain (admin_id = user.id)
-      // No fallback - strict filtering to prevent seeing other admins' stores
-      // Try query with all columns first
-      try {
-        stores = await query(`
-          SELECT s.*, 
-                 u_shared.id as shared_account_user_id,
-                 u_shared.name as shared_account_name,
-                 u_shared.phone as shared_account_phone,
-                 u_own.id as own_account_user_id,
-                 u_own.name as own_account_name,
-                 u_own.phone as own_account_phone
-          FROM stores s
-          LEFT JOIN users u_shared ON s.shared_account_id = u_shared.id
-          LEFT JOIN users u_own ON s.id = u_own.store_id AND u_own.role = 'employer'
-          WHERE s.admin_id = ? AND s.status = 'active'
-          ORDER BY s.name
-        `, [req.user.id]);
-      } catch (error) {
-        // If shared_account_id or admin_id column doesn't exist, try simpler query
-        if (error.code === 'ER_BAD_FIELD_ERROR') {
-          // Log removed for security
-          try {
-            // Try with admin_id but without shared_account_id
-            stores = await query(`
-              SELECT s.*, 
-                     u_own.id as own_account_user_id,
-                     u_own.name as own_account_name,
-                     u_own.phone as own_account_phone
-              FROM stores s
-              LEFT JOIN users u_own ON s.id = u_own.store_id AND u_own.role = 'employer'
-              WHERE s.admin_id = ? AND s.status = 'active'
-              ORDER BY s.name
-            `, [req.user.id]);
-          } catch (error2) {
-            // If admin_id also doesn't exist, get all stores
-            if (error2.code === 'ER_BAD_FIELD_ERROR' && error2.message.includes('admin_id')) {
-              // Warning log removed for security
-              stores = await query(`
-                SELECT s.*, 
-                       u_own.id as own_account_user_id,
-                       u_own.name as own_account_name,
-                       u_own.phone as own_account_phone
-                FROM stores s
-                LEFT JOIN users u_own ON s.id = u_own.store_id AND u_own.role = 'employer'
-                WHERE s.status = 'active'
-                ORDER BY s.name
-              `);
-            } else {
-              throw error2;
-            }
-          }
-        } else {
-          throw error;
-        }
-      }
-    } else {
-      // For employer or other roles, return empty array (they don't manage stores)
-      stores = [];
+    let stores = [];
+    if (req.user.role === 'admin') {
+      // Admin can ONLY see stores from their chain (admin_id = user.id).
+      // Root là vendor phần mềm (không vận hành cửa hàng), employer không quản
+      // lý cửa hàng → cả hai nhận mảng rỗng.
+      stores = await query(
+        `${STORE_WITH_ACCOUNT_SQL} WHERE s.admin_id = ? AND s.status = 'active' ORDER BY s.name`,
+        [req.user.id]
+      );
     }
     res.json({ data: stores });
   } catch (error) {
-    // If stores table doesn't exist, return empty array
-    if (error.message && error.message.includes("doesn't exist")) {
-      // Log removed for security
-      return res.json({ data: [] });
-    }
-    // If admin_id column doesn't exist, return empty array for admin
-    if (error.code === 'ER_BAD_FIELD_ERROR' || error.message.includes('admin_id')) {
-      // Warning log removed for security
-      if (req.user.role === 'admin') {
-        return res.json({ data: [] });
-      }
-    }
     console.error('Get stores error:', error);
     res.status(500).json({ error: 'Server error' });
   }
@@ -107,7 +52,7 @@ router.get('/setup-status', authorize('admin'), async (req, res) => {
     }
 
     const stores = await query(
-      `SELECT id, shared_account_id FROM stores WHERE admin_id = ? AND status = 'active'`,
+      `SELECT id FROM stores WHERE admin_id = ? AND status = 'active'`,
       [req.user.id]
     );
     const storeIds = stores.map((s) => s.id);
@@ -123,19 +68,12 @@ router.get('/setup-status', authorize('admin'), async (req, res) => {
       );
       productCount = productRow?.count || 0;
 
-      // employees.store_id references the store's employer account (users.id):
-      // dedicated accounts have users.store_id = stores.id; shared accounts are
-      // referenced via stores.shared_account_id
+      // employees.store_id references the store's employer account (users.id)
       const employerRows = await query(
         `SELECT id FROM users WHERE role = 'employer' AND store_id IN (?)`,
         [storeIds]
       );
-      const employerIds = [
-        ...new Set([
-          ...employerRows.map((u) => u.id),
-          ...stores.map((s) => s.shared_account_id).filter(Boolean)
-        ])
-      ];
+      const employerIds = employerRows.map((u) => u.id);
 
       if (employerIds.length > 0) {
         const employeeRow = await queryOne(
@@ -169,29 +107,26 @@ router.get('/:id', async (req, res) => {
       return res.status(404).json({ error: 'Store not found' });
     }
 
-    let querySql = 'SELECT * FROM stores WHERE id = ?';
-    const params = [req.params.id];
-
-    // Scope theo role — thiếu nhánh employer thì bất kỳ tài khoản tiệm nào
-    // (kể cả token nhân viên cá nhân) cũng đọc được store BẤT KỲ bằng cách
-    // dò id tuần tự (tên, địa chỉ, SĐT, tọa độ GPS, shared_account_id của tenant khác)
+    let store;
     if (req.user.role === 'admin') {
-      querySql += ' AND admin_id = ?';
-      params.push(req.user.id);
+      store = await queryOne('SELECT * FROM stores WHERE id = ? AND admin_id = ?', [req.params.id, req.user.id]);
     } else if (req.user.role === 'employer') {
-      querySql += ' AND (id = ? OR shared_account_id = ?)';
-      params.push(req.user.store_id || 0, req.user.id);
+      // Tài khoản tiệm chỉ đọc được ĐÚNG cửa hàng của mình (users.store_id trong
+      // token = stores.id). Thiếu nhánh này thì bất kỳ tài khoản tiệm nào cũng
+      // đọc được store BẤT KỲ bằng cách dò id tuần tự.
+      if (!req.user.store_id || Number(req.params.id) !== Number(req.user.store_id)) {
+        return res.status(404).json({ error: 'Store not found' });
+      }
+      store = await queryOne('SELECT * FROM stores WHERE id = ?', [req.params.id]);
     } else {
       return res.status(404).json({ error: 'Store not found' });
     }
 
-    const store = await queryOne(querySql, params);
-    
     if (!store) {
       // Return 404 for both "not found" and "access denied" to prevent information leakage
       return res.status(404).json({ error: 'Store not found' });
     }
-    
+
     res.json({ data: store });
   } catch (error) {
     console.error('Get store error:', error);
@@ -199,7 +134,7 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-// Create store (Admin only)
+// Create store (Admin only) — luôn tạo kèm tài khoản đăng nhập riêng cho tiệm
 router.post('/', authorize('admin'), async (req, res) => {
   try {
     // Root admin is software vendor, not store operator - cannot create stores
@@ -207,171 +142,65 @@ router.post('/', authorize('admin'), async (req, res) => {
       return res.status(403).json({ error: 'Root admin không thể tạo cửa hàng' });
     }
 
-    const { name, address, phone, account_name, account_phone, account_password, shared_account_id } = req.body;
+    const { name, address, phone, account_name, account_phone, account_password } = req.body;
 
     if (!name) {
       return res.status(400).json({ error: 'Tên cửa hàng là bắt buộc' });
     }
-
-    // If shared_account_id is provided, use it. Otherwise, create new account (đăng nhập bằng SĐT + mật khẩu; tên hiển thị = tên cửa hàng)
-    if (!shared_account_id) {
-      if (!account_phone || !account_password) {
-        return res.status(400).json({ error: 'Vui lòng nhập đầy đủ thông tin tài khoản (SĐT đăng nhập, Mật khẩu) hoặc chọn tài khoản chung' });
-      }
-      // Validate mật khẩu TRƯỚC khi insert store — validate sau insert rồi
-      // return 400 sớm sẽ để lại store mồ côi (không có tài khoản), mỗi lần
-      // retry lại tạo thêm một bản
-      const passwordCheck = validatePasswordStrength(account_password);
-      if (!passwordCheck.valid) {
-        return res.status(400).json({ error: passwordCheck.errors.join(' ') });
-      }
-    } else {
-      // Verify shared account exists, is an employer, VÀ thuộc chuỗi của admin này —
-      // thiếu check admin_id thì admin A tham chiếu được employer của admin B
-      // (lộ tên/SĐT qua GET /stores và đếm nhầm nhân viên ở setup-status)
-      const sharedAccount = await queryOne(`
-        SELECT u.id, u.role, s.admin_id
-        FROM users u
-        LEFT JOIN stores s ON u.store_id = s.id
-        WHERE u.id = ?
-      `, [shared_account_id]);
-      if (!sharedAccount) {
-        return res.status(400).json({ error: 'Tài khoản chung không tồn tại' });
-      }
-      if (sharedAccount.role !== 'employer') {
-        return res.status(400).json({ error: 'Tài khoản chung phải là tài khoản employer' });
-      }
-      if (sharedAccount.admin_id !== req.user.id) {
-        return res.status(400).json({ error: 'Tài khoản chung không thuộc quyền quản lý của bạn' });
-      }
+    if (!account_phone || !account_password) {
+      return res.status(400).json({ error: 'Vui lòng nhập đầy đủ thông tin tài khoản (SĐT đăng nhập, Mật khẩu)' });
+    }
+    // Validate mật khẩu TRƯỚC khi insert store — validate sau insert rồi
+    // return 400 sớm sẽ để lại store mồ côi (không có tài khoản), mỗi lần
+    // retry lại tạo thêm một bản
+    const passwordCheck = validatePasswordStrength(account_password);
+    if (!passwordCheck.valid) {
+      return res.status(400).json({ error: passwordCheck.errors.join(' ') });
     }
 
     // Admin can only create stores for their chain
-    let adminId = req.user.id;
+    const adminId = req.user.id;
 
-    // Check if phone exists — chỉ khi tạo tài khoản mới (nhánh shared_account_id
-    // không gửi account_phone, gọi .trim() trên undefined sẽ crash 500)
-    // trimmedPhone khai báo ở scope ngoài — còn được dùng ở bước tạo tài
-    // khoản bên dưới (nhánh shared_account_id thì không có/không cần)
-    const trimmedPhone = shared_account_id ? null : String(account_phone).trim();
-    if (!shared_account_id) {
-      const existing = await queryOne('SELECT id FROM users WHERE phone = ?', [trimmedPhone]);
-      if (existing) {
-        return res.status(400).json({
-          error: `Số điện thoại "${trimmedPhone}" đã được sử dụng`
-        });
-      }
+    const trimmedPhone = String(account_phone).trim();
+    const existing = await queryOne('SELECT id FROM users WHERE phone = ?', [trimmedPhone]);
+    if (existing) {
+      return res.status(400).json({
+        error: `Số điện thoại "${trimmedPhone}" đã được sử dụng`
+      });
     }
 
     // Create store first
-    let storeId;
+    const result = await execute(`
+      INSERT INTO stores (name, address, phone, admin_id, status)
+      VALUES (?, ?, ?, ?, 'active')
+    `, [name.trim(), address?.trim() || null, phone?.trim() || null, adminId]);
+    const storeId = result.insertId;
+
+    // Create user account for the store (đăng nhập bằng SĐT + mật khẩu; tên
+    // hiển thị = account_name hoặc tên cửa hàng)
     try {
-      // Try to insert with admin_id and shared_account_id
-      const result = await execute(`
-        INSERT INTO stores (name, address, phone, admin_id, shared_account_id, status)
-        VALUES (?, ?, ?, ?, ?, 'active')
-      `, [name.trim(), address?.trim() || null, phone?.trim() || null, adminId, shared_account_id || null]);
-      storeId = result.insertId;
-      // Debug log removed for security
+      const password_hash = await hashPassword(account_password);
+      const employerDisplayName =
+        (account_name && String(account_name).trim()) || name.trim() || 'Chủ cửa hàng';
+
+      await execute(`
+        INSERT INTO users (name, phone, password_hash, role, store_id, status)
+        VALUES (?, ?, ?, 'employer', ?, 'active')
+      `, [employerDisplayName, trimmedPhone, password_hash, storeId]);
     } catch (error) {
-      // If columns don't exist, try without them
-      if (error.code === 'ER_BAD_FIELD_ERROR') {
-        // Warning log removed for security
-        try {
-          // Try with admin_id but without shared_account_id
-          const result = await execute(`
-            INSERT INTO stores (name, address, phone, admin_id, status)
-            VALUES (?, ?, ?, ?, 'active')
-          `, [name.trim(), address?.trim() || null, phone?.trim() || null, adminId]);
-          storeId = result.insertId;
-          // Debug log removed for security
-        } catch (error2) {
-          if (error2.code === 'ER_BAD_FIELD_ERROR') {
-            // If admin_id column doesn't exist, insert without it and update later
-            const result = await execute(`
-              INSERT INTO stores (name, address, phone, status)
-              VALUES (?, ?, ?, 'active')
-            `, [name.trim(), address?.trim() || null, phone?.trim() || null]);
-            storeId = result.insertId;
-            // Debug log removed for security
-            // Try to update admin_id if column exists
-            try {
-              await execute('UPDATE stores SET admin_id = ? WHERE id = ?', [adminId, storeId]);
-              // Debug log removed for security
-            } catch (updateError) {
-              // Warning log removed for security
-            }
-          } else {
-            throw error2;
-          }
-        }
-      } else {
-        throw error;
-      }
-    }
-
-    // Create user account for the store only if not using shared account
-    if (!shared_account_id) {
-      try {
-        // (Mật khẩu đã được validate TRƯỚC khi insert store — xem đầu route)
-        const password_hash = await hashPassword(account_password);
-        const employerDisplayName =
-          (account_name && String(account_name).trim()) || name.trim() || 'Chủ cửa hàng';
-
-        await execute(`
-          INSERT INTO users (name, phone, password_hash, role, store_id, status)
-          VALUES (?, ?, ?, 'employer', ?, 'active')
-        `, [employerDisplayName, trimmedPhone, password_hash, storeId]);
-        
-        // Debug log removed for security
-      } catch (error) {
-        // If user creation fails, delete the store
-        await execute('DELETE FROM stores WHERE id = ?', [storeId]);
-        console.error('Error creating user account:', error);
-        return res.status(500).json({ error: 'Lỗi khi tạo tài khoản. Vui lòng thử lại.' });
-      }
-    } else {
-      // Debug log removed for security
+      // If user creation fails, delete the store
+      await execute('DELETE FROM stores WHERE id = ?', [storeId]);
+      console.error('Error creating user account:', error);
+      return res.status(500).json({ error: 'Lỗi khi tạo tài khoản. Vui lòng thử lại.' });
     }
 
     // Return store with account info (same format as GET endpoint)
-    let store;
-    try {
-      store = await queryOne(`
-        SELECT s.*, 
-               u_shared.id as shared_account_user_id,
-               u_shared.name as shared_account_name,
-               u_shared.phone as shared_account_phone,
-               u_own.id as own_account_user_id,
-               u_own.name as own_account_name,
-               u_own.phone as own_account_phone
-        FROM stores s
-        LEFT JOIN users u_shared ON s.shared_account_id = u_shared.id
-        LEFT JOIN users u_own ON s.id = u_own.store_id AND u_own.role = 'employer'
-        WHERE s.id = ?
-      `, [storeId]);
-    } catch (error) {
-      // If shared_account_id column doesn't exist, use simpler query
-      if (error.code === 'ER_BAD_FIELD_ERROR') {
-        store = await queryOne(`
-          SELECT s.*, 
-                 u_own.id as own_account_user_id,
-                 u_own.name as own_account_name,
-                 u_own.phone as own_account_phone
-          FROM stores s
-          LEFT JOIN users u_own ON s.id = u_own.store_id AND u_own.role = 'employer'
-          WHERE s.id = ?
-        `, [storeId]);
-      } else {
-        throw error;
-      }
-    }
-    
+    const store = await queryOne(`${STORE_WITH_ACCOUNT_SQL} WHERE s.id = ?`, [storeId]);
     if (!store) {
       return res.status(500).json({ error: 'Không thể lấy thông tin cửa hàng sau khi tạo' });
     }
-    
-    res.status(201).json({ 
+
+    res.status(201).json({
       data: store,
       message: 'Tạo cửa hàng và tài khoản thành công!'
     });
@@ -389,7 +218,7 @@ router.patch('/:id', authorize('admin'), async (req, res) => {
       return res.status(403).json({ error: 'Root admin không thể sửa cửa hàng' });
     }
 
-    const { name, address, phone, status, shared_account_id, latitude, longitude } = req.body;
+    const { name, address, phone, status, latitude, longitude } = req.body;
 
     const store = await queryOne('SELECT * FROM stores WHERE id = ?', [req.params.id]);
     if (!store) {
@@ -397,11 +226,8 @@ router.patch('/:id', authorize('admin'), async (req, res) => {
     }
 
     // Admin can only update stores from their chain
-    if (req.user.role === 'admin') {
-      // Check if store belongs to admin's chain
-      if (!store.admin_id || store.admin_id !== req.user.id) {
-        return res.status(403).json({ error: 'Bạn chỉ có thể sửa cửa hàng trong chuỗi của mình' });
-      }
+    if (!store.admin_id || store.admin_id !== req.user.id) {
+      return res.status(403).json({ error: 'Bạn chỉ có thể sửa cửa hàng trong chuỗi của mình' });
     }
 
     const updates = [];
@@ -422,29 +248,6 @@ router.patch('/:id', authorize('admin'), async (req, res) => {
     if (status !== undefined) {
       updates.push('status = ?');
       values.push(status);
-    }
-    if (shared_account_id !== undefined) {
-      // Verify shared account exists, is an employer, VÀ thuộc chuỗi của admin này
-      // (cùng lý do với check ở POST — chặn tham chiếu chéo tenant)
-      if (shared_account_id) {
-        const sharedAccount = await queryOne(`
-          SELECT u.id, u.role, s.admin_id
-          FROM users u
-          LEFT JOIN stores s ON u.store_id = s.id
-          WHERE u.id = ?
-        `, [shared_account_id]);
-        if (!sharedAccount) {
-          return res.status(400).json({ error: 'Tài khoản chung không tồn tại' });
-        }
-        if (sharedAccount.role !== 'employer') {
-          return res.status(400).json({ error: 'Tài khoản chung phải là tài khoản employer' });
-        }
-        if (sharedAccount.admin_id !== req.user.id) {
-          return res.status(400).json({ error: 'Tài khoản chung không thuộc quyền quản lý của bạn' });
-        }
-      }
-      updates.push('shared_account_id = ?');
-      values.push(shared_account_id || null);
     }
 
     // Tọa độ tiệm cho kiểm soát check-in/check-out bằng GPS
@@ -495,11 +298,8 @@ router.delete('/:id', authorize('admin'), async (req, res) => {
     }
 
     // Admin can only delete stores from their chain
-    if (req.user.role === 'admin') {
-      // Check if store belongs to admin's chain
-      if (!store.admin_id || store.admin_id !== req.user.id) {
-        return res.status(403).json({ error: 'Bạn chỉ có thể xóa cửa hàng trong chuỗi của mình' });
-      }
+    if (!store.admin_id || store.admin_id !== req.user.id) {
+      return res.status(403).json({ error: 'Bạn chỉ có thể xóa cửa hàng trong chuỗi của mình' });
     }
 
     // Soft delete: set status inactive (preserves orders, products, history)

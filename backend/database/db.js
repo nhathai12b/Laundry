@@ -104,8 +104,7 @@ async function initializeDatabase() {
       // Add foreign keys to stores table after users table is created
       // Check if foreign keys already exist before adding
       const foreignKeyStatements = [
-        { name: 'fk_stores_admin_id', table: 'stores', column: 'admin_id', refTable: 'users', refColumn: 'id' },
-        { name: 'fk_stores_shared_account_id', table: 'stores', column: 'shared_account_id', refTable: 'users', refColumn: 'id' }
+        { name: 'fk_stores_admin_id', table: 'stores', column: 'admin_id', refTable: 'users', refColumn: 'id' }
       ];
       
       for (const fk of foreignKeyStatements) {
@@ -146,7 +145,15 @@ async function initializeDatabase() {
         { table: 'employees', column: 'failed_login_attempts', ddl: 'INT NOT NULL DEFAULT 0' },
         { table: 'employees', column: 'locked_until', ddl: 'DATETIME NULL' },
         { table: 'products', column: 'commission_percent', ddl: 'DECIMAL(5, 2) NULL' },
+        // Hoa hồng tiền cố định (đ) cho MỖI đơn vị sản phẩm bán ra — thay thế cho
+        // % khi admin muốn trả số tiền cụ thể; mỗi sản phẩm chỉ dùng 1 trong 2
+        { table: 'products', column: 'commission_amount', ddl: 'DECIMAL(12, 2) NULL' },
         { table: 'orders', column: 'employee_id', ddl: 'INT NULL' },
+        // audit_logs trước đây chỉ ghi user_id (tài khoản CỬA HÀNG dùng chung)
+        // — nhiều nhân viên cùng đăng nhập 1 tài khoản thì log không phân biệt
+        // được AI thực sự thao tác. employee_id (khi actor là employee_login)
+        // giúp truy vết đúng người.
+        { table: 'audit_logs', column: 'employee_id', ddl: 'INT NULL' },
         { table: 'store_zalo_accounts', column: 'qr_image', ddl: 'LONGTEXT NULL' },
         { table: 'timesheets', column: 'check_in_ip', ddl: 'VARCHAR(45) NULL' },
         { table: 'timesheets', column: 'auto_closed', ddl: 'TINYINT(1) NOT NULL DEFAULT 0' },

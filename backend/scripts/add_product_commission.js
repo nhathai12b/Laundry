@@ -1,5 +1,7 @@
 // Migration: hoa hồng sản phẩm cho nhân viên
-// - products.commission_percent: % hoa hồng admin đặt trên sản phẩm
+// - products.commission_percent: % hoa hồng trên giá bán (admin đặt trên sản phẩm)
+// - products.commission_amount: hoa hồng tiền cố định (đ) cho mỗi đơn vị bán ra
+//   (mỗi sản phẩm chỉ dùng MỘT trong hai, hoặc không có hoa hồng)
 // - orders.employee_id: nhân viên tạo/xử lý đơn (để quy hoa hồng đúng người)
 // Chạy: npm run migrate-commission
 import pool from '../database/db.js';
@@ -19,6 +21,13 @@ async function run() {
     } else {
       await pool.query('ALTER TABLE products ADD COLUMN commission_percent DECIMAL(5, 2) NULL');
       console.log('✅ Đã thêm products.commission_percent');
+    }
+
+    if (await columnExists('products', 'commission_amount')) {
+      console.log('- products.commission_amount đã tồn tại, bỏ qua');
+    } else {
+      await pool.query('ALTER TABLE products ADD COLUMN commission_amount DECIMAL(12, 2) NULL');
+      console.log('✅ Đã thêm products.commission_amount');
     }
 
     if (await columnExists('orders', 'employee_id')) {

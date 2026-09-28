@@ -181,15 +181,20 @@ async function getCashDrawerSummary(startAt, endAt, storeId, adminId) {
   const params = [startAt, endAt];
   appendScopeParam(params, storeId, adminId);
 
+  // Chỉ cộng expected của ca ĐÃ ĐẾM két (actual IS NOT NULL) — ca tự đóng lúc
+  // nửa đêm (quên check-out) có actual/cash_difference NULL: nếu vẫn cộng
+  // expected thì "dự kiến > thực đếm" trong khi "chênh lệch = 0", nhìn như
+  // thiếu tiền. Trả thêm số ca chưa đối soát / đang mở để báo cáo nói rõ.
   const row = await queryOne(`
     SELECT
-      COALESCE(SUM(t.expected_cash_amount), 0) AS expected_cash_amount,
+      COALESCE(SUM(CASE WHEN t.actual_cash_amount IS NOT NULL THEN t.expected_cash_amount ELSE 0 END), 0) AS expected_cash_amount,
       COALESCE(SUM(t.actual_cash_amount), 0) AS actual_cash_amount,
-      COALESCE(SUM(t.cash_difference), 0) AS cash_difference
+      COALESCE(SUM(t.cash_difference), 0) AS cash_difference,
+      COALESCE(SUM(CASE WHEN t.check_out IS NOT NULL AND t.actual_cash_amount IS NULL THEN 1 ELSE 0 END), 0) AS unreconciled_shifts,
+      COALESCE(SUM(CASE WHEN t.check_out IS NULL THEN 1 ELSE 0 END), 0) AS open_shifts
     FROM timesheets t
     WHERE t.check_in >= ?
       AND t.check_in < ?
-      AND t.check_out IS NOT NULL
       ${storeFilter('t', storeId, adminId)}
   `, params);
 
@@ -197,6 +202,8 @@ async function getCashDrawerSummary(startAt, endAt, storeId, adminId) {
     expected_cash_amount: toNumber(row?.expected_cash_amount),
     actual_cash_amount: toNumber(row?.actual_cash_amount),
     cash_difference: toNumber(row?.cash_difference),
+    unreconciled_shifts: Number(row?.unreconciled_shifts || 0),
+    open_shifts: Number(row?.open_shifts || 0),
   };
 }
 

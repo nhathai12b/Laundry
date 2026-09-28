@@ -1,14 +1,19 @@
 import { query, queryOne, transaction } from '../database/db.js';
 import { formatDateTimeUTC } from '../utils/helpers.js';
+import { resolveCurrentStoreId } from './workingStoreService.js';
 
 const IN_TYPES = new Set(['opening_float', 'cash_payment', 'cash_in', 'shortage_reimbursement']);
 const OUT_TYPES = new Set(['cash_out']);
 const NEUTRAL_TYPES = new Set(['closing_count']);
 
+// cash_drawer_transactions.amount là DECIMAL(10,2) — vượt mức này MySQL trả
+// lỗi "Out of range value" thô (500) thay vì thông báo validate rõ ràng (400)
+const MAX_CASH_DRAWER_AMOUNT = 99999999.99;
+
 function normalizeAmount(amount, fieldName = 'amount', allowZero = false) {
   const value = Number.parseFloat(amount);
-  if (!Number.isFinite(value) || value < 0 || (!allowZero && value <= 0)) {
-    const error = new Error(`${fieldName} must be ${allowZero ? 'zero or greater' : 'greater than zero'}`);
+  if (!Number.isFinite(value) || value < 0 || (!allowZero && value <= 0) || value > MAX_CASH_DRAWER_AMOUNT) {
+    const error = new Error(`${fieldName} must be ${allowZero ? 'zero or greater' : 'greater than zero'} and at most ${MAX_CASH_DRAWER_AMOUNT}`);
     error.statusCode = 400;
     throw error;
   }
@@ -61,7 +66,7 @@ async function insertCashDrawerTransactionTx(db, payload) {
   };
 }
 
-async function getTimesheetForActorTx(db, timesheetId, actor, requireOpen = true) {
+async function getTimesheetForActorTx(db, timesheetId, actor, requireOpen = true, lock = false) {
   const conditions = ['t.id = ?'];
   const params = [timesheetId];
 
@@ -92,6 +97,10 @@ async function getTimesheetForActorTx(db, timesheetId, actor, requireOpen = true
     conditions.push('t.check_out IS NULL');
   }
 
+  // lock=true (cash-in/cash-out): khoá row ca làm ngay trong transaction để
+  // 2 request ghi két gần như đồng thời (double-click, client tự retry) cho
+  // CÙNG ca không đọc cùng số dư "trước" rồi cùng ghi đè — request sau phải
+  // đợi request trước COMMIT mới đọc được số dư đã cập nhật.
   const timesheet = await db.queryOne(`
     SELECT t.*, u.name AS user_name, COALESCE(e.name, u.name) AS employee_name, s.name AS store_name
     FROM timesheets t
@@ -99,7 +108,7 @@ async function getTimesheetForActorTx(db, timesheetId, actor, requireOpen = true
     LEFT JOIN employees e ON t.employee_id = e.id
     LEFT JOIN stores s ON t.store_id = s.id
     WHERE ${conditions.join(' AND ')}
-    LIMIT 1
+    LIMIT 1${lock ? ' FOR UPDATE' : ''}
   `, params);
 
   if (!timesheet) {
@@ -110,6 +119,12 @@ async function getTimesheetForActorTx(db, timesheetId, actor, requireOpen = true
 
   return timesheet;
 }
+
+// KHÔNG chặn "giao dịch giống hệt trong 5s" cho cash-in/cash-out: 2 khoản chi
+// cùng số tiền, cùng lý do liên tiếp là nghiệp vụ hợp lệ (server.js cũng cố ý
+// miễn 2 route này khỏi duplicateRequestGuard vì lý do đó). Double-click đã
+// được chặn ở FE (nút disabled + api.js gộp request đang chạy); khoá FOR UPDATE
+// ở getTimesheetForActorTx(lock=true) chỉ để 2 request đồng thời ghi tuần tự.
 
 export async function ensureOpeningFloatTx(db, timesheet, amount, actor) {
   const openingAmount = normalizeAmount(amount || 0, 'opening_cash_amount', true);
@@ -137,10 +152,13 @@ export async function ensureOpeningFloatTx(db, timesheet, amount, actor) {
 export async function recordCashPaymentTx(db, { order, paymentId, amount, timesheet, actor }) {
   if (!timesheet?.id) return null;
 
+  // Fallback cuối: cửa hàng của tài khoản (một nguồn duy nhất: resolveCurrentStoreId)
+  const storeId = order.store_id || timesheet.store_id || await resolveCurrentStoreId(actor);
+
   return insertCashDrawerTransactionTx(db, {
     type: 'cash_payment',
     amount,
-    store_id: order.store_id || timesheet.store_id || actor?.store_id || null,
+    store_id: storeId,
     timesheet_id: timesheet.id,
     user_id: actor?.id || null,
     employee_id: timesheet.employee_id || null,
@@ -152,7 +170,8 @@ export async function recordCashPaymentTx(db, { order, paymentId, amount, timesh
 
 export async function recordCashIn(timesheetId, payload, actor) {
   return transaction(async (db) => {
-    const timesheet = await getTimesheetForActorTx(db, timesheetId, actor, true);
+    const timesheet = await getTimesheetForActorTx(db, timesheetId, actor, true, true);
+    const reason = payload.reason || 'Cash added to drawer';
     const record = await insertCashDrawerTransactionTx(db, {
       type: 'cash_in',
       amount: payload.amount,
@@ -160,7 +179,7 @@ export async function recordCashIn(timesheetId, payload, actor) {
       timesheet_id: timesheet.id,
       user_id: actor?.id || null,
       employee_id: timesheet.employee_id,
-      reason: payload.reason || 'Cash added to drawer',
+      reason,
     });
     return { record, summary: await getDrawerSummaryTx(db, timesheet.id) };
   });
@@ -174,7 +193,7 @@ export async function recordCashOut(timesheetId, payload, actor) {
   }
 
   return transaction(async (db) => {
-    const timesheet = await getTimesheetForActorTx(db, timesheetId, actor, true);
+    const timesheet = await getTimesheetForActorTx(db, timesheetId, actor, true, true);
     const record = await insertCashDrawerTransactionTx(db, {
       type: 'cash_out',
       amount: payload.amount,
@@ -203,6 +222,31 @@ export async function recordCheckoutWithdrawalTx(db, timesheet, amount, actor) {
     employee_id: timesheet.employee_id || null,
     reason: 'Rút tiền khi check-out',
   });
+}
+
+// Bàn giao két khi người giữ két (ca mở cũ nhất của tiệm) check-out mà còn
+// người khác đang đứng ca: số tiền mặt vừa đếm được chuyển sang két của ca
+// nhận. Ghi bằng type 'opening_float' trên ca nhận (không thêm type mới vì
+// cột type là ENUM — đổi ENUM cần migration ALTER TABLE trên DB đang chạy) —
+// về nghiệp vụ cũng đúng: két của người nhận bắt đầu bằng số tiền được giao.
+// Ca giao KHÔNG ghi thêm dòng nào: closing_count của họ đã chốt số này rồi;
+// nếu ghi thêm cash_out sẽ làm "chênh lệch két" của người giao bị sai.
+export async function recordDrawerHandoverTx(db, fromTimesheet, toTimesheet, amount, actor) {
+  const value = normalizeAmount(amount, 'handover_amount', false);
+  const record = await insertCashDrawerTransactionTx(db, {
+    type: 'opening_float',
+    amount: value,
+    store_id: toTimesheet.store_id,
+    timesheet_id: toTimesheet.id,
+    user_id: actor?.id || null,
+    employee_id: toTimesheet.employee_id || null,
+    reason: `Nhận bàn giao két từ ca #${fromTimesheet.id}${fromTimesheet.employee_name ? ` (${fromTimesheet.employee_name})` : ''}`,
+  });
+  await db.execute(
+    'UPDATE timesheets SET opening_cash_amount = opening_cash_amount + ? WHERE id = ?',
+    [value, toTimesheet.id]
+  );
+  return record;
 }
 
 export async function recordClosingCountTx(db, timesheet, payload, actor) {

@@ -15,6 +15,7 @@ import {
   syncOrderPaymentState,
   syncOrderPaymentStateTx,
 } from '../services/orderPaymentService.js';
+import { resolveCurrentStoreId, resolveCurrentEmployeeId } from '../services/workingStoreService.js';
 
 const router = express.Router();
 
@@ -53,7 +54,11 @@ export async function userCanAccessOrder(order, user) {
   }
 
   if (user.role === 'employer') {
-    if (user.store_id) return order.store_id === user.store_id;
+    // Tài khoản tiệm (và token nhân viên của tiệm) chỉ chạm được đơn của ĐÚNG
+    // cửa hàng mình (users.store_id trong token = stores.id). Đơn không có
+    // store_id (legacy) thì so theo người gán/người tạo.
+    const currentStoreId = await resolveCurrentStoreId(user);
+    if (currentStoreId) return order.store_id === currentStoreId;
     return order.assigned_to === user.id || order.created_by === user.id;
   }
 
@@ -78,12 +83,12 @@ router.get('/', async (req, res) => {
     `;
     const params = [];
 
-    // For employer, filter by store_id (their own store)
+    // For employer, filter by the account's store (users.store_id in token)
     if (req.user.role === 'employer') {
-      // Use store_id from user (stores.id) to filter orders
-      if (req.user.store_id) {
+      const currentStoreId = await resolveCurrentStoreId(req.user);
+      if (currentStoreId) {
         querySql += ' AND o.store_id = ?';
-        params.push(req.user.store_id);
+        params.push(currentStoreId);
       } else {
         // Fallback: filter by user id if no store_id
         querySql += ' AND (o.assigned_to = ? OR o.created_by = ?)';
@@ -222,9 +227,15 @@ router.get('/', async (req, res) => {
 // Get single order
 router.get('/:id', async (req, res) => {
   try {
-    let querySql = `
-      SELECT o.*, 
-        c.name as customer_name, 
+    // BUG NGHIÊM TRỌNG (đã tái hiện bằng test thật): route này có logic scope
+    // RIÊNG thay vì dùng userCanAccessOrder() dùng chung, và logic riêng đó
+    // hoàn toàn THIẾU nhánh cho role 'employer' — mọi tài khoản tiệm (kể cả
+    // nhân viên) đọc được BẤT KỲ đơn hàng nào trong toàn hệ thống chỉ bằng
+    // cách dò id (tên khách, SĐT, tiền). Giờ dùng chung 1 hàm kiểm tra quyền
+    // với mọi route khác của orders.js — không tự viết lại logic scope nữa.
+    const order = await queryOne(`
+      SELECT o.*,
+        c.name as customer_name,
         c.phone as customer_phone,
         u.name as assigned_to_name,
         creator.name as created_by_name
@@ -233,30 +244,13 @@ router.get('/:id', async (req, res) => {
       LEFT JOIN users u ON o.assigned_to = u.id
       LEFT JOIN users creator ON o.created_by = creator.id
       WHERE o.id = ?
-    `;
-    const params = [req.params.id];
+    `, [req.params.id]);
 
-    // For admin, verify order belongs to selected store
-    if (req.user.role === 'admin' && req.user.role !== 'root') {
-      // Prefer o.store_id (stores.id). Fallback to legacy matching if o.store_id is NULL.
-      querySql += ` AND (
-        (o.store_id IS NOT NULL AND o.store_id IN (SELECT id FROM stores WHERE admin_id = ?))
-        OR (
-          o.store_id IS NULL AND (
-            o.assigned_to IN (SELECT id FROM users WHERE store_id IN (SELECT id FROM stores WHERE admin_id = ?))
-            OR o.created_by IN (SELECT id FROM users WHERE store_id IN (SELECT id FROM stores WHERE admin_id = ?))
-          )
-        )
-      )`;
-      params.push(req.user.id, req.user.id, req.user.id);
-    } else if (req.user.role === 'root') {
-      // Root admin is software vendor, not store operator - return 404
+    if (!order) {
       return res.status(404).json({ error: 'Order not found' });
     }
 
-    const order = await queryOne(querySql, params);
-
-    if (!order) {
+    if (!(await userCanAccessOrder(order, req.user))) {
       return res.status(404).json({ error: 'Order not found' });
     }
 
@@ -331,24 +325,24 @@ router.post('/', auditLog('create', 'order'), async (req, res) => {
       for (const item of items) {
         // Validate product_id
         if (!item.product_id) {
-          throw new Error('Product ID is required for all items');
+          throw Object.assign(new Error('Product ID is required for all items'), { statusCode: 400 });
         }
 
         // Validate quantity
         const quantity = parseFloat(item.quantity);
         if (isNaN(quantity) || !isFinite(quantity) || quantity <= 0) {
-          throw new Error(`Số lượng phải là số dương hợp lệ (item product_id: ${item.product_id})`);
+          throw Object.assign(new Error(`Số lượng phải là số dương hợp lệ (item product_id: ${item.product_id})`), { statusCode: 400 });
         }
 
         // Get product and validate it exists and is active
         const product = await db.queryOne('SELECT * FROM products WHERE id = ? AND status = ?', [item.product_id, 'active']);
         if (!product) {
-          throw new Error(`Sản phẩm ${item.product_id} không tồn tại hoặc đã bị vô hiệu hóa`);
+          throw Object.assign(new Error(`Sản phẩm ${item.product_id} không tồn tại hoặc đã bị vô hiệu hóa`), { statusCode: 400 });
         }
 
         const itemTotal = product.price * quantity;
         if (!isFinite(itemTotal) || itemTotal < 0) {
-          throw new Error(`Tính toán giá trị đơn hàng không hợp lệ cho sản phẩm ${product.name}`);
+          throw Object.assign(new Error(`Tính toán giá trị đơn hàng không hợp lệ cho sản phẩm ${product.name}`), { statusCode: 400 });
         }
 
         total += itemTotal;
@@ -356,7 +350,9 @@ router.post('/', auditLog('create', 'order'), async (req, res) => {
           product_id: product.id,
           quantity: quantity,
           unit_price: product.price,
-          note: item.note ? item.note.trim() : null
+          note: item.note ? item.note.trim() : null,
+          product_store_id: product.store_id,
+          product_name: product.name,
         });
       }
 
@@ -369,7 +365,7 @@ router.post('/', auditLog('create', 'order'), async (req, res) => {
       if (promotion_id) {
         const promotionIdInt = parseInt(promotion_id);
         if (isNaN(promotionIdInt)) {
-          throw new Error('Invalid promotion_id');
+          throw Object.assign(new Error('Invalid promotion_id'), { statusCode: 400 });
         }
         // Initial promotion fetch - will validate store_id later
         const promotion = await db.queryOne('SELECT * FROM promotions WHERE id = ? AND status = "active"', [promotionIdInt]);
@@ -439,13 +435,27 @@ router.post('/', auditLog('create', 'order'), async (req, res) => {
             finalAssignedTo = employerUser.id;
           }
         }
-      } else if (!finalAssignedTo && req.user.role === 'employer') {
+      } else if (req.user.role === 'employer') {
+        // employer/employee_login KHÔNG được gán đơn cho user_id bất kỳ —
+        // thiếu check này, client tự truyền assigned_to = users.id của TENANT
+        // KHÁC sẽ khiến bước bên dưới lấy store_id của user đó, tạo đơn "ma"
+        // ngay trong dữ liệu của tenant khác (cùng luật với PATCH /:id).
+        if (assigned_to && Number(assigned_to) !== req.user.id) {
+          throw Object.assign(
+            new Error('Bạn chỉ có thể gán đơn hàng cho tài khoản cửa hàng của mình'),
+            { statusCode: 403 }
+          );
+        }
         finalAssignedTo = req.user.id;
       }
 
       // Get store_id for the order
       let orderStoreId = null;
-      if (finalAssignedTo) {
+      if (req.user.role === 'employer' && finalAssignedTo === req.user.id) {
+        // Đơn do chính tài khoản/nhân viên tiệm tạo → cửa hàng của tài khoản
+        // (một nguồn duy nhất: resolveCurrentStoreId)
+        orderStoreId = await resolveCurrentStoreId(req.user);
+      } else if (finalAssignedTo) {
         const assignedUser = await db.queryOne('SELECT store_id FROM users WHERE id = ?', [finalAssignedTo]);
         if (assignedUser && assignedUser.store_id) {
           orderStoreId = assignedUser.store_id;
@@ -453,6 +463,36 @@ router.post('/', auditLog('create', 'order'), async (req, res) => {
       }
       if (!orderStoreId && req.user.store_id) {
         orderStoreId = req.user.store_id;
+      }
+
+      // Admin thường KHÔNG có store_id riêng (chỉ quản lý chuỗi cửa hàng),
+      // nên nếu để "Chưa gán" thì orderStoreId vẫn NULL tới đây — đơn sẽ bị
+      // "mồ côi": không khớp store_id ở mọi query lọc theo cửa hàng (kể cả
+      // của chính admin vừa tạo), không bao giờ xuất hiện trong danh sách/báo
+      // cáo. Chặn sớm thay vì âm thầm tạo ra đơn không thể truy cập.
+      if (!orderStoreId && req.user.role === 'admin') {
+        throw Object.assign(
+          new Error('Vui lòng gán đơn hàng cho một nhân viên để xác định cửa hàng.'),
+          { statusCode: 400 }
+        );
+      }
+
+      // Chặn sản phẩm KHÁC cửa hàng (kể cả của tenant khác) lẻn vào đơn —
+      // bước lấy product ở trên chỉ check status='active', không check
+      // store_id, nên client tự truyền product_id bất kỳ trong hệ thống sẽ
+      // copy được giá/tên sản phẩm đó vào đơn của mình. Áp dụng bất cứ khi
+      // nào đã xác định được cửa hàng cụ thể cho đơn (employer lẫn admin) —
+      // trước đây chỉ chặn cho employer, để hở đúng lỗ hổng này cho admin.
+      if (orderStoreId) {
+        const invalidItem = orderItems.find(
+          (it) => it.product_store_id != null && it.product_store_id !== orderStoreId
+        );
+        if (invalidItem) {
+          throw Object.assign(
+            new Error(`Sản phẩm ${invalidItem.product_name} không thuộc cửa hàng này`),
+            { statusCode: 400 }
+          );
+        }
       }
 
       // Validate promotion belongs to the store (after store_id is determined)
@@ -480,8 +520,14 @@ router.post('/', auditLog('create', 'order'), async (req, res) => {
 
       const expectedReturnAt = expected_return_at ? isoToMysqlUtc(expected_return_at) : null;
       if (expected_return_at && !expectedReturnAt) {
-        throw new Error('Invalid expected_return_at');
+        throw Object.assign(new Error('Invalid expected_return_at'), { statusCode: 400 });
       }
+
+      // Nhân viên tạo đơn — từ token đăng nhập riêng, hoặc (tài khoản tiệm
+      // nhiều nhân viên cùng dùng) nhân viên đang check-in ca duy nhất đang
+      // mở — dùng để tính hoa hồng sản phẩm cho đúng người. Trước đây chỉ lấy
+      // req.user.employee_id (không có ở tài khoản tiệm) → hoa hồng luôn = 0.
+      const orderEmployeeId = await resolveCurrentEmployeeId(req.user, db.queryOne);
 
       const orderResult = await db.execute(`
         INSERT INTO orders (
@@ -494,9 +540,7 @@ router.post('/', auditLog('create', 'order'), async (req, res) => {
         customer.id,
         code,
         finalAssignedTo || null,
-        // Nhân viên tạo đơn (từ token đăng nhập cá nhân / chọn khi login) —
-        // dùng để tính hoa hồng sản phẩm cho đúng người
-        req.user.employee_id || null,
+        orderEmployeeId,
         note || null,
         total,
         discountAmount,
@@ -764,25 +808,39 @@ router.patch('/:id', auditLog('update', 'order'), async (req, res) => {
         let total = 0;
         for (const item of items) {
           // Validate product_id
+          // Các throw dưới đây đều gắn statusCode — catch block của route này
+          // dùng error.statusCode || 500; Error thường (không statusCode) sẽ
+          // rớt xuống 500 "Server error" và NUỐT MẤT message tiếng Việt đã
+          // viết sẵn, khiến người dùng thấy lỗi máy chủ chung chung.
           if (!item.product_id) {
-            throw new Error('Product ID is required for all items');
+            throw Object.assign(new Error('Product ID is required for all items'), { statusCode: 400 });
           }
 
           // Validate quantity
           const quantity = parseFloat(item.quantity);
           if (isNaN(quantity) || !isFinite(quantity) || quantity <= 0) {
-            throw new Error(`Số lượng phải là số dương hợp lệ (item product_id: ${item.product_id})`);
+            throw Object.assign(new Error(`Số lượng phải là số dương hợp lệ (item product_id: ${item.product_id})`), { statusCode: 400 });
           }
 
           // Get product and validate it exists and is active
           const product = await db.queryOne('SELECT * FROM products WHERE id = ? AND status = ?', [item.product_id, 'active']);
           if (!product) {
-            throw new Error(`Sản phẩm ${item.product_id} không tồn tại hoặc đã bị vô hiệu hóa`);
+            throw Object.assign(new Error(`Sản phẩm ${item.product_id} không tồn tại hoặc đã bị vô hiệu hóa`), { statusCode: 400 });
+          }
+          // Chặn sản phẩm KHÁC cửa hàng (kể cả tenant khác) lẻn vào khi sửa
+          // đơn — thiếu check này (đường tạo đơn POST / đã có) cho phép gán
+          // sản phẩm bất kỳ trong hệ thống vào đơn đã hoàn thành, ăn gian
+          // commission_percent của sản phẩm đó hoặc làm sai lệch báo cáo.
+          // order.store_id NULL (đơn legacy) → không có cửa hàng để so, bỏ qua
+          // check này như POST / (`if (orderStoreId)`); nếu không, MỌI sản phẩm
+          // có store_id đều bị từ chối và đơn legacy không bao giờ sửa được
+          if (order.store_id && product.store_id != null && product.store_id !== order.store_id) {
+            throw Object.assign(new Error(`Sản phẩm ${product.name} không thuộc cửa hàng này`), { statusCode: 400 });
           }
 
           const itemTotal = product.price * quantity;
           if (!isFinite(itemTotal) || itemTotal < 0) {
-            throw new Error(`Tính toán giá trị đơn hàng không hợp lệ cho sản phẩm ${product.name}`);
+            throw Object.assign(new Error(`Tính toán giá trị đơn hàng không hợp lệ cho sản phẩm ${product.name}`), { statusCode: 400 });
           }
 
           total += itemTotal;
@@ -799,7 +857,7 @@ router.patch('/:id', auditLog('update', 'order'), async (req, res) => {
         // vào total_spent — sửa items đổi tiền mà không điều chỉnh thì số liệu
         // khách lệch vĩnh viễn (hủy/xóa đơn sau đó trừ theo số MỚI)
         if (order.customer_id && order.status !== 'cancelled') {
-          const oldFinal = Number.parseFloat(order.final_amount || order.total_amount || 0) || 0;
+          const oldFinal = Number.parseFloat(order.final_amount ?? order.total_amount ?? 0) || 0;
           const delta = total - oldFinal;
           if (delta !== 0) {
             await db.execute(`
@@ -887,7 +945,7 @@ router.post('/:id/status', auditLog('update', 'order'), async (req, res) => {
     let amountPaid = null;
     const amountPaidProvided = amount_paid !== undefined && amount_paid !== null && amount_paid !== '';
     if (status === 'completed') {
-      const finalAmount = Number.parseFloat(order.final_amount || order.total_amount || 0) || 0;
+      const finalAmount = Number.parseFloat(order.final_amount ?? order.total_amount ?? 0) || 0;
       const paidSoFar = Number.parseFloat(order.paid_amount || 0) || 0;
       const remaining = Math.max(finalAmount - paidSoFar, 0);
 
@@ -995,7 +1053,7 @@ router.post('/:id/status', auditLog('update', 'order'), async (req, res) => {
       // Hoàn tác total_orders/total_spent (đã cộng khi tạo đơn) khi hủy đơn —
       // nếu không, khách bị tính tiền & số đơn cho đơn không bao giờ giặt
       if (isNewlyCancelled && order.customer_id) {
-        const orderAmount = Number.parseFloat(order.final_amount || order.total_amount || 0) || 0;
+        const orderAmount = Number.parseFloat(order.final_amount ?? order.total_amount ?? 0) || 0;
         await db.execute(`
           UPDATE customers
           SET total_orders = GREATEST(total_orders - 1, 0),
@@ -1009,7 +1067,7 @@ router.post('/:id/status', auditLog('update', 'order'), async (req, res) => {
       // total_orders/total_spent của khách (lệch cả điều kiện khuyến mãi)
       const isNewlyUncancelled = order.status === 'cancelled' && status !== 'cancelled';
       if (isNewlyUncancelled && order.customer_id) {
-        const orderAmount = Number.parseFloat(order.final_amount || order.total_amount || 0) || 0;
+        const orderAmount = Number.parseFloat(order.final_amount ?? order.total_amount ?? 0) || 0;
         await db.execute(`
           UPDATE customers
           SET total_orders = total_orders + 1,
@@ -1110,7 +1168,7 @@ router.delete('/:id', authorize('admin'), auditLog('delete', 'order'), async (re
       // Đơn ĐÃ HỦY thì bỏ qua: lúc hủy đã hoàn tác rồi, hoàn tác lần 2 sẽ
       // ăn mất đóng góp của đơn khác (GREATEST che lỗi, không tự lành)
       if (order.customer_id && order.status !== 'cancelled') {
-        const orderAmount = Number.parseFloat(order.final_amount || order.total_amount || 0) || 0;
+        const orderAmount = Number.parseFloat(order.final_amount ?? order.total_amount ?? 0) || 0;
         await db.execute(`
           UPDATE customers
           SET total_orders = GREATEST(total_orders - 1, 0),

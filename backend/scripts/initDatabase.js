@@ -94,18 +94,11 @@ async function cleanStoresForeignKeyValues(connection) {
     WHERE admin_id IS NOT NULL
       AND admin_id NOT IN (SELECT id FROM users)
   `);
-  await connection.query(`
-    UPDATE stores
-    SET shared_account_id = NULL
-    WHERE shared_account_id IS NOT NULL
-      AND shared_account_id NOT IN (SELECT id FROM users)
-  `);
 }
 
 async function ensureStoresForeignKeys(connection) {
   const storeForeignKeys = [
-    { name: 'fk_stores_admin_id', column: 'admin_id' },
-    { name: 'fk_stores_shared_account_id', column: 'shared_account_id' }
+    { name: 'fk_stores_admin_id', column: 'admin_id' }
   ];
 
   for (const fk of storeForeignKeys) {
@@ -1001,12 +994,9 @@ async function ensureSchema() {
         }
       );
 
-      // Strip any FK lines inside CREATE TABLE stores that reference users (for backward compatibility)
-      // This prevents errno 150 when users table doesn't exist yet.
-      processedSchema = processedSchema.replace(
-        /(CREATE TABLE IF NOT EXISTS stores\s*\([\s\S]*?)(\s*,\s*FOREIGN KEY\s*\(\s*admin_id\s*\)[\s\S]*?\n)([\s\S]*?)(\s*,\s*FOREIGN KEY\s*\(\s*shared_account_id\s*\)[\s\S]*?\n)([\s\S]*?\)\s*ENGINE=InnoDB[\s\S]*?;)/i,
-        (match, head, fk1, mid, fk2, tail) => `${head}${mid}${tail}`
-      );
+      // (CREATE TABLE stores trong schema.sql không khai báo FOREIGN KEY — FK
+      // stores.admin_id → users được thêm sau bằng ensureStoresForeignKeys, vì
+      // bảng users chưa tồn tại lúc tạo stores.)
 
       // Remove all ALTER TABLE statements entirely (they may span multiple lines)
       processedSchema = processedSchema.replace(/ALTER TABLE[\s\S]*?;/gi, '-- ALTER TABLE removed (handled in code);');

@@ -3,6 +3,7 @@ import { query, queryOne, execute } from '../database/db.js';
 import { authenticate } from '../middleware/auth.js';
 import { sanitizeString, validateRequiredString } from '../utils/validators.js';
 import { normalizeCustomerPhoneForIdentity } from '../utils/helpers.js';
+import { resolveCurrentStoreId } from '../services/workingStoreService.js';
 
 const router = express.Router();
 
@@ -29,8 +30,11 @@ async function customerVisibleToActor(customerId, user) {
     `, [customerId, user.id, user.id, user.id]);
     return Boolean(row);
   }
-  // employer / employee_login (token role vẫn là 'employer')
-  if (user.store_id) {
+  // employer / employee_login (token role vẫn là 'employer') — scope theo cửa
+  // hàng của tài khoản, cùng một nguồn với GET / (resolveCurrentStoreId) để
+  // list và chi tiết không lệch nhau.
+  const currentStoreId = await resolveCurrentStoreId(user);
+  if (currentStoreId) {
     const row = await queryOne(`
       SELECT 1 FROM orders o
       WHERE o.customer_id = ?
@@ -39,7 +43,7 @@ async function customerVisibleToActor(customerId, user) {
           OR (o.store_id IS NULL AND (o.assigned_to = ? OR o.created_by = ?))
         )
       LIMIT 1
-    `, [customerId, user.store_id, user.id, user.id]);
+    `, [customerId, currentStoreId, user.id, user.id]);
     return Boolean(row);
   }
   const row = await queryOne(
@@ -89,16 +93,16 @@ router.get('/', async (req, res) => {
         params.push(req.user.id);
       }
     } else if (req.user.role === 'employer') {
-      // Employer: only customers with orders from their store
-      // Use o.store_id (stores.id) to filter orders
-      if (req.user.store_id) {
+      // Employer: only customers with orders from the account's store
+      const currentStoreId = await resolveCurrentStoreId(req.user);
+      if (currentStoreId) {
         querySql = `
           SELECT DISTINCT c.*
           FROM customers c
           INNER JOIN orders o ON c.id = o.customer_id
           WHERE o.store_id = ?
         `;
-        params.push(req.user.store_id);
+        params.push(currentStoreId);
       } else {
         // Fallback: filter by user id if no store_id
         querySql = `
@@ -207,9 +211,19 @@ router.get('/:id/orders', async (req, res) => {
     const params = [req.params.id];
 
     // Filter by store based on user role
-    if (req.user.role === 'employer' && req.user.store_id) {
-      querySql += ' AND o.store_id = ?';
-      params.push(req.user.store_id);
+    if (req.user.role === 'employer') {
+      const currentStoreId = await resolveCurrentStoreId(req.user);
+      if (currentStoreId) {
+        querySql += ' AND o.store_id = ?';
+        params.push(currentStoreId);
+      } else {
+        // Không resolve được cửa hàng đang làm việc (vd tài khoản mất
+        // store_id gốc) — PHẢI vẫn giới hạn theo chính actor này, không được
+        // để WHERE o.customer_id = ? trần trụi lộ lịch sử đơn của KHÁCH HÀNG
+        // ĐÓ ở MỌI tenant trong hệ thống (cùng luật fallback với GET / ở trên).
+        querySql += ' AND (o.assigned_to = ? OR o.created_by = ?)';
+        params.push(req.user.id, req.user.id);
+      }
     } else if (req.user.role === 'admin' && req.user.role !== 'root') {
       querySql += ' AND o.store_id IN (SELECT id FROM stores WHERE admin_id = ?)';
       params.push(req.user.id);

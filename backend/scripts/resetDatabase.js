@@ -171,23 +171,16 @@ async function resetDatabase() {
       // Ensure all admin_id in stores are NULL or valid before adding foreign key
       console.log('Cleaning stores table...');
       await dbConnection.query(`
-        UPDATE stores 
-        SET admin_id = NULL 
-        WHERE admin_id IS NOT NULL 
+        UPDATE stores
+        SET admin_id = NULL
+        WHERE admin_id IS NOT NULL
         AND admin_id NOT IN (SELECT id FROM users)
-      `);
-      await dbConnection.query(`
-        UPDATE stores 
-        SET shared_account_id = NULL 
-        WHERE shared_account_id IS NOT NULL 
-        AND shared_account_id NOT IN (SELECT id FROM users)
       `);
 
       // Add foreign keys for stores table AFTER users table has data
       console.log('Adding foreign keys...');
       const storeForeignKeys = [
-        { name: 'fk_stores_admin_id', column: 'admin_id' },
-        { name: 'fk_stores_shared_account_id', column: 'shared_account_id' }
+        { name: 'fk_stores_admin_id', column: 'admin_id' }
       ];
 
       for (const fk of storeForeignKeys) {

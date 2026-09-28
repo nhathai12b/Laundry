@@ -243,7 +243,11 @@ function Orders() {
         return;
       }
 
-      const maxAmount = parseFloat(orderToComplete.final_amount || orderToComplete.total_amount || 0) || 0;
+      // Trừ số đã thu trước đó — nếu không, đơn đã trả một phần cho phép nhập
+      // tới TOÀN BỘ final_amount ở FE, rồi bị BE từ chối "exceeds remaining"
+      // (BE luôn tính cap theo phần CÒN LẠI, xem orderPaymentService.js)
+      const paidSoFar = parseFloat(orderToComplete.paid_amount) || 0;
+      const maxAmount = Math.max((parseFloat(orderToComplete.final_amount ?? orderToComplete.total_amount ?? 0) || 0) - paidSoFar, 0);
       let amountPaid = null;
       if (customAmountPaid !== '') {
         amountPaid = parseFloat(customAmountPaid);
@@ -256,6 +260,8 @@ function Orders() {
           return;
         }
       }
+
+      setPrinting(true);
 
       const payload = {
         status: 'completed',
@@ -274,6 +280,7 @@ function Orders() {
       setOrderToComplete(null);
       setPaymentMethod('cash');
       setCustomAmountPaid('');
+      setPrinting(false);
       loadOrders();
     } catch (error) {
       showToast(error.response?.data?.error || 'Cập nhật thất bại');
@@ -1256,7 +1263,7 @@ function Orders() {
                   #{orderToComplete.code}
                 </p>
                 <p className="text-base font-bold text-blue-600 mt-1 break-words">
-                  {parseFloat(orderToComplete.final_amount || orderToComplete.total_amount || 0).toLocaleString('vi-VN')} đ
+                  {parseFloat(orderToComplete.final_amount ?? orderToComplete.total_amount ?? 0).toLocaleString('vi-VN')} đ
                 </p>
               </div>
               
@@ -1303,7 +1310,7 @@ function Orders() {
                   Số tiền thanh toán
                 </label>
                 <MoneyInput
-                  placeholder={parseFloat(orderToComplete.final_amount || orderToComplete.total_amount || 0).toLocaleString('vi-VN')}
+                  placeholder={Math.max((parseFloat(orderToComplete.final_amount ?? orderToComplete.total_amount ?? 0) || 0) - (parseFloat(orderToComplete.paid_amount) || 0), 0).toLocaleString('vi-VN')}
                   value={customAmountPaid}
                   onChange={setCustomAmountPaid}
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"

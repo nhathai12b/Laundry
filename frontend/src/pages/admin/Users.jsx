@@ -233,8 +233,8 @@ function Users() {
   const handleEmployeeDelete = async (id) => {
     if (!confirm('Bạn có chắc muốn xóa nhân viên này?')) return;
     try {
-      await api.delete(`/employees/${id}`);
-      showToast('Xóa nhân viên thành công!');
+      const res = await api.delete(`/employees/${id}`);
+      showToast(res.data?.message || 'Xóa nhân viên thành công!', 'success');
       loadEmployees();
     } catch (error) {
       showToast(error.response?.data?.error || 'Xóa thất bại');

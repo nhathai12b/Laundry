@@ -136,6 +136,7 @@ function Home() {
   const [showCompleteModal, setShowCompleteModal] = useState(false);
   const [orderToComplete, setOrderToComplete] = useState(null);
   const [printing, setPrinting] = useState(false);
+  const [submittingOrder, setSubmittingOrder] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState('cash');
   const [amountPaid, setAmountPaid] = useState('');
   const [deliveryMethod, setDeliveryMethod] = useState('pickup');
@@ -165,6 +166,15 @@ function Home() {
   const [checkInEmployees, setCheckInEmployees] = useState([]);
   const [checkInEmployeeId, setCheckInEmployeeId] = useState('');
   const [checkInNote, setCheckInNote] = useState('');
+  // Prompt này chỉ hiện khi !todayCheckIn (xem nút "Check-in" phía dưới) —
+  // tức CHƯA có ca nào mở cho tài khoản này, nên luôn là lượt check-in ĐẦU
+  // TIÊN (không phải "check-in thêm người") và luôn cần hỏi quỹ đầu ca.
+  const [checkInOpeningCash, setCheckInOpeningCash] = useState('');
+  // Ca đang mở tại TIỆM (mọi tài khoản) — !todayCheckIn chỉ nói tài khoản NÀY
+  // chưa có ca; đồng nghiệp dùng token đăng nhập riêng có thể đang giữ két rồi.
+  // Có người đứng ca → đây là check-in thêm, không nhập quỹ đầu ca lần 2.
+  const [checkInStoreOpenShifts, setCheckInStoreOpenShifts] = useState([]);
+  const [checkInStoreOpenShiftsLoading, setCheckInStoreOpenShiftsLoading] = useState(false);
   const [checkInLoading, setCheckInLoading] = useState(false);
   const navigate = useNavigate();
 
@@ -210,9 +220,14 @@ function Home() {
       const employeeIdFromToken = getEmployeeId();
       setCheckInEmployeeId(employeeIdFromToken || '');
       setCheckInNote('');
+      setCheckInOpeningCash('');
       api.get('/timesheets/store-employees').then((res) => {
         setCheckInEmployees(res.data.data || []);
       }).catch(() => setCheckInEmployees([]));
+      setCheckInStoreOpenShiftsLoading(true);
+      api.get('/timesheets/store-open-shifts').then((res) => {
+        setCheckInStoreOpenShifts(res.data.data || []);
+      }).catch(() => setCheckInStoreOpenShifts([])).finally(() => setCheckInStoreOpenShiftsLoading(false));
     }
   }, [showCheckInPrompt]);
 
@@ -291,7 +306,7 @@ function Home() {
         const response = await api.get(`/orders?start_at=${encodeURIComponent(range.start_at)}&end_at=${encodeURIComponent(range.end_at)}`);
         const dayOrders = response.data.data || [];
         const completedOrders = dayOrders.filter(o => o.status === 'completed');
-        const totalRevenue = completedOrders.reduce((sum, o) => sum + (parseFloat(o.final_amount || o.total_amount) || 0), 0);
+        const totalRevenue = completedOrders.reduce((sum, o) => sum + (parseFloat(o.final_amount ?? o.total_amount) || 0), 0);
         
         setStats({
           todayRevenue: totalRevenue || 0,
@@ -321,7 +336,7 @@ function Home() {
   };
 
   const handleCompleteClick = (order) => {
-    const finalAmount = parseFloat(order.final_amount || order.total_amount || 0) || 0;
+    const finalAmount = parseFloat(order.final_amount ?? order.total_amount ?? 0) || 0;
     // Điền sẵn PHẦN CÒN LẠI (trừ tiền đã trả trước) — điền full sẽ bị backend
     // chặn "exceeds remaining" khi thu nốt tiền đơn đã trả một phần
     const paidSoFar = parseFloat(order.paid_amount || 0) || 0;
@@ -372,7 +387,7 @@ function Home() {
   const openDebtPayModal = (order) => {
     setOrderForDebtPay(order);
     setDebtPayPaymentMethod('cash');
-    const remaining = parseFloat(order.debt_amount || 0) || parseFloat(order.final_amount || order.total_amount || 0) || 0;
+    const remaining = parseFloat(order.debt_amount || 0) || parseFloat(order.final_amount ?? order.total_amount ?? 0) || 0;
     setDebtPayAmount(String(remaining));
     setShowDebtPayModal(true);
   };
@@ -419,6 +434,11 @@ function Home() {
       showToast('Vui lòng chọn nhân viên hoặc liên hệ admin thêm danh sách nhân viên.');
       return;
     }
+    if (checkInStoreOpenShiftsLoading) {
+      showToast('Đang kiểm tra ca đang mở tại tiệm, vui lòng thử lại sau giây lát.');
+      return;
+    }
+    const storeHasOpenShift = checkInStoreOpenShifts.length > 0;
     try {
       setCheckInLoading(true);
       // Vị trí GPS (best-effort): backend chỉ yêu cầu khi tiệm đã đặt tọa độ —
@@ -428,13 +448,18 @@ function Home() {
       positionPromiseRef.current = null;
       await api.post('/timesheets/check-in', {
         employee_id: employeeIdToSend,
+        // Két thuộc ca chính — người check-in thêm không nhập quỹ đầu ca
+        opening_cash_amount: storeHasOpenShift ? 0 : (checkInOpeningCash !== '' ? parseFloat(checkInOpeningCash) : 0),
         note: checkInNote,
         ...position,
       });
       setShowCheckInPrompt(false);
       setCheckInEmployeeId('');
       setCheckInNote('');
+      setCheckInOpeningCash('');
       await checkTodayStatus();
+      // Làm mới sản phẩm/đơn/doanh thu trước khi mở modal tạo đơn
+      await Promise.all([loadProducts(), loadOrders(), loadStats()]);
       setShowModal(true);
     } catch (error) {
       showToast(error.response?.data?.error || 'Check-in thất bại');
@@ -710,6 +735,10 @@ function Home() {
 
   const handleSubmitOrder = async (e) => {
     e.preventDefault();
+    // Khoá nút trong lúc gửi — mạng chậm mà bấm lần 2 thì backend
+    // (duplicateRequestGuard) trả 409 "đang xử lý", hiện toast lỗi gây hoang mang
+    if (submittingOrder) return;
+    setSubmittingOrder(true);
     try {
       const orderData = {
         customer_name: formData.customer_name || '',
@@ -803,6 +832,8 @@ function Home() {
       console.error('Create order error:', error);
       const errorMessage = error.response?.data?.error || error.message || 'Tạo đơn thất bại';
       showToast(errorMessage);
+    } finally {
+      setSubmittingOrder(false);
     }
   };
 
@@ -1271,7 +1302,7 @@ function Home() {
               <div className="bg-gradient-to-r from-amber-50 to-amber-100 rounded-xl border border-amber-200 p-3 overflow-hidden mb-3">
                 <div className="text-xs sm:text-sm text-gray-600 mb-1 font-medium">Đơn: #{orderForDebtPay.code}</div>
                 <div className="text-xl sm:text-2xl font-bold text-amber-800 break-words">
-                  {(parseFloat(orderForDebtPay.debt_amount || 0) || parseFloat(orderForDebtPay.final_amount || orderForDebtPay.total_amount || 0)).toLocaleString('vi-VN')} đ
+                  {(parseFloat(orderForDebtPay.debt_amount || 0) || parseFloat(orderForDebtPay.final_amount ?? orderForDebtPay.total_amount ?? 0)).toLocaleString('vi-VN')} đ
                 </div>
                 {orderForDebtPay.customer_name && (
                   <div className="text-xs text-gray-600 mt-2">👤 {orderForDebtPay.customer_name}</div>
@@ -1378,25 +1409,46 @@ function Home() {
                 {getEmployeeId() && (
                   <div className="mb-3 text-xs text-gray-500">Nhân viên đã chọn khi đăng nhập.</div>
                 )}
-                <div className="mb-4">
-                  <label className="block text-xs font-medium text-gray-700 mb-1">Ghi chú (tùy chọn)</label>
-                  <input
-                    type="text"
-                    value={checkInNote}
-                    onChange={(e) => setCheckInNote(e.target.value)}
-                    className="w-full px-3 py-2 border rounded-lg text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-200"
-                    placeholder="Ghi chú ca làm việc..."
-                  />
-                </div>
               </>
             ) : (
               <p className="text-xs text-amber-700 mb-4">Chưa có danh sách nhân viên. Vui lòng vào Chấm công để check-in hoặc liên hệ admin.</p>
             )}
+            {/* Quỹ đầu ca + ghi chú nằm NGOÀI nhánh "có danh sách nhân viên": token
+                nhân viên riêng vẫn check-in được khi danh sách rỗng/lỗi tải, nếu
+                nằm trong nhánh trên thì ô quỹ không hiện mà ca vẫn mở với quỹ = 0 */}
+            {!checkInStoreOpenShiftsLoading && checkInStoreOpenShifts.length === 0 && (
+              <div className="mb-3">
+                <label className="block text-xs font-medium text-gray-700 mb-1">
+                  Nhập quỹ đầu ca <span className="text-gray-400">(tiền lẻ trong két)</span>
+                </label>
+                <MoneyInput
+                  value={checkInOpeningCash}
+                  onChange={setCheckInOpeningCash}
+                  className="w-full px-3 py-2 border rounded-lg text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-200"
+                  placeholder="Ví dụ: 500.000"
+                />
+              </div>
+            )}
+            {!checkInStoreOpenShiftsLoading && checkInStoreOpenShifts.length > 0 && (
+              <p className="mb-3 text-[11px] text-blue-700 bg-blue-50 border border-blue-200 rounded px-2 py-1.5">
+                Tiệm đã có <strong>{checkInStoreOpenShifts[0]?.employee_name || 'người'}</strong> đang đứng ca và giữ két — bạn check-in <strong>thêm</strong> vào ca, không nhập quỹ đầu ca.
+              </p>
+            )}
+            <div className="mb-4">
+              <label className="block text-xs font-medium text-gray-700 mb-1">Ghi chú (tùy chọn)</label>
+              <input
+                type="text"
+                value={checkInNote}
+                onChange={(e) => setCheckInNote(e.target.value)}
+                className="w-full px-3 py-2 border rounded-lg text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-200"
+                placeholder="Ghi chú ca làm việc..."
+              />
+            </div>
             <div className="flex gap-2">
               <button
                 type="button"
                 onClick={handleCheckInFromPrompt}
-                disabled={checkInLoading || (checkInEmployees.length > 0 && !getEmployeeId() && !checkInEmployeeId)}
+                disabled={checkInLoading || checkInStoreOpenShiftsLoading || (checkInEmployees.length > 0 && !getEmployeeId() && !checkInEmployeeId)}
                 className="flex-1 bg-green-600 text-white py-2 rounded-lg text-sm font-medium hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {checkInLoading ? 'Đang xử lý...' : 'Check-in ngay'}
@@ -1726,9 +1778,10 @@ function Home() {
               <div className="flex flex-row gap-1.5 pt-2 pb-2 border-t border-gray-200 min-w-0 sticky bottom-0 bg-white">
                 <button
                   type="submit"
-                  className="flex-1 min-w-0 bg-gradient-to-r from-blue-600 to-blue-700 text-white py-2.5 rounded-lg hover:from-blue-700 hover:to-blue-800 active:from-blue-800 active:to-blue-900 font-semibold text-sm shadow-md transition-all touch-manipulation"
+                  disabled={submittingOrder}
+                  className="flex-1 min-w-0 bg-gradient-to-r from-blue-600 to-blue-700 text-white py-2.5 rounded-lg hover:from-blue-700 hover:to-blue-800 active:from-blue-800 active:to-blue-900 font-semibold text-sm shadow-md transition-all touch-manipulation disabled:opacity-60 disabled:cursor-not-allowed"
                 >
-                  ✓ Tạo đơn
+                  {submittingOrder ? '⏳ Đang tạo...' : '✓ Tạo đơn'}
                 </button>
                 <button
                   type="button"
@@ -1909,7 +1962,7 @@ function Home() {
                 <div className="bg-gradient-to-r from-blue-50 to-blue-100 rounded-xl border border-blue-200 p-3 overflow-hidden">
                   <div className="text-xs sm:text-sm text-gray-600 mb-1 font-medium">Đơn hàng: #{orderToComplete.code}</div>
                   <div className="text-xl sm:text-2xl font-bold text-blue-600 break-words">
-                    {parseFloat(orderToComplete.final_amount || orderToComplete.total_amount || 0).toLocaleString('vi-VN')} đ
+                    {parseFloat(orderToComplete.final_amount ?? orderToComplete.total_amount ?? 0).toLocaleString('vi-VN')} đ
                   </div>
                   {orderToComplete.customer_name && (
                     <div className="text-xs text-gray-600 mt-2">

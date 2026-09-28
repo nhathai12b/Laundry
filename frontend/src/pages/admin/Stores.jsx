@@ -17,6 +17,7 @@ function Stores() {
   const [stores, setStores] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
+  const [submittingStore, setSubmittingStore] = useState(false);
   const [editingStore, setEditingStore] = useState(null);
   const [formData, setFormData] = useState({
     name: '',
@@ -295,18 +296,18 @@ function Stores() {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    
+    if (submittingStore) return;
+
     if (!formData.name.trim()) {
       showToast('Vui lòng nhập tên cửa hàng');
       return;
     }
 
+    setSubmittingStore(true);
     try {
       if (editingStore) {
-        // When editing, only update store info (name/address/phone/status).
-        // Do NOT touch account fields or shared_account_id — the form has no UI
-        // for them, and forcing shared_account_id=null here wiped the link for
-        // stores that use a shared account.
+        // When editing, only update store info (name/address/phone/status/GPS).
+        // Tài khoản đăng nhập của tiệm sửa riêng qua "Sửa tài khoản".
         const storeData = {
           name: formData.name,
           address: formData.address,
@@ -350,6 +351,8 @@ function Stores() {
     } catch (error) {
       console.error('Error saving store:', error);
       showToast(error.response?.data?.error || 'Có lỗi xảy ra khi lưu cửa hàng');
+    } finally {
+      setSubmittingStore(false);
     }
   };
 
@@ -393,7 +396,6 @@ function Stores() {
       status: 'active',
       account_phone: '',
       account_password: '',
-      shared_account_id: '',
     });
   };
 
@@ -481,47 +483,20 @@ function Stores() {
                     </tr>
                   ) : (
                     stores.map((store) => {
-                      // Ưu tiên dùng thông tin từ backend query (nếu có)
+                      // Tài khoản đăng nhập riêng của tiệm (users.store_id = store.id) —
+                      // ưu tiên dữ liệu join từ backend, fallback tìm trong users
                       let accountToShow = null;
-                      let isShared = false;
-                      
-                      // Kiểm tra tài khoản chung trước
-                      if (store.shared_account_id) {
-                        if (store.shared_account_name || store.shared_account_user_id) {
-                          // Có tài khoản chung từ backend query
-                          accountToShow = {
-                            id: store.shared_account_user_id,
-                            name: store.shared_account_name,
-                            phone: store.shared_account_phone,
-                            store_id: store.id
-                          };
-                          isShared = true;
-                        } else {
-                          // Fallback: tìm trong users array
-                          const sharedAccount = users.find(u => u.id === store.shared_account_id);
-                          if (sharedAccount) {
-                            accountToShow = sharedAccount;
-                            isShared = true;
-                          }
-                        }
-                      }
-                      
-                      // Nếu không có tài khoản chung, tìm tài khoản riêng
-                      if (!accountToShow) {
-                        if (store.own_account_user_id || store.own_account_name) {
-                          // Có tài khoản riêng từ backend query
-                          accountToShow = {
-                            id: store.own_account_user_id,
-                            name: store.own_account_name,
-                            phone: store.own_account_phone,
-                            store_id: store.id
-                          };
-                        } else {
-                          // Fallback: tìm trong users array
-                          const storeUser = users.find(u => u.store_id === store.id && u.role === 'employer');
-                          if (storeUser) {
-                            accountToShow = storeUser;
-                          }
+                      if (store.own_account_user_id || store.own_account_name) {
+                        accountToShow = {
+                          id: store.own_account_user_id,
+                          name: store.own_account_name,
+                          phone: store.own_account_phone,
+                          store_id: store.id
+                        };
+                      } else {
+                        const storeUser = users.find(u => u.store_id === store.id && u.role === 'employer');
+                        if (storeUser) {
+                          accountToShow = storeUser;
                         }
                       }
                       return (
@@ -532,14 +507,7 @@ function Stores() {
                           <td className="px-4 py-3 text-sm">
                             {accountToShow ? (
                               <div>
-                                <div className="flex items-center gap-2">
-                                  <div className="text-gray-800 font-medium">{accountToShow.name}</div>
-                                  {isShared && (
-                                    <span className="px-2 py-0.5 bg-blue-100 text-blue-800 rounded text-xs font-medium">
-                                      Chung
-                                    </span>
-                                  )}
-                                </div>
+                                <div className="text-gray-800 font-medium">{accountToShow.name}</div>
                                 <div className="text-xs text-gray-500">{accountToShow.phone}</div>
                                 <div className="mt-1 flex items-center gap-2">
                                   <button
@@ -816,7 +784,7 @@ function Stores() {
               {!editingStore && (
                 <>
                   <div className="border-t pt-4 mt-4">
-                    <h3 className="text-lg font-semibold text-gray-800 mb-3">Thông tin tài khoản</h3>
+                    <h3 className="text-lg font-semibold text-gray-800 mb-3">Tài khoản đăng nhập của cửa hàng</h3>
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-1">
                         Mật khẩu *
@@ -833,7 +801,7 @@ function Stores() {
                     </div>
                     <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-sm text-blue-800">
                       <p className="font-medium">Lưu ý:</p>
-                      <p>Đăng nhập bằng số điện thoại cửa hàng và mật khẩu. Tên hiển thị tài khoản trùng với tên cửa hàng.</p>
+                      <p>Mỗi cửa hàng có tài khoản đăng nhập riêng — chấm công, két tiền và báo cáo tách biệt hoàn toàn theo từng cửa hàng. Đăng nhập bằng số điện thoại cửa hàng và mật khẩu; tên hiển thị tài khoản trùng với tên cửa hàng.</p>
                     </div>
                   </div>
                 </>
@@ -841,12 +809,14 @@ function Stores() {
               <div className="flex gap-3 pt-4">
                 <button
                   type="submit"
-                  className="flex-1 bg-blue-600 text-white py-2.5 rounded-lg hover:bg-blue-700 font-medium"
+                  disabled={submittingStore}
+                  className="flex-1 bg-blue-600 text-white py-2.5 rounded-lg hover:bg-blue-700 font-medium disabled:opacity-60 disabled:cursor-not-allowed"
                 >
-                  {editingStore ? 'Cập nhật' : 'Tạo'}
+                  {submittingStore ? 'Đang lưu...' : (editingStore ? 'Cập nhật' : 'Tạo')}
                 </button>
                 <button
                   type="button"
+                  disabled={submittingStore}
                   onClick={() => {
                     setShowModal(false);
                     setEditingStore(null);

@@ -1,8 +1,8 @@
 ﻿import { useEffect, useState } from 'react';
 import PageSkeleton from '../../components/PageSkeleton';
 import api from '../../utils/api';
-import { isAdmin, isEmployer, getAuth } from '../../utils/auth';
-import PasswordRequirements from '../../components/PasswordRequirements';
+import { isAdmin, isEmployer } from '../../utils/auth';
+import ChangePasswordModal from '../../components/ChangePasswordModal';
 import { resetBluetoothPrinter } from '../../utils/printBill';
 
 function Settings() {
@@ -19,17 +19,11 @@ function Settings() {
   });
   const [stores, setStores] = useState([]);
   const [selectedStoreId, setSelectedStoreId] = useState('');
+  const [storesLoading, setStoresLoading] = useState(isAdmin());
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState('');
   const [showChangePasswordModal, setShowChangePasswordModal] = useState(false);
-  const [passwordData, setPasswordData] = useState({
-    currentPassword: '',
-    newPassword: '',
-    confirmPassword: '',
-  });
-  const [changingPassword, setChangingPassword] = useState(false);
-  const [passwordMessage, setPasswordMessage] = useState('');
 
   useEffect(() => {
     if (isAdmin()) {
@@ -53,6 +47,8 @@ function Settings() {
       }
     } catch (error) {
       console.error('Error loading stores:', error);
+    } finally {
+      setStoresLoading(false);
     }
   };
 
@@ -74,6 +70,10 @@ function Settings() {
 
   const handleSave = async (e) => {
     e.preventDefault();
+    if (isAdmin() && storesLoading) {
+      setMessage('Đang tải danh sách cửa hàng, vui lòng thử lại sau giây lát.');
+      return;
+    }
     setSaving(true);
     setMessage('');
 
@@ -99,79 +99,6 @@ function Settings() {
     }
   };
 
-  const handleChangePassword = async (e) => {
-    e.preventDefault();
-    setChangingPassword(true);
-    setPasswordMessage('');
-
-    // Validate
-    if (!passwordData.currentPassword || !passwordData.newPassword || !passwordData.confirmPassword) {
-      setPasswordMessage('Vui lòng điền đầy đủ thông tin');
-      setChangingPassword(false);
-      return;
-    }
-
-    if (passwordData.newPassword !== passwordData.confirmPassword) {
-      setPasswordMessage('Mật khẩu mới và xác nhận mật khẩu không khớp');
-      setChangingPassword(false);
-      return;
-    }
-
-    if (passwordData.currentPassword === passwordData.newPassword) {
-      setPasswordMessage('Mật khẩu mới phải khác mật khẩu hiện tại');
-      setChangingPassword(false);
-      return;
-    }
-
-    try {
-      const auth = getAuth();
-      if (!auth || !auth.user || !auth.user.id || !auth.user.phone) {
-        setPasswordMessage('Không thể lấy thông tin người dùng. Vui lòng đăng nhập lại.');
-        setChangingPassword(false);
-        return;
-      }
-
-      // First verify current password by trying to login
-      try {
-        await api.post('/auth/login', {
-          phone: auth.user.phone,
-          password: passwordData.currentPassword
-        });
-      } catch (loginError) {
-        setPasswordMessage('Mật khẩu hiện tại không đúng');
-        setChangingPassword(false);
-        return;
-      }
-
-      // Update password — kèm current_password để backend tự xác thực (không
-      // chỉ dựa vào bước gọi /auth/login phía trên, dễ bị bỏ qua nếu gọi API trực tiếp)
-      await api.patch(`/users/${auth.user.id}`, {
-        password: passwordData.newPassword,
-        current_password: passwordData.currentPassword,
-      });
-
-      setPasswordMessage('Đổi mật khẩu thành công!');
-      setTimeout(() => {
-        setShowChangePasswordModal(false);
-        setPasswordData({
-          currentPassword: '',
-          newPassword: '',
-          confirmPassword: '',
-        });
-        setPasswordMessage('');
-      }, 2000);
-    } catch (error) {
-      const errorDetails = error.response?.data?.details || [];
-      if (errorDetails.length > 0) {
-        setPasswordMessage('Mật khẩu không đủ mạnh: ' + errorDetails.join(', '));
-      } else {
-        setPasswordMessage(error.response?.data?.error || 'Đổi mật khẩu thất bại');
-      }
-    } finally {
-      setChangingPassword(false);
-    }
-  };
-
   if (loading) {
     return <PageSkeleton />;
   }
@@ -184,18 +111,10 @@ function Settings() {
           <p className="text-gray-600">Cấu hình máy in và hệ thống</p>
         </div>
         <button
-          onClick={() => {
-            setShowChangePasswordModal(true);
-            setPasswordData({
-              currentPassword: '',
-              newPassword: '',
-              confirmPassword: '',
-            });
-            setPasswordMessage('');
-          }}
+          onClick={() => setShowChangePasswordModal(true)}
           className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 font-medium text-sm transition-colors"
         >
-          🔒 Đổi mật khẩu
+          Đổi mật khẩu
         </button>
       </div>
 
@@ -424,10 +343,10 @@ function Settings() {
           <div className="pt-4">
             <button
               type="submit"
-              disabled={saving}
+              disabled={saving || (isAdmin() && storesLoading)}
               className="w-full sm:w-auto px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium text-base disabled:opacity-50"
             >
-              {saving ? 'Đang lưu...' : 'Lưu cài đặt'}
+              {saving ? 'Đang lưu...' : (isAdmin() && storesLoading) ? 'Đang tải...' : 'Lưu cài đặt'}
             </button>
           </div>
         </form>
@@ -462,123 +381,7 @@ function Settings() {
       </div>
 
       {/* Change Password Modal */}
-      {showChangePasswordModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-2 sm:p-3 z-50 overflow-y-auto overflow-x-hidden">
-          <div className="bg-white rounded-lg max-w-md w-full max-h-[90vh] flex flex-col my-auto shadow-2xl">
-            <div className="flex items-center justify-between p-4 sm:p-5 pb-3 border-b border-gray-200 flex-shrink-0">
-              <h2 className="text-lg sm:text-xl font-bold text-gray-900 truncate pr-2">Đổi mật khẩu</h2>
-              <button
-                onClick={() => {
-                  setShowChangePasswordModal(false);
-                  setPasswordData({
-                    currentPassword: '',
-                    newPassword: '',
-                    confirmPassword: '',
-                  });
-                  setPasswordMessage('');
-                }}
-                className="text-gray-500 hover:text-gray-700 text-2xl w-8 h-8 flex-shrink-0 flex items-center justify-center rounded-full hover:bg-gray-100 active:bg-gray-200 touch-manipulation"
-                aria-label="Đóng"
-              >
-                ×
-              </button>
-            </div>
-            
-            <div className="flex-1 overflow-y-auto overflow-x-hidden px-4 sm:px-5">
-              <form onSubmit={handleChangePassword} className="space-y-4 min-w-0 py-2">
-                {passwordMessage && (
-                  <div
-                    className={`p-3 rounded-lg ${
-                      passwordMessage.includes('thành công')
-                        ? 'bg-green-100 text-green-700'
-                        : 'bg-red-100 text-red-700'
-                    }`}
-                  >
-                    {passwordMessage}
-                  </div>
-                )}
-
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Mật khẩu hiện tại *
-                  </label>
-                  <input
-                    type="password"
-                    value={passwordData.currentPassword}
-                    onChange={(e) => setPasswordData({ ...passwordData, currentPassword: e.target.value })}
-                    className="w-full px-3 py-2.5 border rounded-lg text-base"
-                    required
-                    placeholder="Nhập mật khẩu hiện tại"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Mật khẩu mới *
-                  </label>
-                  <input
-                    type="password"
-                    value={passwordData.newPassword}
-                    onChange={(e) => setPasswordData({ ...passwordData, newPassword: e.target.value })}
-                    className="w-full px-3 py-2.5 border rounded-lg text-base"
-                    required
-                    placeholder="Nhập mật khẩu mới"
-                  />
-                  {passwordData.newPassword && (
-                    <PasswordRequirements password={passwordData.newPassword} />
-                  )}
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Xác nhận mật khẩu mới *
-                  </label>
-                  <input
-                    type="password"
-                    value={passwordData.confirmPassword}
-                    onChange={(e) => setPasswordData({ ...passwordData, confirmPassword: e.target.value })}
-                    className={`w-full px-3 py-2.5 border rounded-lg text-base ${
-                      passwordData.confirmPassword && passwordData.newPassword !== passwordData.confirmPassword
-                        ? 'border-red-500'
-                        : ''
-                    }`}
-                    required
-                    placeholder="Nhập lại mật khẩu mới"
-                  />
-                  {passwordData.confirmPassword && passwordData.newPassword !== passwordData.confirmPassword && (
-                    <p className="text-xs text-red-600 mt-1">Mật khẩu xác nhận không khớp</p>
-                  )}
-                </div>
-              </form>
-            </div>
-
-            <div className="flex flex-row gap-2.5 px-4 sm:px-5 pb-4 pt-2 border-t border-gray-200 flex-shrink-0 safe-area-inset-bottom">
-              <button
-                onClick={handleChangePassword}
-                disabled={changingPassword}
-                className="flex-1 min-w-0 px-4 py-3.5 bg-gradient-to-r from-red-600 to-red-700 text-white rounded-xl active:from-red-700 active:to-red-800 transition-all disabled:opacity-50 disabled:cursor-not-allowed touch-manipulation font-semibold text-base shadow-lg"
-              >
-                {changingPassword ? '⏳ Đang xử lý...' : '✓ Đổi mật khẩu'}
-              </button>
-              <button
-                onClick={() => {
-                  setShowChangePasswordModal(false);
-                  setPasswordData({
-                    currentPassword: '',
-                    newPassword: '',
-                    confirmPassword: '',
-                  });
-                  setPasswordMessage('');
-                }}
-                className="flex-1 min-w-0 px-4 py-3 bg-gray-200 text-gray-800 rounded-xl active:bg-gray-300 transition-colors touch-manipulation text-base font-medium"
-                disabled={changingPassword}
-              >
-                Hủy
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <ChangePasswordModal isOpen={showChangePasswordModal} onClose={() => setShowChangePasswordModal(false)} />
     </div>
   );
 }

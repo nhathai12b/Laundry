@@ -1,34 +1,13 @@
 import express from 'express';
 import { query, queryOne, execute } from '../database/db.js';
 import { authenticate, authorize } from '../middleware/auth.js';
-import { formatDateTimeUTC } from '../utils/helpers.js';
+import { auditLog } from '../middleware/audit.js';
 import { OVERTIME_MULTIPLIER } from '../utils/constants.js';
+import { swallowMissingSchema, getMonthUtcRange } from '../utils/payrollHelpers.js';
 
 const router = express.Router();
 
 router.use(authenticate);
-
-// Chỉ nuốt lỗi thiếu bảng/cột (DB chưa migrate) — lỗi thật (deadlock, timeout)
-// phải ném ra, nếu không lương/hoa hồng trả về 0 im lặng
-const swallowMissingSchema = (fallback) => (error) => {
-  if (error?.code === 'ER_NO_SUCH_TABLE' || error?.code === 'ER_BAD_FIELD_ERROR') return fallback;
-  throw error;
-};
-
-const getTimezoneOffsetMinutes = (req) => {
-  const offset = Number.parseInt(req.query.timezone_offset_minutes ?? '0', 10);
-  if (Number.isNaN(offset) || offset < -840 || offset > 840) return 0;
-  return offset;
-};
-
-const getMonthUtcRange = (req, month, year) => {
-  const offset = getTimezoneOffsetMinutes(req);
-  // offset = getTimezoneOffset() = UTC − local (VN: -420).
-  // Mốc local 00:00 ngày 1 → UTC = local + offset  (VD: 1/8 00:00 VN = 31/7 17:00Z)
-  const start = new Date(Date.UTC(Number(year), Number(month) - 1, 1) + offset * 60 * 1000);
-  const end = new Date(Date.UTC(Number(year), Number(month), 1) + offset * 60 * 1000);
-  return { startAt: formatDateTimeUTC(start), endAt: formatDateTimeUTC(end) };
-};
 
 // Lương công tính theo GIỜ: giờ thường × lương giờ + tăng ca × hệ số
 // (cùng công thức với payroll admin)
@@ -89,18 +68,24 @@ const buildSalarySummary = async (req, employee, month, year) => {
       WHERE a.employee_id = ? AND a.adjust_date >= ? AND a.adjust_date < ?
       ORDER BY a.adjust_date DESC, a.id DESC
     `, [employee.id, monthStart, nextMonth]).catch(swallowMissingSchema([])),
-    // Hoa hồng sản phẩm: % (admin đặt trên từng sản phẩm) × giá trị dòng hàng,
+    // Hoa hồng sản phẩm (admin đặt trên từng sản phẩm, MỘT trong hai loại):
+    //   % × giá trị dòng hàng  +  tiền cố định × số lượng
     // tính trên các đơn ĐÃ HOÀN THÀNH mà nhân viên này tạo/xử lý trong tháng.
-    // .catch: cột commission_percent/employee_id chưa migrate — coi như 0
+    // Cùng công thức với payroll admin (timesheets.js). products.js chặn cả hai
+    // loại cùng > 0 nên hai term không bao giờ cộng dồn cho một sản phẩm.
+    // .catch: cột commission_*/employee_id chưa migrate — coi như 0
     queryOne(`
-      SELECT COALESCE(SUM(oi.quantity * oi.unit_price * (p.commission_percent / 100)), 0) AS commission
+      SELECT COALESCE(SUM(
+        oi.quantity * oi.unit_price * (COALESCE(p.commission_percent, 0) / 100)
+        + oi.quantity * COALESCE(p.commission_amount, 0)
+      ), 0) AS commission
       FROM order_items oi
       JOIN orders o ON oi.order_id = o.id
       JOIN products p ON oi.product_id = p.id
       WHERE o.employee_id = ?
         AND o.status = 'completed'
         AND o.created_at >= ? AND o.created_at < ?
-        AND p.commission_percent > 0
+        AND (p.commission_percent > 0 OR p.commission_amount > 0)
     `, [employee.id, range.startAt, range.endAt]).catch(swallowMissingSchema(null)),
   ]);
 
@@ -269,7 +254,7 @@ router.get('/adjustments-grid', authorize('admin'), async (req, res) => {
 });
 
 // Admin cộng/trừ tiền cho nhân viên theo ngày (amount dương = cộng, âm = trừ)
-router.post('/adjustments', authorize('admin'), async (req, res) => {
+router.post('/adjustments', authorize('admin'), auditLog('create', 'salary_adjustment', (req, data) => data.data?.id), async (req, res) => {
   try {
     const { employee_id, amount, reason, adjust_date } = req.body;
 
@@ -288,6 +273,20 @@ router.post('/adjustments', authorize('admin'), async (req, res) => {
     const employee = await getEmployeeForActor(employee_id, req.user);
     if (!employee) {
       return res.status(404).json({ error: 'Không tìm thấy nhân viên trong chuỗi cửa hàng của bạn.' });
+    }
+
+    // Double-click / client tự retry gửi 2 request giống hệt nhau — chặn tạo
+    // đôi một khoản thưởng/phạt (cùng nhân viên, số tiền, ngày, lý do trong
+    // vòng 5 giây gần nhất). Cùng nguyên tắc với cash-drawer duplicate guard.
+    const duplicate = await queryOne(`
+      SELECT id FROM salary_adjustments
+      WHERE employee_id = ? AND amount = ? AND adjust_date = ? AND reason <=> ?
+        AND created_at >= (NOW() - INTERVAL 5 SECOND)
+      ORDER BY id DESC
+      LIMIT 1
+    `, [employee.id, Math.round(amountValue * 100) / 100, dateValue, String(reason || '').trim() || null]);
+    if (duplicate) {
+      return res.status(409).json({ error: 'Khoản điều chỉnh này vừa được ghi nhận. Vui lòng đợi vài giây trước khi thử lại.' });
     }
 
     const result = await execute(`
@@ -311,7 +310,7 @@ router.post('/adjustments', authorize('admin'), async (req, res) => {
 });
 
 // Admin xóa một khoản cộng/trừ
-router.delete('/adjustments/:id', authorize('admin'), async (req, res) => {
+router.delete('/adjustments/:id', authorize('admin'), auditLog('delete', 'salary_adjustment'), async (req, res) => {
   try {
     const adjustment = await queryOne('SELECT * FROM salary_adjustments WHERE id = ?', [req.params.id]);
     if (!adjustment) {

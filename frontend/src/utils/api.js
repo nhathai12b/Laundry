@@ -15,6 +15,11 @@ const api = axios.create({
 // Coalesce duplicate mutating requests: double-clicking a submit button fires
 // two identical POSTs before the first responds — share one request instead,
 // so both click handlers resolve with the same response and no duplicate rows.
+// Giữ key cho tới khi request đầu TRẢ LỜI (không dùng cửa sổ thời gian ngắn):
+// mạng chậm >1s thì cú bấm thứ 2 vẫn phải được gộp. Backend còn một lớp nữa
+// (middleware/duplicateRequestGuard: request giống hệt trong 5s → trả lại
+// response cũ / 409), nên 2 hành động thật sự khác nhau mà vô tình cùng body
+// đã được chấp nhận là đánh đổi có chủ ý ở cả hai lớp.
 const inflight = new Map();
 for (const method of ['post', 'put', 'patch']) {
   const original = api[method].bind(api);

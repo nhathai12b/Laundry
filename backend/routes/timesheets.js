@@ -5,7 +5,8 @@ import { authenticate } from '../middleware/auth.js';
 import { authorize } from '../middleware/auth.js';
 import { getClientIp } from '../middleware/rateLimiter.js';
 import { OVERTIME_MULTIPLIER } from '../utils/constants.js';
-import { ensureOpeningFloatTx, getDrawerSummaryTx, recordClosingCountTx, recordCheckoutWithdrawalTx } from '../services/cashDrawerService.js';
+import { ensureOpeningFloatTx, getDrawerSummaryTx, recordClosingCountTx, recordCheckoutWithdrawalTx, recordDrawerHandoverTx } from '../services/cashDrawerService.js';
+import { swallowMissingSchema, getTimezoneOffsetMinutes, isoToMysqlUtc, getMonthUtcRange } from '../utils/payrollHelpers.js';
 import * as XLSX from 'xlsx';
 
 const router = express.Router();
@@ -39,7 +40,7 @@ const normalizeLegacyFutureTimeMs = (ms) => {
   return ms;
 };
 
-const parseTimesheetDateTimeMsCompat = (value) => {
+export const parseTimesheetDateTimeMsCompat = (value) => {
   return normalizeLegacyFutureTimeMs(parseTimesheetDateTimeMs(value));
 };
 
@@ -60,34 +61,8 @@ const serializeTimesheet = (timesheet) => {
 
 const serializeTimesheets = (timesheets) => timesheets.map(serializeTimesheet);
 
-const isoToMysqlUtc = (value) => {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return null;
-  return formatDateTimeUTC(date);
-};
-
-const getTimezoneOffsetMinutes = (req) => {
-  const offset = Number.parseInt(req.query.timezone_offset_minutes ?? '0', 10);
-  if (Number.isNaN(offset) || offset < -840 || offset > 840) return 0;
-  return offset;
-};
-
 const localDateSql = (column, offsetMinutes) => {
   return `DATE(DATE_SUB(${column}, INTERVAL ${offsetMinutes} MINUTE))`;
-};
-
-const getMonthUtcRange = (req, month, year) => {
-  if (req.query.start_at && req.query.end_at) {
-    const startAt = isoToMysqlUtc(req.query.start_at);
-    const endAt = isoToMysqlUtc(req.query.end_at);
-    if (startAt && endAt) return { startAt, endAt };
-  }
-  const offset = getTimezoneOffsetMinutes(req);
-  // offset = getTimezoneOffset() = UTC − local (VN: -420).
-  // Mốc local 00:00 ngày 1 → UTC = local + offset  (VD: 1/8 00:00 VN = 31/7 17:00Z)
-  const start = new Date(Date.UTC(Number(year), Number(month) - 1, 1) + offset * 60 * 1000);
-  const end = new Date(Date.UTC(Number(year), Number(month), 1) + offset * 60 * 1000);
-  return { startAt: formatDateTimeUTC(start), endAt: formatDateTimeUTC(end) };
 };
 
 const formatWithTimezoneOffset = (value, timezoneOffsetMinutes, type = 'date') => {
@@ -184,7 +159,8 @@ async function getRevenueWindowStartTx(db, timesheet, checkInSql, checkOutSql) {
   return Number.isNaN(ms) ? checkInSql : formatDateTimeUTC(new Date(ms + 1000));
 }
 
-async function getShiftPaymentSummaryDeduped(db, timesheet, userId, checkInSql, checkOutSql) {
+// export: reports.js dùng để tính doanh thu LIVE cho ca đang mở (chưa check-out)
+export async function getShiftPaymentSummaryDeduped(db, timesheet, userId, checkInSql, checkOutSql) {
   if (await hasOlderOpenShiftTx(db, timesheet, checkInSql)) {
     return { ...EMPTY_PAYMENT_SUMMARY };
   }
@@ -232,6 +208,13 @@ router.get('/', async (req, res) => {
     } else if (req.user.role === 'employer') {
       sqlQuery += ' AND t.user_id = ?';
       params.push(req.user.id);
+      // Token nhân viên cá nhân chỉ được xem LỊCH SỬ CHẤM CÔNG CỦA CHÍNH MÌNH —
+      // thiếu điều kiện này thì 2 nhân viên dùng chung tài khoản tiệm đọc được
+      // ca làm/ghi chú/số tiền két của nhau (cùng luật ownShiftFilter ở check-out)
+      if (req.user.employee_login) {
+        sqlQuery += ' AND t.employee_id = ?';
+        params.push(req.user.employee_id);
+      }
     }
 
     if (start_at && end_at) {
@@ -364,7 +347,7 @@ async function verifyAtStore(storeId, body) {
 //    ca phụ = 0) — nếu bỏ qua, tiền khách trả trong ca bị "mồ côi" khỏi báo cáo
 // 3) Chốt sổ quỹ két (actual = expected, chênh lệch 0). Lỗi két thật sự →
 //    rollback để lần gọi sau thử lại; riêng deploy cũ chưa có bảng két thì bỏ qua
-async function autoCloseStaleShifts(userId = null) {
+async function autoCloseStaleShifts(userId = null, storeId = null) {
   // Cutoff = 00:00 hôm nay theo giờ VN, đổi về UTC — tính bằng JS để query
   // sargable (check_in < ?) dùng được index, không quét full bảng mỗi giờ
   const todayVN = new Date(Date.now() + 7 * 60 * 60 * 1000).toISOString().slice(0, 10);
@@ -379,6 +362,12 @@ async function autoCloseStaleShifts(userId = null) {
   if (userId) {
     staleSql += ' AND user_id = ?';
     params.push(userId);
+  }
+  // storeId: dọn ca quá hạn của MỌI tài khoản tại tiệm này (phòng tiệm có hơn
+  // một tài khoản employer) — check-in cần biết "tiệm có ai đang giữ két không"
+  if (storeId) {
+    staleSql += ' AND store_id = ?';
+    params.push(storeId);
   }
   staleSql += ' ORDER BY check_in ASC';
 
@@ -471,15 +460,21 @@ router.get('/open-shifts', async (req, res) => {
     if (req.user.role === 'admin') {
       return res.json({ data: [] });
     }
+    // Token nhân viên cá nhân chỉ được xem CA MỞ CỦA CHÍNH MÌNH — thiếu điều
+    // kiện này thì FE (Home/Timesheets lấy shifts[0] làm "trạng thái hôm nay
+    // của tôi") sẽ hiện nhầm ca/số dư két của một đồng nghiệp khác đang mở
+    // ca cùng tài khoản tiệm.
+    const ownShiftFilter = req.user.employee_login ? ' AND t.employee_id = ?' : '';
+    const ownShiftParams = req.user.employee_login ? [req.user.employee_id] : [];
     let shifts = await query(`
       SELECT t.*,
         COALESCE(e.name, u.name) as employee_name
       FROM timesheets t
       JOIN users u ON t.user_id = u.id
       LEFT JOIN employees e ON t.employee_id = e.id
-      WHERE t.user_id = ? AND t.check_out IS NULL
+      WHERE t.user_id = ? AND t.check_out IS NULL${ownShiftFilter}
       ORDER BY t.check_in ASC
-    `, [req.user.id]);
+    `, [req.user.id, ...ownShiftParams]);
 
     // Phát hiện ca quá hạn ngay trên kết quả vừa lấy (so ngày VN = UTC+7) —
     // tránh chạy thêm 1 query dọn dẹp trên MỌI lần gọi endpoint nóng này
@@ -497,9 +492,9 @@ router.get('/open-shifts', async (req, res) => {
         FROM timesheets t
         JOIN users u ON t.user_id = u.id
         LEFT JOIN employees e ON t.employee_id = e.id
-        WHERE t.user_id = ? AND t.check_out IS NULL
+        WHERE t.user_id = ? AND t.check_out IS NULL${ownShiftFilter}
         ORDER BY t.check_in ASC
-      `, [req.user.id]);
+      `, [req.user.id, ...ownShiftParams]);
     }
 
     res.json({ data: serializeTimesheets(shifts || []) });
@@ -529,6 +524,41 @@ function normalizeCheckoutAtTime(input) {
   return { ok: true, mysql: formatDateTimeUTC(new Date(`${s.replace(' ', 'T')}Z`)) };
 }
 
+// Ca đang mở tại MỘT TIỆM, bất kể tài khoản/nhân viên nào mở — khác /open-shifts
+// (scope theo tài khoản; token cá nhân chỉ thấy ca của chính mình). FE dùng để:
+// - check-in: biết tiệm đã có người giữ két → ẩn ô "quỹ đầu ca", chỉ chọn tên
+// - check-out: người giữ két (ca mở cũ nhất) chọn người còn đứng ca để bàn giao
+// Cũ nhất đứng đầu (check_in ASC, id ASC) — cùng thứ tự với findOpenTimesheet /
+// hasOlderOpenShiftTx, nên shifts[0] chính là ca đang giữ két.
+router.get('/store-open-shifts', async (req, res) => {
+  try {
+    if (req.user.role !== 'employer') {
+      return res.json({ data: [] });
+    }
+    // Luôn là cửa hàng của tài khoản (users.store_id) — mỗi tài khoản một tiệm
+    const user = await queryOne('SELECT store_id FROM users WHERE id = ?', [req.user.id]);
+    const storeId = user?.store_id || null;
+    if (!storeId) {
+      return res.json({ data: [] });
+    }
+
+    const shifts = await query(`
+      SELECT t.id, t.user_id, t.store_id, t.employee_id, t.check_in,
+        COALESCE(e.name, u.name) AS employee_name
+      FROM timesheets t
+      JOIN users u ON t.user_id = u.id
+      LEFT JOIN employees e ON t.employee_id = e.id
+      WHERE t.store_id = ? AND t.check_out IS NULL
+      ORDER BY t.check_in ASC, t.id ASC
+    `, [storeId]);
+
+    res.json({ data: serializeTimesheets(shifts) });
+  } catch (error) {
+    console.error('Get store open shifts error:', error);
+    res.status(500).json({ error: 'Lỗi máy chủ. Vui lòng thử lại.' });
+  }
+});
+
 // Check in
 router.post('/check-in', async (req, res) => {
   try {
@@ -538,19 +568,24 @@ router.post('/check-in', async (req, res) => {
     }
 
     const { employee_id, note, opening_cash_amount } = req.body;
-    
+
     // Get the actual store_id from users table (users.store_id references stores.id)
     // For employer, we need to get users.store_id, not users.id
     const user = await queryOne('SELECT store_id FROM users WHERE id = ? AND role = ?', [req.user.id, 'employer']);
-    
+
     if (!user || !user.store_id) {
       return res.status(400).json({ error: 'Employer account không có cửa hàng được gán. Vui lòng liên hệ admin.' });
     }
-    
-    const storeId = user.store_id; // This is stores.id, not users.id
 
-    // Dọn ca cũ quá hạn (qua nửa đêm chưa check-out) → 0h, trước khi mở ca mới
+    // Mỗi tài khoản gắn đúng một cửa hàng — check-in luôn tại cửa hàng đó
+    const storeId = user.store_id;
+
+    // Dọn ca cũ quá hạn (qua nửa đêm chưa check-out) → 0h, trước khi mở ca mới.
+    // Của tài khoản này và của MỌI tài khoản tại tiệm này: ca hôm qua của tài
+    // khoản khác chưa bị sweep (chạy mỗi giờ) sẽ làm storeHasOpenShift = true
+    // → chặn oan quỹ đầu ca
     await autoCloseStaleShifts(req.user.id);
+    await autoCloseStaleShifts(null, storeId);
 
     // GPS: phải đứng trong bán kính tiệm mới check-in được (nếu tiệm đã đặt tọa độ)
     const checkInGeoError = await verifyAtStore(storeId, req.body);
@@ -562,8 +597,8 @@ router.post('/check-in', async (req, res) => {
     const checkInIp = normalizeIp(getClientIp(req));
 
     // Tài khoản cá nhân (employee_login): LUÔN dùng employee_id trong token —
-    // không cho check-in hộ người khác. Tài khoản cửa hàng dùng chung: body
-    // employee_id được ưu tiên để check-in thêm đồng nghiệp vào ca.
+    // không cho check-in hộ người khác. Tài khoản cửa hàng (nhiều nhân viên cùng
+    // dùng): body employee_id được ưu tiên để check-in thêm đồng nghiệp vào ca.
     // Either way the employee is validated against the store below.
     let employeeId;
     if (req.user.employee_login) {
@@ -579,20 +614,38 @@ router.post('/check-in', async (req, res) => {
       if (!employee) {
         return res.status(400).json({ error: 'Employee does not belong to your store' });
       }
-    } else {
+    }
+
+    // Ca đang mở tại TIỆM (bất kể tài khoản/nhân viên nào) — quyết định đây là
+    // lượt "mở ca" hay "check-in thêm người". Phải scope theo store, không theo
+    // user_id: 2 nhân viên dùng 2 token đăng nhập riêng thì /open-shifts của mỗi
+    // người chỉ thấy ca của chính họ, FE không biết tiệm đã có người giữ két.
+    const storeHasOpenShift = Boolean(await queryOne(
+      'SELECT id FROM timesheets WHERE store_id = ? AND check_out IS NULL LIMIT 1',
+      [storeId]
+    ));
+
+    if (!employeeId && storeHasOpenShift) {
       // Checking in WITHOUT a name is only allowed for the first open shift.
       // Anyone joining an already-open shift must pick their own name so each
       // concurrent person gets their own timesheet slot.
-      const anyOpen = await queryOne(
-        'SELECT id FROM timesheets WHERE store_id = ? AND check_out IS NULL LIMIT 1',
-        [storeId]
-      );
-      if (anyOpen) {
-        return res.status(400).json({
-          error: 'Đã có ca đang mở. Người check-in thêm phải chọn tên nhân viên của mình.',
-          code: 'EMPLOYEE_REQUIRED',
-        });
-      }
+      return res.status(400).json({
+        error: 'Đã có ca đang mở. Người check-in thêm phải chọn tên nhân viên của mình.',
+        code: 'EMPLOYEE_REQUIRED',
+      });
+    }
+
+    // Quỹ đầu ca chỉ nhập MỘT lần cho mỗi két: người mở ca đầu tiên. Người
+    // check-in thêm vào ca đang mở không được nhập nữa — nếu không, két của
+    // tiệm bị ghi 2 quỹ đầu ca cho cùng một số tiền lẻ trong két. FE ẩn ô
+    // này khi tiệm đã có ca mở; tới đây mà vẫn có số > 0 là client cũ hoặc
+    // 2 người cùng mở modal lúc tiệm chưa có ai (race) → báo rõ để bấm lại.
+    const openingCashRequested = Number.parseFloat(opening_cash_amount) || 0;
+    if (storeHasOpenShift && openingCashRequested > 0) {
+      return res.status(400).json({
+        error: 'Tiệm đã có người đang đứng ca và giữ két — quỹ đầu ca đã được nhập. Vui lòng check-in lại mà không nhập quỹ đầu ca.',
+        code: 'DRAWER_ALREADY_OPEN',
+      });
     }
 
     const checkIn = formatDateTimeUTC(new Date());
@@ -712,10 +765,9 @@ router.get('/expected-revenue', async (req, res) => {
     const revenueData = await getShiftPaymentSummaryDeduped({
       queryOne,
     }, timesheet, req.user.id, normalizedCheckIn, formatDateTimeUTC(new Date()));
-    const drawerSummary = await getDrawerSummaryTx({
-      queryOne,
-      execute,
-    }, timesheet.id);
+    // Chỉ 1 SELECT read-only — truyền pool queryOne thẳng, không mở transaction
+    // (BEGIN/COMMIT + chiếm 1 connection trong pool 10) cho endpoint gọi liên tục
+    const drawerSummary = await getDrawerSummaryTx({ queryOne }, timesheet.id);
 
     // Debug log removed for security
 
@@ -750,6 +802,7 @@ router.post('/check-out', async (req, res) => {
       check_out_at,
       actual_cash_amount,
       cash_shortage_paid_amount,
+      handover_to_timesheet_id,
     } = req.body;
     const userId = req.user.id;
 
@@ -860,7 +913,45 @@ router.post('/check-out', async (req, res) => {
       ? (parseFloat(checkoutWithdrawn) || null)
       : null;
 
-    const { updated } = await transaction(async (db) => {
+    // Bàn giao két: người giữ két check-out mà còn người khác đứng ca tại tiệm
+    // → số tiền mặt vừa đếm chuyển sang két của ca nhận (chi tiết ở
+    // recordDrawerHandoverTx). Không có ai khác → kết sổ bình thường như cũ.
+    const handoverToId = (handover_to_timesheet_id !== undefined && handover_to_timesheet_id !== null && handover_to_timesheet_id !== '')
+      ? Number.parseInt(handover_to_timesheet_id, 10)
+      : null;
+    if (handoverToId !== null && (!Number.isInteger(handoverToId) || handoverToId <= 0 || handoverToId === timesheet.id)) {
+      return res.status(400).json({ error: 'Ca nhận bàn giao két không hợp lệ.' });
+    }
+
+    const { updated, handover } = await transaction(async (db) => {
+      let handoverRecipient = null;
+      if (handoverToId) {
+        // Chỉ ca mở CŨ NHẤT của tiệm (ca đang giữ két) mới có két để bàn giao —
+        // ca phụ đóng trước không giữ tiền, doanh thu/két của họ = 0
+        if (await hasOlderOpenShiftTx(db, timesheet, normalizedCheckIn)) {
+          throw Object.assign(
+            new Error('Bạn không phải người đang giữ két (còn ca mở trước ca của bạn) — không thể bàn giao két.'),
+            { statusCode: 400 }
+          );
+        }
+        // FOR UPDATE: khoá ca nhận để nó không bị check-out song song trong lúc
+        // mình đang ghi quỹ bàn giao vào két của nó
+        handoverRecipient = await db.queryOne(`
+          SELECT t.id, t.store_id, t.employee_id, COALESCE(e.name, u.name) AS employee_name
+          FROM timesheets t
+          JOIN users u ON t.user_id = u.id
+          LEFT JOIN employees e ON t.employee_id = e.id
+          WHERE t.id = ? AND t.check_out IS NULL
+          FOR UPDATE
+        `, [handoverToId]);
+        if (!handoverRecipient || !timesheet.store_id || handoverRecipient.store_id !== timesheet.store_id) {
+          throw Object.assign(
+            new Error('Người nhận két không còn đứng ca tại tiệm này. Vui lòng tải lại và chọn lại người nhận.'),
+            { statusCode: 400 }
+          );
+        }
+      }
+
       const paymentSummary = await getShiftPaymentSummaryDeduped(
         db,
         timesheet,
@@ -927,10 +1018,25 @@ router.post('/check-out', async (req, res) => {
         WHERE t.id = ?
       `, [timesheet.id]);
 
-      return { updated: updatedTimesheet };
+      let handoverResult = null;
+      if (handoverRecipient) {
+        // actualCashValue = tiền mặt còn trong két SAU khi đã rút (withdrawn ghi
+        // cash_out ở trên) — chính là số tiền vật lý người nhận cầm tiếp.
+        // = 0 thì không có gì để giao, chỉ ghi nhận đã bàn giao (không tạo dòng két)
+        if (actualCashValue > 0) {
+          await recordDrawerHandoverTx(db, updatedTimesheet, handoverRecipient, actualCashValue, req.user);
+        }
+        handoverResult = {
+          to_timesheet_id: handoverRecipient.id,
+          employee_name: handoverRecipient.employee_name,
+          amount: actualCashValue,
+        };
+      }
+
+      return { updated: updatedTimesheet, handover: handoverResult };
     });
 
-    res.json({ data: serializeTimesheet(updated) });
+    res.json({ data: serializeTimesheet(updated), handover });
   } catch (error) {
     console.error('Check out error:', error);
     res.status(error.statusCode || 500).json({ error: error.statusCode ? error.message : 'Lỗi máy chủ. Vui lòng thử lại.' });
@@ -1278,9 +1384,15 @@ router.get('/payroll', authorize('admin'), async (req, res) => {
     }
     adjSql += ' GROUP BY a.employee_id, e.name';
 
+    // Hoa hồng = % × giá trị dòng hàng + tiền cố định × số lượng (mỗi sản phẩm
+    // chỉ có một loại — products.js chặn cả hai cùng > 0). Cùng công thức với
+    // "Lương của tôi" (salary.js) để hai màn hình không lệch nhau.
     let commSql = `
       SELECT o.employee_id, e.name AS employee_name,
-        COALESCE(SUM(oi.quantity * oi.unit_price * (p.commission_percent / 100)), 0) AS commission
+        COALESCE(SUM(
+          oi.quantity * oi.unit_price * (COALESCE(p.commission_percent, 0) / 100)
+          + oi.quantity * COALESCE(p.commission_amount, 0)
+        ), 0) AS commission
       FROM order_items oi
       JOIN orders o ON oi.order_id = o.id
       JOIN products p ON oi.product_id = p.id
@@ -1288,7 +1400,7 @@ router.get('/payroll', authorize('admin'), async (req, res) => {
       WHERE o.employee_id IS NOT NULL
         AND o.status = 'completed'
         AND o.created_at >= ? AND o.created_at < ?
-        AND p.commission_percent > 0
+        AND (p.commission_percent > 0 OR p.commission_amount > 0)
         AND o.store_id IN (SELECT id FROM stores WHERE admin_id = ?)
     `;
     const commParams = [periodStart, periodEnd, req.user.id];
@@ -1298,13 +1410,9 @@ router.get('/payroll', authorize('admin'), async (req, res) => {
     }
     commSql += ' GROUP BY o.employee_id, e.name';
 
-    // Chỉ nuốt lỗi thiếu bảng/cột (DB chưa migrate). Lỗi thật (deadlock, timeout)
-    // phải ném ra — trả [] im lặng làm payroll 200 OK với hoa hồng/thưởng phạt = 0
-    // và admin trả lương thiếu mà không có tín hiệu lỗi nào
-    const swallowMissingSchema = (fallback) => (error) => {
-      if (error?.code === 'ER_NO_SUCH_TABLE' || error?.code === 'ER_BAD_FIELD_ERROR') return fallback;
-      throw error;
-    };
+    // swallowMissingSchema (utils/payrollHelpers.js): nuốt lỗi thiếu bảng/cột
+    // (DB chưa migrate) — trả [] im lặng làm payroll 200 OK với hoa hồng/thưởng
+    // phạt = 0; lỗi thật (deadlock, timeout) vẫn phải ném ra
     const [adjRows, commissionRows] = await Promise.all([
       query(adjSql, adjParams).catch(swallowMissingSchema([])),
       query(commSql, commParams).catch(swallowMissingSchema([])),
@@ -1586,6 +1694,13 @@ router.get('/export', async (req, res) => {
     } else if (req.user.role === 'employer') {
       sqlQuery += ' AND t.user_id = ?';
       params.push(req.user.id);
+      // Token nhân viên cá nhân chỉ được xem LỊCH SỬ CHẤM CÔNG CỦA CHÍNH MÌNH —
+      // thiếu điều kiện này thì 2 nhân viên dùng chung tài khoản tiệm đọc được
+      // ca làm/ghi chú/số tiền két của nhau (cùng luật ownShiftFilter ở check-out)
+      if (req.user.employee_login) {
+        sqlQuery += ' AND t.employee_id = ?';
+        params.push(req.user.employee_id);
+      }
     }
 
     if (start_at && end_at) {

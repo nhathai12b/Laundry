@@ -15,10 +15,11 @@ export const auditLog = (action, entity, getEntityId) => {
           const afterData = data.data ? JSON.stringify(data.data) : null;
 
           execute(`
-            INSERT INTO audit_logs (user_id, action, entity, entity_id, before_data, after_data)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO audit_logs (user_id, employee_id, action, entity, entity_id, before_data, after_data)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
           `, [
             req.user.id,
+            req.user.employee_login ? (req.user.employee_id || null) : null,
             action,
             entity,
             entityId,

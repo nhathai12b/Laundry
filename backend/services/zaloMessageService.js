@@ -186,7 +186,7 @@ function buildMessage(order, eventType) {
     const lines = [
       `${order.brand_name || 'Cửa hàng'} đã nhận đơn ${code} của anh/chị ${customerName}.`,
       `Dịch vụ: ${order.service_list}`,
-      `Tổng tiền: ${formatMoney(order.final_amount || order.total_amount)}`,
+      `Tổng tiền: ${formatMoney(order.final_amount ?? order.total_amount)}`,
     ];
     if (order.expected_return_at) {
       lines.push(`Hẹn trả: ${formatVnDateTime(order.expected_return_at)}`);
@@ -199,7 +199,7 @@ function buildMessage(order, eventType) {
   if (eventType === EVENT_TYPES.READY_FOR_PICKUP) {
     return [
       `Đơn ${code} đã giặt xong, mời anh/chị đến nhận đồ.`,
-      `Tổng tiền: ${formatMoney(order.final_amount || order.total_amount)}`,
+      `Tổng tiền: ${formatMoney(order.final_amount ?? order.total_amount)}`,
       'Giờ nhận: 07:00–22:00 (ngoài giờ vui lòng liên hệ shop).',
       'Đơn được lưu tối đa 30 ngày. Cảm ơn anh/chị!',
     ].join('\n');

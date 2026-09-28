@@ -3,6 +3,7 @@ import jwt from 'jsonwebtoken';
 import { query, queryOne, execute } from '../database/db.js';
 import { comparePassword, hashPassword, validatePasswordStrength } from '../utils/helpers.js';
 import { authenticate } from '../middleware/auth.js';
+import { auditLog } from '../middleware/audit.js';
 import { loginRateLimiter, registerRateLimiter, resetLoginRateLimit } from '../middleware/rateLimiter.js';
 import { MAX_LOGIN_ATTEMPTS, ACCOUNT_LOCKOUT_MINUTES, TIMING_ATTACK_DELAY_MS } from '../utils/constants.js';
 
@@ -542,18 +543,8 @@ router.get('/me', authenticate, async (req, res) => {
 // là code chết — luồng login trả thẳng token.)
 
 // Logout (client-side token removal, but we log it)
-router.post('/logout', authenticate, async (req, res) => {
-  try {
-    await execute(`
-      INSERT INTO audit_logs (user_id, action, entity, entity_id)
-      VALUES (?, 'logout', 'user', ?)
-    `, [req.user.id, req.user.id]);
-
-    res.json({ message: 'Logged out successfully' });
-  } catch (error) {
-    console.error('Logout error:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
+router.post('/logout', authenticate, auditLog('logout', 'user', (req) => req.user.id), async (req, res) => {
+  res.json({ message: 'Logged out successfully' });
 });
 
 export default router;

@@ -1,6 +1,7 @@
 import { queryOne, transaction } from '../database/db.js';
 import { formatDateTimeUTC } from '../utils/helpers.js';
 import { recordCashPaymentTx } from './cashDrawerService.js';
+import { resolveCurrentStoreId } from './workingStoreService.js';
 
 const PAYMENT_METHODS = ['cash', 'transfer'];
 const PAYMENT_TYPES = ['order_payment', 'debt_payment'];
@@ -50,7 +51,7 @@ async function findOpenTimesheet(db, actor, storeId) {
 }
 
 async function updateOrderPaymentState(db, order, paidAmount, actor, markDebtIfUnpaid = false) {
-  const finalAmount = Number.parseFloat(order.final_amount || order.total_amount || 0) || 0;
+  const finalAmount = Number.parseFloat(order.final_amount ?? order.total_amount ?? 0) || 0;
   const normalizedPaid = Math.min(Math.round(paidAmount * 100) / 100, finalAmount);
   const debtAmount = Math.max(Math.round((finalAmount - normalizedPaid) * 100) / 100, 0);
   const paymentStatus = paymentStatusFor(finalAmount, normalizedPaid, markDebtIfUnpaid);
@@ -101,7 +102,7 @@ export async function recordOrderPaymentTx(db, orderId, payload, actor) {
     throw error;
   }
 
-  const finalAmount = Number.parseFloat(order.final_amount || order.total_amount || 0) || 0;
+  const finalAmount = Number.parseFloat(order.final_amount ?? order.total_amount ?? 0) || 0;
   const existing = await db.queryOne(`
     SELECT COALESCE(SUM(amount), 0) AS paid_amount
     FROM order_payments
@@ -116,7 +117,9 @@ export async function recordOrderPaymentTx(db, orderId, payload, actor) {
     throw error;
   }
 
-  const storeId = order.store_id || actor?.store_id || null;
+  // Đơn không có store_id (legacy) → cửa hàng của tài khoản (một nguồn duy
+  // nhất: resolveCurrentStoreId) để findOpenTimesheet tìm đúng ca giữ két
+  const storeId = order.store_id || await resolveCurrentStoreId(actor);
   const openTimesheet = await findOpenTimesheet(db, actor, storeId);
   const paidAt = payload.paid_at ? formatDateTimeUTC(new Date(payload.paid_at)) : formatDateTimeUTC();
 
@@ -207,7 +210,7 @@ export async function getOrderPaymentBalance(orderId) {
 
   if (!order) return null;
 
-  const finalAmount = Number.parseFloat(order.final_amount || order.total_amount || 0) || 0;
+  const finalAmount = Number.parseFloat(order.final_amount ?? order.total_amount ?? 0) || 0;
   const paidAmount = Number.parseFloat(order.paid_amount || 0) || 0;
 
   return {

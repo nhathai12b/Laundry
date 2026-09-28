@@ -1,11 +1,13 @@
 ﻿import express from 'express';
-import { query, queryOne, execute } from '../database/db.js';
+import { query, queryOne } from '../database/db.js';
 import { authenticate } from '../middleware/auth.js';
 import { authorize } from '../middleware/auth.js';
 import { blockEmployeeLogin } from '../middleware/auth.js';
 import { validateId, validatePositiveInteger, validateEnum } from '../utils/validators.js';
 import { formatDateTimeUTC } from '../utils/helpers.js';
 import { buildDailyBusinessReport } from '../services/dailyBusinessReportService.js';
+import { resolveCurrentStoreId } from '../services/workingStoreService.js';
+import { getShiftPaymentSummaryDeduped, parseTimesheetDateTimeMsCompat } from './timesheets.js';
 import * as XLSX from 'xlsx';
 
 const router = express.Router();
@@ -14,11 +16,12 @@ const router = express.Router();
 router.use(authenticate);
 
 // Helper function to get store_id from query param or token
-function getStoreIdFilter(req) {
-  // Employer/employee token: LUÔN dùng store trong token — nhận store_id từ
-  // query cho phép tài khoản tiệm A đọc doanh thu/tiền két của tiệm B
+async function getStoreIdFilter(req) {
+  // Employer/employee token: LUÔN dùng cửa hàng ĐANG LÀM VIỆC (ca đang mở) —
+  // không nhận store_id từ query để tránh tài khoản tiệm A đọc doanh thu/tiền
+  // két của tiệm B — luôn là cửa hàng của tài khoản.
   if (req.user.role !== 'admin' && req.user.role !== 'root') {
-    return req.user.store_id || null;
+    return await resolveCurrentStoreId(req.user);
   }
   const storeIdParam = req.query.store_id;
   if (storeIdParam && storeIdParam !== 'all' && storeIdParam !== '') {
@@ -32,7 +35,7 @@ function getStoreIdFilter(req) {
 }
 
 async function resolveStoreIdForAdmin(req) {
-  let storeId = getStoreIdFilter(req);
+  let storeId = await getStoreIdFilter(req);
   if (req.user.role === 'admin' && storeId) {
     const row = await queryOne('SELECT 1 FROM stores WHERE id = ? AND admin_id = ?', [storeId, req.user.id]);
     if (!row) storeId = null;
@@ -136,9 +139,9 @@ function getUtcRangeFromQuery(req, month, year) {
   return null;
 }
 
-function resolveDailyBusinessStoreId(req) {
+async function resolveDailyBusinessStoreId(req) {
   if (req.user.role === 'employer') {
-    return req.user.store_id || null;
+    return await resolveCurrentStoreId(req.user);
   }
 
   const rawStoreId = req.body?.store_id ?? req.query?.store_id;
@@ -149,7 +152,7 @@ function resolveDailyBusinessStoreId(req) {
 }
 
 async function resolveDailyBusinessScope(req) {
-  const storeId = resolveDailyBusinessStoreId(req);
+  const storeId = await resolveDailyBusinessStoreId(req);
   if (storeId === undefined) {
     const error = new Error('Invalid store_id');
     error.statusCode = 400;
@@ -197,7 +200,7 @@ router.get('/daily-business', authorize('admin', 'employer'), blockEmployeeLogin
 });
 
 // Get revenue by period (Admin/Employer)
-router.get('/revenue', authorize('admin', 'employer'), async (req, res) => {
+router.get('/revenue', authorize('admin', 'employer'), blockEmployeeLogin, async (req, res) => {
   try {
     // Root admin is software vendor, not store operator - return empty
     if (req.user.role === 'root') {
@@ -1133,7 +1136,7 @@ router.get('/root/statistics', authorize('admin'), async (req, res) => {
 });
 
 // Get revenue by product by day in month (Admin/Employer)
-router.get('/revenue-by-product-daily', authorize('admin', 'employer'), async (req, res) => {
+router.get('/revenue-by-product-daily', authorize('admin', 'employer'), blockEmployeeLogin, async (req, res) => {
   try {
     // Root admin is software vendor, not store operator - return empty
     if (req.user.role === 'root') {
@@ -1176,28 +1179,34 @@ router.get('/revenue-by-product-daily', authorize('admin', 'employer'), async (r
         ) as total_revenue,
         COUNT(DISTINCT oi.order_id) as total_orders,
         GROUP_CONCAT(DISTINCT u.name ORDER BY u.name SEPARATOR ', ') as employee_names,
-        GROUP_CONCAT(DISTINCT COALESCE(e_shift.name, u_shift.name) ORDER BY COALESCE(e_shift.name, u_shift.name) SEPARATOR ', ') as shift_employee_names
+        GROUP_CONCAT(DISTINCT (
+          SELECT GROUP_CONCAT(DISTINCT COALESCE(e2.name, u2.name) ORDER BY COALESCE(e2.name, u2.name) SEPARATOR ', ')
+          FROM timesheets t2
+          LEFT JOIN employees e2 ON t2.employee_id = e2.id
+          LEFT JOIN users u2 ON t2.user_id = u2.id
+          WHERE t2.store_id = u_store.store_id
+            AND o.updated_at >= t2.check_in
+            AND o.updated_at <= COALESCE(t2.check_out, NOW())
+            AND ${localDateSql('t2.check_in', timezoneOffset)} = ${orderDateExpr}
+        ) SEPARATOR ', ') as shift_employee_names
       FROM order_items oi
       JOIN products p ON oi.product_id = p.id
       JOIN orders o ON oi.order_id = o.id
       LEFT JOIN users u ON o.assigned_to = u.id
       LEFT JOIN users u_store ON COALESCE(o.assigned_to, o.created_by) = u_store.id
-      LEFT JOIN timesheets t ON (
-        t.store_id = u_store.store_id 
-        AND o.updated_at >= t.check_in 
-        AND o.updated_at <= COALESCE(t.check_out, NOW())
-        AND ${timesheetDateExpr} = ${orderDateExpr}
-      )
-      LEFT JOIN employees e_shift ON t.employee_id = e_shift.id
-      LEFT JOIN users u_shift ON t.user_id = u_shift.id
       WHERE o.status = 'completed'
         AND o.updated_at >= ?
         AND o.updated_at < ?
     `;
+    // Subquery ở SELECT list thay cho LEFT JOIN timesheets trực tiếp — JOIN cũ
+    // nhân bản dòng order_items khi có ≥2 ca chồng nhau (nhiều nhân viên đứng
+    // ca cùng lúc, tính năng chủ đích của app), làm SUM(quantity)/SUM(revenue)
+    // bị NHÂN ĐÔI/BA theo số ca chồng — sai số tiền hiển thị trên báo cáo.
+    // Subquery tự gói gọn phép nhân bản bên trong nó, không lọt ra ngoài SUM chính.
     const params = [monthRange.startAt, monthRange.endAt];
-    
+
     const storeId = await resolveStoreIdForAdmin(req);
-    
+
     // Build store filter based on role
     if (req.user.role === 'employer') {
       if (storeId) {
@@ -1229,13 +1238,16 @@ router.get('/revenue-by-product-daily', authorize('admin', 'employer'), async (r
       querySql += sql;
       params.push(...p(req.user.id));
     }
-    
+
 
     querySql += ` GROUP BY ${orderDateExpr}, p.id, p.name, p.unit ORDER BY date DESC, total_revenue DESC`;
     
     // Get total count (remove GROUP BY/ORDER BY so COUNT returns one row with correct total)
+    // Regex neo vào "FROM order_items" (bảng gốc của query) chứ không phải
+    // "FROM" bất kỳ — SELECT list giờ có subquery riêng chứa "FROM timesheets
+    // t2" xuất hiện TRƯỚC FROM order_items; neo mơ hồ sẽ cắt SQL sai vị trí.
     const countSql = querySql
-      .replace(/SELECT[\s\S]*?FROM/, `SELECT COUNT(DISTINCT CONCAT(${orderDateExpr}, "-", p.id)) as total FROM`)
+      .replace(/SELECT[\s\S]*?FROM order_items/, `SELECT COUNT(DISTINCT CONCAT(${orderDateExpr}, "-", p.id)) as total FROM order_items`)
       .replace(/\s*ORDER BY[\s\S]*$/, '')
       .replace(/\s*GROUP BY[\s\S]*$/i, '');
     const countResult = await queryOne(countSql, params);
@@ -1263,7 +1275,7 @@ router.get('/revenue-by-product-daily', authorize('admin', 'employer'), async (r
 });
 
 // Get revenue by category (using product name as category) by day in month
-router.get('/revenue-by-category-daily', authorize('admin', 'employer'), async (req, res) => {
+router.get('/revenue-by-category-daily', authorize('admin', 'employer'), blockEmployeeLogin, async (req, res) => {
   try {
     // Root admin is software vendor, not store operator - return empty
     if (req.user.role === 'root') {
@@ -1304,28 +1316,31 @@ router.get('/revenue-by-category-daily', authorize('admin', 'employer'), async (
         ) as total_revenue,
         COUNT(DISTINCT oi.order_id) as total_orders,
         GROUP_CONCAT(DISTINCT u.name ORDER BY u.name SEPARATOR ', ') as employee_names,
-        GROUP_CONCAT(DISTINCT COALESCE(e_shift.name, u_shift.name) ORDER BY COALESCE(e_shift.name, u_shift.name) SEPARATOR ', ') as shift_employee_names
+        GROUP_CONCAT(DISTINCT (
+          SELECT GROUP_CONCAT(DISTINCT COALESCE(e2.name, u2.name) ORDER BY COALESCE(e2.name, u2.name) SEPARATOR ', ')
+          FROM timesheets t2
+          LEFT JOIN employees e2 ON t2.employee_id = e2.id
+          LEFT JOIN users u2 ON t2.user_id = u2.id
+          WHERE t2.store_id = u_store.store_id
+            AND o.updated_at >= t2.check_in
+            AND o.updated_at <= COALESCE(t2.check_out, NOW())
+            AND ${localDateSql('t2.check_in', timezoneOffset)} = ${orderDateExpr}
+        ) SEPARATOR ', ') as shift_employee_names
       FROM order_items oi
       JOIN products p ON oi.product_id = p.id
       JOIN orders o ON oi.order_id = o.id
       LEFT JOIN users u ON o.assigned_to = u.id
       LEFT JOIN users u_store ON COALESCE(o.assigned_to, o.created_by) = u_store.id
-      LEFT JOIN timesheets t ON (
-        t.store_id = u_store.store_id 
-        AND o.updated_at >= t.check_in 
-        AND o.updated_at <= COALESCE(t.check_out, NOW())
-        AND ${timesheetDateExpr} = ${orderDateExpr}
-      )
-      LEFT JOIN employees e_shift ON t.employee_id = e_shift.id
-      LEFT JOIN users u_shift ON t.user_id = u_shift.id
       WHERE o.status = 'completed'
         AND o.updated_at >= ?
         AND o.updated_at < ?
     `;
+    // Subquery thay LEFT JOIN timesheets trực tiếp — xem comment ở
+    // revenue-by-product-daily (cùng lỗi nhân bản dòng khi ≥2 ca chồng nhau)
     const params = [monthRange.startAt, monthRange.endAt];
-    
+
     const storeId = await resolveStoreIdForAdmin(req);
-    
+
     // Build store filter based on role
     if (req.user.role === 'employer') {
       if (storeId) {
@@ -1360,8 +1375,9 @@ router.get('/revenue-by-category-daily', authorize('admin', 'employer'), async (
 
     querySql += ` GROUP BY ${orderDateExpr}, p.name ORDER BY date DESC, total_revenue DESC`;
     
+    // Neo vào "FROM order_items" — xem comment ở revenue-by-product-daily
     const countSql = querySql
-      .replace(/SELECT[\s\S]*?FROM/, `SELECT COUNT(DISTINCT CONCAT(${orderDateExpr}, "-", p.name)) as total FROM`)
+      .replace(/SELECT[\s\S]*?FROM order_items/, `SELECT COUNT(DISTINCT CONCAT(${orderDateExpr}, "-", p.name)) as total FROM order_items`)
       .replace(/\s*ORDER BY[\s\S]*$/, '')
       .replace(/\s*GROUP BY[\s\S]*$/i, '');
     const countResult = await queryOne(countSql, params);
@@ -1535,19 +1551,20 @@ router.get('/revenue-by-payment-daily', authorize('admin'), async (req, res) => 
         SUM(p.amount) as total_revenue,
         COUNT(DISTINCT p.order_id) as total_orders,
         GROUP_CONCAT(DISTINCT u.name ORDER BY u.name SEPARATOR ', ') as employee_names,
-        GROUP_CONCAT(DISTINCT COALESCE(e_shift.name, u_shift.name) ORDER BY COALESCE(e_shift.name, u_shift.name) SEPARATOR ', ') as shift_employee_names
+        GROUP_CONCAT(DISTINCT (
+          SELECT GROUP_CONCAT(DISTINCT COALESCE(e2.name, u2.name) ORDER BY COALESCE(e2.name, u2.name) SEPARATOR ', ')
+          FROM timesheets t2
+          LEFT JOIN employees e2 ON t2.employee_id = e2.id
+          LEFT JOIN users u2 ON t2.user_id = u2.id
+          WHERE t2.store_id = u_store.store_id
+            AND p.paid_at >= t2.check_in
+            AND p.paid_at <= COALESCE(t2.check_out, NOW())
+            AND ${localDateSql('t2.check_in', timezoneOffset)} = ${orderDateExpr}
+        ) SEPARATOR ', ') as shift_employee_names
       FROM order_payments p
       JOIN orders o ON p.order_id = o.id
       LEFT JOIN users u ON o.assigned_to = u.id
       LEFT JOIN users u_store ON COALESCE(o.assigned_to, o.created_by) = u_store.id
-      LEFT JOIN timesheets t ON (
-        t.store_id = u_store.store_id 
-        AND p.paid_at >= t.check_in 
-        AND p.paid_at <= COALESCE(t.check_out, NOW())
-        AND ${timesheetDateExpr} = ${orderDateExpr}
-      )
-      LEFT JOIN employees e_shift ON t.employee_id = e_shift.id
-      LEFT JOIN users u_shift ON t.user_id = u_shift.id
       WHERE p.payment_method IN ('cash', 'transfer')
         AND p.paid_at >= ?
         AND p.paid_at < ?
@@ -1587,8 +1604,9 @@ router.get('/revenue-by-payment-daily', authorize('admin'), async (req, res) => 
 
     querySql += ` GROUP BY ${orderDateExpr}, p.payment_method ORDER BY date DESC, payment_method`;
     
+    // Neo vào "FROM order_payments" — xem comment ở revenue-by-product-daily
     const countSql = querySql
-      .replace(/SELECT[\s\S]*?FROM/, `SELECT COUNT(DISTINCT ${orderDateExpr}) as total FROM`)
+      .replace(/SELECT[\s\S]*?FROM order_payments/, `SELECT COUNT(DISTINCT ${orderDateExpr}) as total FROM order_payments`)
       .replace(/\s*ORDER BY[\s\S]*$/, '')
       .replace(/\s*GROUP BY[\s\S]*$/i, '');
     const countResult = await queryOne(countSql, params);
@@ -1642,14 +1660,23 @@ router.get('/revenue-by-shift-daily', authorize('admin', 'employer'), blockEmplo
     const monthRange = getUtcRangeFromQuery(req, monthYearValidation.month, monthYearValidation.year);
     const offset = (paginationValidation.page - 1) * paginationValidation.limit;
 
+    // Bao gồm cả ca ĐANG MỞ (check_out IS NULL): nhân viên chưa/quên check-out
+    // thì ca vẫn phải hiện với doanh thu tính LIVE, thay vì "biến mất" khỏi báo
+    // cáo cho tới khi check-out hoặc tự đóng lúc nửa đêm. Ca tự đóng
+    // (auto_closed = 1) có actual_cash_amount NULL = két chưa ai đếm — trả cờ
+    // để FE hiển thị nhãn riêng thay vì số 0 gây hiểu nhầm.
     let querySql = `
-      SELECT 
+      SELECT
         ${timesheetDateExpr} as date,
         t.user_id,
+        t.store_id,
+        t.check_in as check_in_at,
         COALESCE(e.name, u.name) as employee_name,
         t.id as shift_id,
         TIME(t.check_in) as check_in_time,
         TIME(t.check_out) as check_out_time,
+        (t.check_out IS NULL) as is_open,
+        t.auto_closed,
         t.expected_revenue as start_revenue,
         t.revenue_amount as end_revenue,
         t.actual_cash_amount,
@@ -1662,10 +1689,9 @@ router.get('/revenue-by-shift-daily', authorize('admin', 'employer'), blockEmplo
       LEFT JOIN users u ON t.user_id = u.id
       WHERE t.check_in >= ?
         AND t.check_in < ?
-        AND t.check_out IS NOT NULL
     `;
     const params = [monthRange.startAt, monthRange.endAt];
-    
+
     const storeId = await resolveStoreIdForAdmin(req);
     if (storeId) {
       querySql += ' AND t.store_id = ?';
@@ -1680,7 +1706,7 @@ router.get('/revenue-by-shift-daily', authorize('admin', 'employer'), blockEmplo
     }
 
     querySql += ' ORDER BY date DESC, COALESCE(e.name, u.name), t.check_in DESC';
-    
+
     const countSql = querySql.replace(/SELECT[\s\S]*?FROM/, 'SELECT COUNT(*) as total FROM').replace(/\s*ORDER BY[\s\S]*$/, '');
     const countResult = await queryOne(countSql, params);
     const total = countResult?.total || 0;
@@ -1688,7 +1714,35 @@ router.get('/revenue-by-shift-daily', authorize('admin', 'employer'), blockEmplo
     querySql += ` LIMIT ? OFFSET ?`;
     params.push(paginationValidation.limit, offset);
 
-    const data = await query(querySql, params);
+    const rows = await query(querySql, params);
+
+    // Ca đang mở: revenue_amount chỉ được ghi lúc đóng ca → tính live theo CÙNG
+    // luật dedupe với check-out (ca mở cũ nhất của tiệm nhận doanh thu, ca phụ
+    // = 0), cửa sổ [check_in, bây giờ]. Chỉ vài ca mở/trang nên chi phí nhỏ.
+    const nowSql = formatDateTimeUTC(new Date());
+    const data = await Promise.all(rows.map(async (row) => {
+      const { check_in_at, ...rest } = row;
+      const isOpen = Number(row.is_open) === 1;
+      if (!isOpen) {
+        return { ...rest, is_open: false, auto_closed: Number(row.auto_closed) === 1 };
+      }
+      let liveRevenue = null;
+      try {
+        const checkInMs = parseTimesheetDateTimeMsCompat(check_in_at);
+        const summary = await getShiftPaymentSummaryDeduped(
+          { queryOne },
+          { id: row.shift_id, store_id: row.store_id, user_id: row.user_id },
+          row.user_id,
+          formatDateTimeUTC(new Date(checkInMs)),
+          nowSql
+        );
+        liveRevenue = summary.revenue_amount;
+      } catch (error) {
+        // Không chặn cả báo cáo vì 1 ca tính live lỗi — để null, FE hiện "—"
+        console.warn(`Live revenue for open shift ${row.shift_id} failed: ${error.message}`);
+      }
+      return { ...rest, is_open: true, auto_closed: false, end_revenue: liveRevenue, actual_cash_amount: null };
+    }));
 
     res.json({
       data,
@@ -1707,7 +1761,7 @@ router.get('/revenue-by-shift-daily', authorize('admin', 'employer'), blockEmplo
 });
 
 // Get revenue by day in month (simple daily revenue list)
-router.get('/revenue-daily', authorize('admin', 'employer'), async (req, res) => {
+router.get('/revenue-daily', authorize('admin', 'employer'), blockEmployeeLogin, async (req, res) => {
   try {
     // Root admin is software vendor, not store operator - return empty
     if (req.user.role === 'root') {
@@ -1983,19 +2037,20 @@ router.get('/invoices-daily', authorize('admin', 'employer'), blockEmployeeLogin
         o.final_amount as total_amount,
         o.status,
         u.name as employee_name,
-        COALESCE(e_shift.name, u_shift.name) as shift_employee_name
+        (
+          SELECT GROUP_CONCAT(DISTINCT COALESCE(e2.name, u2.name) ORDER BY COALESCE(e2.name, u2.name) SEPARATOR ', ')
+          FROM timesheets t2
+          LEFT JOIN employees e2 ON t2.employee_id = e2.id
+          LEFT JOIN users u2 ON t2.user_id = u2.id
+          WHERE t2.store_id = u_store.store_id
+            AND o.created_at >= t2.check_in
+            AND o.created_at <= COALESCE(t2.check_out, NOW())
+            AND ${localDateSql('t2.check_in', timezoneOffset)} = ${orderDateExpr}
+        ) as shift_employee_name
       FROM orders o
       LEFT JOIN customers c ON o.customer_id = c.id
       LEFT JOIN users u ON o.assigned_to = u.id
       LEFT JOIN users u_store ON COALESCE(o.assigned_to, o.created_by) = u_store.id
-      LEFT JOIN timesheets t ON (
-        t.store_id = u_store.store_id 
-        AND o.created_at >= t.check_in 
-        AND o.created_at <= COALESCE(t.check_out, NOW())
-        AND ${timesheetDateExpr} = ${orderDateExpr}
-      )
-      LEFT JOIN employees e_shift ON t.employee_id = e_shift.id
-      LEFT JOIN users u_shift ON t.user_id = u_shift.id
       WHERE o.created_at >= ?
         AND o.created_at < ?
     `;
@@ -2033,8 +2088,9 @@ router.get('/invoices-daily', authorize('admin', 'employer'), blockEmployeeLogin
     }
 
     querySql += ' ORDER BY date DESC, o.created_at DESC';
-    
-    const countSql = querySql.replace(/SELECT[\s\S]*?FROM/, 'SELECT COUNT(*) as total FROM').replace(/\s*ORDER BY[\s\S]*$/, '');
+
+    // Neo vào "FROM orders" — xem comment ở revenue-by-product-daily
+    const countSql = querySql.replace(/SELECT[\s\S]*?FROM orders/, 'SELECT COUNT(*) as total FROM orders').replace(/\s*ORDER BY[\s\S]*$/, '');
     const countResult = await queryOne(countSql, params);
     const total = countResult?.total || 0;
 

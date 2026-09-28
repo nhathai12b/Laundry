@@ -2,30 +2,40 @@ import jwt from 'jsonwebtoken';
 import { queryOne } from '../database/db.js';
 
 export const authenticate = async (req, res, next) => {
+  const token = req.headers.authorization?.split(' ')[1];
+
+  if (!token) {
+    return res.status(401).json({ error: 'No token provided' });
+  }
+
+  let decoded;
   try {
-    const token = req.headers.authorization?.split(' ')[1];
-
-    if (!token) {
-      return res.status(401).json({ error: 'No token provided' });
-    }
-
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-
-    // Token cá nhân của nhân viên sống 7 ngày — nếu chỉ tin JWT, nhân viên bị
-    // cho nghỉ (status inactive) vẫn tạo đơn/thu tiền cả tuần bằng token cũ.
-    // Re-check status mỗi request (1 lookup theo PK, rẻ; chỉ áp cho token nhân viên)
-    if (decoded.employee_login && decoded.employee_id) {
-      const emp = await queryOne('SELECT status FROM employees WHERE id = ?', [decoded.employee_id]);
-      if (!emp || emp.status !== 'active') {
-        return res.status(401).json({ error: 'Tài khoản nhân viên đã bị vô hiệu hóa. Vui lòng liên hệ quản lý.' });
-      }
-    }
-
-    req.user = decoded;
-    next();
+    decoded = jwt.verify(token, process.env.JWT_SECRET);
   } catch (error) {
     return res.status(401).json({ error: 'Invalid token' });
   }
+
+  // Token cá nhân của nhân viên sống 7 ngày — nếu chỉ tin JWT, nhân viên bị
+  // cho nghỉ (status inactive) vẫn tạo đơn/thu tiền cả tuần bằng token cũ.
+  // Re-check status mỗi request (1 lookup theo PK, rẻ; chỉ áp cho token nhân viên)
+  if (decoded.employee_login && decoded.employee_id) {
+    let emp;
+    try {
+      emp = await queryOne('SELECT status FROM employees WHERE id = ?', [decoded.employee_id]);
+    } catch (error) {
+      // Lỗi DB tạm thời (pool cạn, timeout) KHÔNG phải token sai — trả 503 để
+      // client thử lại. Nếu gộp vào 401 như trước, api.js FE coi là hết hạn
+      // → xoá token, đá toàn bộ nhân viên ra màn đăng nhập giữa lúc bán hàng.
+      console.error('authenticate: employee status lookup failed:', error.message);
+      return res.status(503).json({ error: 'Không kiểm tra được trạng thái tài khoản. Vui lòng thử lại.' });
+    }
+    if (!emp || emp.status !== 'active') {
+      return res.status(401).json({ error: 'Tài khoản nhân viên đã bị vô hiệu hóa. Vui lòng liên hệ quản lý.' });
+    }
+  }
+
+  req.user = decoded;
+  next();
 };
 
 // Token đăng nhập cá nhân của nhân viên (employee_login=true) vẫn mang role

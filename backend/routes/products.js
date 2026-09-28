@@ -3,6 +3,7 @@ import { query, queryOne, execute } from '../database/db.js';
 import { authenticate, authorize } from '../middleware/auth.js';
 import { auditLog } from '../middleware/audit.js';
 import { validatePositiveNumber, validateRequiredString, validateEnum } from '../utils/validators.js';
+import { resolveCurrentStoreId } from '../services/workingStoreService.js';
 
 const router = express.Router();
 
@@ -11,14 +12,37 @@ router.use(authenticate);
 
 // % hoa hồng nhân viên (tùy chọn, 0-100). Trả về:
 // {skip} nếu không gửi, {value} (null khi xóa) hoặc {error}
+// Hoa hồng nhân viên trên sản phẩm — MỘT trong hai loại (hoặc không có):
+// - commission_percent: % × giá trị dòng hàng (qty × unit_price)
+// - commission_amount: tiền cố định (đ) × số lượng bán ra
+// Công thức tính lương (salary.js, timesheets.js payroll) cộng cả hai term,
+// nên phải chặn cả hai cùng > 0 ở đây — nếu không nhân viên nhận hoa hồng đôi.
 const parseCommissionPercent = (value) => {
   if (value === undefined) return { skip: true };
   if (value === null || value === '') return { value: null };
   const num = Number.parseFloat(value);
   if (!Number.isFinite(num) || num < 0 || num > 100) {
-    return { error: 'Hoa hồng phải là số từ 0 đến 100 (%)' };
+    return { error: 'Hoa hồng theo % phải là số từ 0 đến 100' };
   }
   return { value: Math.round(num * 100) / 100 };
+};
+
+const MAX_COMMISSION_AMOUNT = 99999999.99; // DECIMAL(12,2)
+const parseCommissionAmount = (value) => {
+  if (value === undefined) return { skip: true };
+  if (value === null || value === '') return { value: null };
+  const num = Number.parseFloat(value);
+  if (!Number.isFinite(num) || num < 0 || num > MAX_COMMISSION_AMOUNT) {
+    return { error: 'Hoa hồng tiền cố định phải là số từ 0 đến 99.999.999 đ' };
+  }
+  return { value: Math.round(num * 100) / 100 };
+};
+
+const commissionExclusiveError = (percent, amount) => {
+  if ((Number(percent) || 0) > 0 && (Number(amount) || 0) > 0) {
+    return 'Mỗi sản phẩm chỉ có MỘT loại hoa hồng: theo % giá bán HOẶC tiền cố định.';
+  }
+  return null;
 };
 
 // Get all products
@@ -35,19 +59,13 @@ router.get('/', async (req, res) => {
 
     // Filter by role
     if (req.user.role === 'employer') {
-      // Employer: only show products from their store
-      // Get the actual store_id from users table (users.store_id references stores.id)
-      const user = await queryOne('SELECT store_id FROM users WHERE id = ? AND role = ?', [req.user.id, 'employer']);
-      
-      // Debug log removed for security
-      
-      if (user && user.store_id) {
+      // Employer: chỉ hiện sản phẩm của cửa hàng mình (users.store_id trong token)
+      const currentStoreId = await resolveCurrentStoreId(req.user);
+
+      if (currentStoreId) {
         querySql += ' AND p.store_id = ?';
-        params.push(user.store_id);
-        // Debug log removed for security
+        params.push(currentStoreId);
       } else {
-        // If employer has no store_id, return empty (no products)
-        // Warning log removed for security
         return res.json({ data: [] });
       }
     } else if (req.user.role === 'admin' && req.user.role !== 'root') {
@@ -87,12 +105,12 @@ router.get('/:id', async (req, res) => {
 
     // Filter by role
     if (req.user.role === 'employer') {
-      // Employer: only show products from their store
-      const user = await queryOne('SELECT store_id FROM users WHERE id = ? AND role = ?', [req.user.id, 'employer']);
-      
-      if (user && user.store_id) {
+      // Employer: chỉ sản phẩm của cửa hàng mình (xem GET / ở trên)
+      const currentStoreId = await resolveCurrentStoreId(req.user);
+
+      if (currentStoreId) {
         querySql += ' AND p.store_id = ?';
-        params.push(user.store_id);
+        params.push(currentStoreId);
       } else {
         return res.status(404).json({ error: 'Product not found' });
       }
@@ -132,13 +150,22 @@ router.post('/', authorize('admin'), auditLog('create', 'product'), async (req, 
       return res.status(401).json({ error: 'Tài khoản không tồn tại. Vui lòng đăng xuất và đăng nhập lại.' });
     }
 
-    const { name, unit, price, status, store_id, commission_percent } = req.body;
+    const { name, unit, price, status, store_id, commission_percent, commission_amount } = req.body;
 
     const commission = parseCommissionPercent(commission_percent);
     if (commission.error) {
       return res.status(400).json({ error: commission.error });
     }
+    const commissionAmt = parseCommissionAmount(commission_amount);
+    if (commissionAmt.error) {
+      return res.status(400).json({ error: commissionAmt.error });
+    }
     const commissionValue = commission.skip ? null : commission.value;
+    const commissionAmountValue = commissionAmt.skip ? null : commissionAmt.value;
+    const exclusiveError = commissionExclusiveError(commissionValue, commissionAmountValue);
+    if (exclusiveError) {
+      return res.status(400).json({ error: exclusiveError });
+    }
 
     // Validate name
     const nameValidation = validateRequiredString(name, 'Tên sản phẩm');
@@ -187,13 +214,14 @@ router.post('/', authorize('admin'), auditLog('create', 'product'), async (req, 
     }
 
     const result = await execute(`
-      INSERT INTO products (name, unit, price, commission_percent, eta_minutes, status, created_by, updated_by, store_id)
-      VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?)
+      INSERT INTO products (name, unit, price, commission_percent, commission_amount, eta_minutes, status, created_by, updated_by, store_id)
+      VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)
     `, [
       nameValidation.value,
       unitValidation.value,
       priceValidation.value,
       commissionValue,
+      commissionAmountValue,
       status || 'active',
       currentUser.id,
       currentUser.id,
@@ -211,7 +239,7 @@ router.post('/', authorize('admin'), auditLog('create', 'product'), async (req, 
 // Update product (Admin only)
 router.patch('/:id', authorize('admin'), auditLog('update', 'product'), async (req, res) => {
   try {
-    const { name, unit, price, status, commission_percent } = req.body;
+    const { name, unit, price, status, commission_percent, commission_amount } = req.body;
 
     const oldProduct = await queryOne(`
       SELECT p.*, s.admin_id as store_admin_id
@@ -286,9 +314,29 @@ router.patch('/:id', authorize('admin'), auditLog('update', 'product'), async (r
     if (commission.error) {
       return res.status(400).json({ error: commission.error });
     }
+    const commissionAmt = parseCommissionAmount(commission_amount);
+    if (commissionAmt.error) {
+      return res.status(400).json({ error: commissionAmt.error });
+    }
+    // Kiểm tra "chỉ một loại" trên giá trị SAU cập nhật: field không gửi thì
+    // giữ giá trị cũ — gửi riêng amount > 0 khi product đang có % > 0 phải bị chặn
+    const effectivePercent = commission.skip
+      ? (Number.parseFloat(oldProduct.commission_percent) || 0)
+      : (commission.value || 0);
+    const effectiveAmount = commissionAmt.skip
+      ? (Number.parseFloat(oldProduct.commission_amount) || 0)
+      : (commissionAmt.value || 0);
+    const exclusiveError = commissionExclusiveError(effectivePercent, effectiveAmount);
+    if (exclusiveError) {
+      return res.status(400).json({ error: exclusiveError });
+    }
     if (!commission.skip) {
       updates.push('commission_percent = ?');
       values.push(commission.value);
+    }
+    if (!commissionAmt.skip) {
+      updates.push('commission_amount = ?');
+      values.push(commissionAmt.value);
     }
 
     updates.push('updated_by = ?');

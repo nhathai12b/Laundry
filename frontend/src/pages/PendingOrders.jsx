@@ -60,7 +60,11 @@ function PendingOrders() {
         return;
       }
 
-      const maxAmount = parseFloat(orderToComplete.final_amount || orderToComplete.total_amount || 0) || 0;
+      // Trừ số đã thu trước đó — nếu không, đơn đã trả một phần cho phép nhập
+      // tới TOÀN BỘ final_amount ở FE, rồi bị BE từ chối "exceeds remaining"
+      // (BE luôn tính cap theo phần CÒN LẠI, xem orderPaymentService.js)
+      const paidSoFar = parseFloat(orderToComplete.paid_amount) || 0;
+      const maxAmount = Math.max((parseFloat(orderToComplete.final_amount ?? orderToComplete.total_amount ?? 0) || 0) - paidSoFar, 0);
       let amountPaid = null;
       if (customAmountPaid !== '') {
         amountPaid = parseFloat(customAmountPaid);
@@ -217,7 +221,7 @@ function PendingOrders() {
                 </div>
                 <div className="text-right flex-shrink-0">
                   <div className="text-base sm:text-lg font-bold text-blue-600">
-                    {parseFloat(order.final_amount || order.total_amount || 0).toLocaleString('vi-VN')} đ
+                    {parseFloat(order.final_amount ?? order.total_amount ?? 0).toLocaleString('vi-VN')} đ
                   </div>
                   {order.discount_amount > 0 && (
                     <div className="text-[10px] text-gray-500 line-through">
@@ -330,7 +334,7 @@ function PendingOrders() {
               <div className="mb-4 p-3 bg-gradient-to-r from-blue-50 to-blue-100 rounded-xl border border-blue-200 overflow-hidden">
                 <div className="text-xs sm:text-sm text-gray-600 mb-1 font-medium">Đơn hàng: #{orderToComplete.code}</div>
                 <div className="text-xl sm:text-2xl font-bold text-blue-600 break-words">
-                  {parseFloat(orderToComplete.final_amount || orderToComplete.total_amount || 0).toLocaleString('vi-VN')} đ
+                  {parseFloat(orderToComplete.final_amount ?? orderToComplete.total_amount ?? 0).toLocaleString('vi-VN')} đ
                 </div>
                 {orderToComplete.customer_name && (
                   <div className="text-xs text-gray-600 mt-2">
@@ -384,7 +388,7 @@ function PendingOrders() {
                   Số tiền thanh toán
                 </label>
                 <MoneyInput
-                  placeholder={parseFloat(orderToComplete.final_amount || orderToComplete.total_amount || 0).toLocaleString('vi-VN')}
+                  placeholder={Math.max((parseFloat(orderToComplete.final_amount ?? orderToComplete.total_amount ?? 0) || 0) - (parseFloat(orderToComplete.paid_amount) || 0), 0).toLocaleString('vi-VN')}
                   value={customAmountPaid}
                   onChange={setCustomAmountPaid}
                   className="w-full px-3 py-2.5 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"

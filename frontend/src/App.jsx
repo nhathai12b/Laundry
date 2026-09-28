@@ -49,7 +49,7 @@ const PrivateRoute = ({ children, adminOnly = false }) => {
 // Route protection cho root admin - chỉ cho phép truy cập Dashboard và Admin Management
 const RootAdminRoute = ({ children }) => {
   const location = useLocation();
-  
+
   if (!isAuthenticated()) {
     return <Navigate to="/login" />;
   }
@@ -58,6 +58,14 @@ const RootAdminRoute = ({ children }) => {
   }
   // Nếu là root admin và đang cố truy cập page không được phép, redirect về dashboard
   if (isRoot() && location.pathname !== '/admin' && location.pathname !== '/admin/admin-management') {
+    return <Navigate to="/admin" replace />;
+  }
+  // /admin/admin-management chỉ dành cho root — trước đây chỉ kiểm tra
+  // isAdmin() nên admin thường gõ thẳng URL vẫn render được trang (fetch
+  // GET /users, /stores không cần thiết trước khi bị chặn); backend đã tự
+  // chặn admin thường tạo/xem admin khác, nhưng route vẫn nên khớp đúng ý
+  // định "chỉ root" thay vì dựa hết vào phòng thủ phía sau.
+  if (location.pathname === '/admin/admin-management' && !isRoot()) {
     return <Navigate to="/admin" replace />;
   }
   return children;

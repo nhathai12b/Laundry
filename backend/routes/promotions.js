@@ -4,6 +4,7 @@ import { authenticate, authorize } from '../middleware/auth.js';
 import { auditLog } from '../middleware/audit.js';
 import { validatePositiveNumber, validatePositiveInteger, validateEnum, validateDateRange, sanitizeString, validateRequiredString } from '../utils/validators.js';
 import { normalizeCustomerPhoneForIdentity } from '../utils/helpers.js';
+import { resolveCurrentStoreId } from '../services/workingStoreService.js';
 
 const router = express.Router();
 
@@ -190,16 +191,13 @@ router.post('/', authorize('admin'), auditLog('create', 'promotion'), async (req
       maxDiscountAmount = maxDiscountValidation.value;
     }
 
-    // Determine store_id: use provided store_id or default to user's store_id
+    // store_id null/không gửi = khuyến mãi ÁP DỤNG CHO TẤT CẢ CỬA HÀNG (chain-wide)
+    // — khớp với cách GET / và GET /:id đã hiểu "store_id IS NULL AND created_by
+    // = admin" là khuyến mãi toàn chuỗi. TRƯỚC ĐÂY có bước "tự chọn cửa hàng đầu
+    // tiên của admin" ở đây (LIMIT 1, không ORDER BY) — âm thầm đè lựa chọn
+    // "Tất cả cửa hàng" của admin thành 1 cửa hàng ngẫu nhiên, đúng thứ mà
+    // comment ở frontend (Promotions.jsx) đã cảnh báo không được làm.
     let finalStoreId = store_id || req.user.store_id || null;
-
-    // For admin, if no store_id provided, try to get first store owned by admin
-    if (req.user.role === 'admin' && !finalStoreId) {
-      const firstStore = await queryOne('SELECT id FROM stores WHERE admin_id = ? LIMIT 1', [req.user.id]);
-      if (firstStore) {
-        finalStoreId = firstStore.id;
-      }
-    }
 
     // For admin, verify store belongs to them
     if (req.user.role === 'admin' && finalStoreId) {
@@ -545,8 +543,9 @@ router.post('/applicable', async (req, res) => {
     // Determine effective store filter to prevent cross-store data leakage
     let effectiveStoreId = null;
     if (req.user && req.user.role === 'employer') {
-      // Employer: always use their own store_id from token (ignore request store_id)
-      effectiveStoreId = req.user.store_id || null;
+      // Employer: dùng cửa hàng của tài khoản (ignore request store_id để tránh
+      // lộ dữ liệu chéo cửa hàng)
+      effectiveStoreId = await resolveCurrentStoreId(req.user);
     } else if (req.user && req.user.role === 'admin') {
       if (store_id) {
         // Admin: validate selected store belongs to admin before filtering

@@ -1,5 +1,6 @@
 ﻿import express from 'express';
 import { authenticate } from '../middleware/auth.js';
+import { auditLog } from '../middleware/audit.js';
 import {
   getCurrentDrawer,
   getDrawerDetails,
@@ -45,7 +46,7 @@ router.get('/timesheets/:timesheetId', async (req, res) => {
   }
 });
 
-router.post('/cash-in', async (req, res) => {
+router.post('/cash-in', auditLog('create', 'cash_drawer_transaction', (req, data) => data.data?.record?.id), async (req, res) => {
   try {
     const timesheetId = parseTimesheetId(req.body.timesheet_id);
     if (!timesheetId) {
@@ -60,7 +61,7 @@ router.post('/cash-in', async (req, res) => {
   }
 });
 
-router.post('/cash-out', async (req, res) => {
+router.post('/cash-out', auditLog('create', 'cash_drawer_transaction', (req, data) => data.data?.record?.id), async (req, res) => {
   try {
     const timesheetId = parseTimesheetId(req.body.timesheet_id);
     if (!timesheetId) {

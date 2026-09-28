@@ -339,18 +339,29 @@ function Reports() {
             </td>
             <td className="px-4 py-3 text-sm font-medium text-gray-800">{item.employee_name}</td>
             <td className="px-4 py-3 text-sm text-gray-600">{item.check_in_time || '-'}</td>
-            <td className="px-4 py-3 text-sm text-gray-600">{item.check_out_time || '-'}</td>
+            <td className="px-4 py-3 text-sm text-gray-600">
+              {item.is_open
+                ? <span className="inline-block px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 text-xs font-medium">Đang mở</span>
+                : (item.check_out_time || '-')}
+            </td>
             <td className="px-4 py-3 text-sm font-bold text-blue-600 text-right">
               {new Intl.NumberFormat('vi-VN').format(parseFloat(item.start_revenue) || 0)} đ
             </td>
             <td className="px-4 py-3 text-sm font-bold text-green-600 text-right">
-              {new Intl.NumberFormat('vi-VN').format(parseFloat(item.end_revenue) || 0)} đ
+              {/* Ca đang mở: doanh thu tính LIVE tới hiện tại (backend), chưa chốt */}
+              {item.end_revenue == null
+                ? '—'
+                : `${new Intl.NumberFormat('vi-VN').format(parseFloat(item.end_revenue) || 0)} đ${item.is_open ? ' *' : ''}`}
             </td>
             <td className="px-4 py-3 text-sm font-bold text-green-700 text-right">
-              {/* Cột này từng render trùng end_revenue — giờ bind đúng số tiền mặt ĐẾM THỰC TẾ lúc kết ca */}
-              {item.actual_cash_amount != null
-                ? `${new Intl.NumberFormat('vi-VN').format(parseFloat(item.actual_cash_amount) || 0)} đ`
-                : 'Chưa đếm'}
+              {/* Số tiền mặt ĐẾM THỰC TẾ lúc kết ca — chỉ có khi nhân viên check-out thật */}
+              {item.is_open
+                ? <span className="text-emerald-700 font-normal text-xs">Ca đang mở</span>
+                : item.actual_cash_amount != null
+                  ? `${new Intl.NumberFormat('vi-VN').format(parseFloat(item.actual_cash_amount) || 0)} đ`
+                  : item.auto_closed
+                    ? <span className="text-red-600 font-normal text-xs" title="Nhân viên không check-out trước nửa đêm — ca tự đóng, không ai đếm két (giờ công = 0)">Tự đóng — chưa đếm két</span>
+                    : 'Chưa đếm'}
             </td>
             <td className="px-4 py-3 text-sm font-bold text-amber-600 text-right">
               {new Intl.NumberFormat('vi-VN').format(parseFloat(item.withdrawn_amount) || 0)} đ
@@ -515,7 +526,10 @@ function Reports() {
                 <label className="block text-sm font-medium text-gray-700 mb-1">Lọc theo cửa hàng</label>
                 <select
                   value={selectedStoreId}
-                  onChange={(e) => setSelectedStoreId(e.target.value)}
+                  onChange={(e) => {
+                    setSelectedStoreId(e.target.value);
+                    setPagination(prev => ({ ...prev, page: 1 }));
+                  }}
                   className="px-4 py-2.5 border border-gray-300 rounded-xl text-base bg-white shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                 >
                   <option value="all">Tất cả cửa hàng</option>

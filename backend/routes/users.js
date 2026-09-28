@@ -151,10 +151,20 @@ router.get('/:id', authorize('admin'), async (req, res) => {
 // Create user (Root or Admin)
 router.post('/', authorize('admin'), auditLog('create', 'user', (req) => req.body.id || null), async (req, res) => {
   try {
-    const { name, phone, password, role, started_at, status, hourly_rate, shift_rate, store_id, trial_7days } = req.body;
+    const { name, phone, password, started_at, status, hourly_rate, shift_rate, store_id, trial_7days } = req.body;
+    // Chuẩn hoá + whitelist role: mọi check phân quyền bên dưới đều so sánh
+    // === với chuỗi thường ('admin'/'root'). Cột `role` là ENUM với collation
+    // *_ci (case-insensitive) — MySQL nhận và lưu 'Admin'/'ROOT' y hệt
+    // 'admin'/'root' (đã verify thực tế), nên nếu không chuẩn hoá ở đây, một
+    // admin thường gửi role:"Admin" hoặc role:"Root" sẽ né được toàn bộ các
+    // check === bên dưới và tự tạo tài khoản admin/root ACTIVE không cần root duyệt.
+    const role = typeof req.body.role === 'string' ? req.body.role.trim().toLowerCase() : req.body.role;
 
     if (!name || !password || !role) {
       return res.status(400).json({ error: 'Name, password, and role are required' });
+    }
+    if (!['root', 'admin', 'employer'].includes(role)) {
+      return res.status(400).json({ error: 'Role không hợp lệ.' });
     }
 
     // Phone validation - không bắt buộc cho admin, chỉ check duplicate nếu có
@@ -304,37 +314,94 @@ router.patch('/:id', authorize('admin'), rateLimitPasswordChange, auditLog('upda
     }
 
     const isSelf = parseInt(req.params.id, 10) === req.user.id;
-    // Chỉ root mới được cập nhật admin khác; admin thường được đổi mật khẩu của chính mình
-    if (oldUser.role === 'admin' && req.user.role !== 'root') {
-      if (!isSelf) {
-        return res.status(403).json({ error: 'Chỉ root admin mới có thể cập nhật thông tin admin' });
+    // Tự sửa CHÍNH MÌNH (admin thường hoặc root): chỉ được đổi tên, SĐT và mật
+    // khẩu. Không cho tự đổi role/status/gói đăng ký (leo thang quyền, tự gia
+    // hạn). Đổi mật khẩu luôn bắt buộc xác thực mật khẩu hiện tại, tách khỏi
+    // luồng "root quản lý tài khoản khác" (root reset mật khẩu cho admin khác
+    // thì không cần biết mật khẩu cũ của họ). Trước đây nhánh này chỉ nhận
+    // password → root/admin không còn cách nào sửa tên/SĐT của chính mình.
+    if (isSelf && (oldUser.role === 'admin' || oldUser.role === 'root')) {
+      const selfUpdates = [];
+      const selfValues = [];
+
+      if (name !== undefined) {
+        const trimmedName = String(name ?? '').trim();
+        if (!trimmedName) {
+          return res.status(400).json({ error: 'Tên không được để trống.' });
+        }
+        selfUpdates.push('name = ?');
+        selfValues.push(trimmedName);
       }
-      // Admin thường tự đổi mật khẩu: chỉ cho phép gửi password
-      if (!password) {
-        return res.status(400).json({ error: 'Chỉ có thể đổi mật khẩu. Gửi field password.' });
+
+      if (phone !== undefined) {
+        // users.phone là UNIQUE NOT NULL — để trống sẽ lỗi DB, nên bắt buộc có
+        const trimmedPhone = String(phone ?? '').trim();
+        if (!trimmedPhone) {
+          return res.status(400).json({ error: 'Số điện thoại không được để trống.' });
+        }
+        if (trimmedPhone !== oldUser.phone) {
+          const existing = await queryOne('SELECT id, name, role FROM users WHERE phone = ?', [trimmedPhone]);
+          if (existing) {
+            return res.status(400).json({
+              error: `Số điện thoại "${trimmedPhone}" đã được sử dụng bởi ${existing.name} (${existing.role})`
+            });
+          }
+        }
+        selfUpdates.push('phone = ?');
+        selfValues.push(trimmedPhone);
       }
-      // Xác thực mật khẩu hiện tại NGAY TRÊN SERVER — trước đây chỉ có frontend
-      // tự gọi /auth/login để "verify" rồi mới PATCH, một request PATCH trực
-      // tiếp (curl/token bị đánh cắp) bỏ qua hoàn toàn bước này và đổi được
-      // mật khẩu mà không cần biết mật khẩu cũ.
-      if (!current_password) {
-        return res.status(400).json({ error: 'Vui lòng nhập mật khẩu hiện tại.' });
+
+      if (password) {
+        // Xác thực mật khẩu hiện tại NGAY TRÊN SERVER — trước đây chỉ có frontend
+        // tự gọi /auth/login để "verify" rồi mới PATCH, một request PATCH trực
+        // tiếp (curl/token bị đánh cắp) bỏ qua hoàn toàn bước này và đổi được
+        // mật khẩu mà không cần biết mật khẩu cũ.
+        if (!current_password) {
+          return res.status(400).json({ error: 'Vui lòng nhập mật khẩu hiện tại.' });
+        }
+        const currentPasswordOk = await comparePassword(current_password, oldUser.password_hash);
+        if (!currentPasswordOk) {
+          return res.status(400).json({ error: 'Mật khẩu hiện tại không đúng.' });
+        }
+        const selfPasswordCheck = validatePasswordStrength(password);
+        if (!selfPasswordCheck.valid) {
+          return res.status(400).json({ error: selfPasswordCheck.errors.join(' ') });
+        }
+        selfUpdates.push('password_hash = ?');
+        selfValues.push(await hashPassword(password));
       }
-      const currentPasswordOk = await comparePassword(current_password, oldUser.password_hash);
-      if (!currentPasswordOk) {
-        return res.status(400).json({ error: 'Mật khẩu hiện tại không đúng.' });
+
+      if (selfUpdates.length === 0) {
+        return res.status(400).json({ error: 'Không có gì để cập nhật — với tài khoản của chính mình chỉ sửa được tên, số điện thoại hoặc mật khẩu.' });
       }
-      const selfPasswordCheck = validatePasswordStrength(password);
-      if (!selfPasswordCheck.valid) {
-        return res.status(400).json({ error: selfPasswordCheck.errors.join(' ') });
-      }
-      const password_hash = await hashPassword(password);
-      await execute('UPDATE users SET password_hash = ? WHERE id = ?', [password_hash, req.params.id]);
-      return res.json({ message: 'Đổi mật khẩu thành công' });
+
+      selfValues.push(req.params.id);
+      await execute(`UPDATE users SET ${selfUpdates.join(', ')} WHERE id = ?`, selfValues);
+
+      const updatedSelf = await queryOne(`
+        SELECT id, name, phone, role, status, started_at, hourly_rate, shift_rate,
+               subscription_package, subscription_expires_at, created_at, updated_at
+        FROM users
+        WHERE id = ?
+      `, [req.params.id]);
+      return res.json({
+        data: updatedSelf,
+        message: password ? 'Đổi mật khẩu thành công' : 'Cập nhật thành công',
+      });
     }
 
-    // Non-admin target (employer): a non-root admin may only touch accounts in
-    // their own store chain — prevents editing/escalating other admins' staff
+    // Admin thường KHÔNG được đụng vào tài khoản admin khác — tách riêng khỏi
+    // nhánh tự-đổi-mật-khẩu ở trên. Thiếu check này thì một admin thường PATCH
+    // id của admin khác sẽ lọt thẳng xuống logic cập nhật chung bên dưới (đổi
+    // tên, mật khẩu, trạng thái... của người khác). Target role='root' được
+    // chặn bởi check adminCanManageUser ngay dưới đây (không phải nhánh này).
+    if (oldUser.role === 'admin' && req.user.role !== 'root') {
+      return res.status(403).json({ error: 'Chỉ root admin mới có thể cập nhật thông tin admin' });
+    }
+
+    // Non-admin target (employer) hoặc target role='root': a non-root admin
+    // may only touch accounts in their own store chain — prevents editing
+    // other admins' staff, and adminCanManageUser always denies a 'root' target
     if (oldUser.role !== 'admin' && !(await adminCanManageUser(oldUser, req.user))) {
       return res.status(403).json({ error: 'Bạn không có quyền cập nhật tài khoản này' });
     }
@@ -737,6 +804,12 @@ router.post('/:id/extend-subscription', authorize('admin'), async (req, res) => 
 
     if (user.role !== 'admin') {
       return res.status(400).json({ error: 'Chỉ có thể gia hạn cho admin' });
+    }
+    if (user.status === 'pending') {
+      // Tài khoản CHƯA từng được duyệt — gọi nhầm route này sẽ kích hoạt
+      // luôn kèm subscription, bỏ qua hẳn quyết định duyệt/từ chối lẽ ra
+      // phải làm ở POST /:id/approve.
+      return res.status(400).json({ error: 'Tài khoản đang chờ phê duyệt. Dùng chức năng Phê duyệt thay vì Gia hạn.' });
     }
 
     const validPackages = ['1month', '3months', '6months', '1year'];
