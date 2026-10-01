@@ -100,6 +100,57 @@ function localDateSql(column, offsetMinutes) {
   return `DATE(DATE_SUB(${column}, INTERVAL ${offsetMinutes} MINUTE))`;
 }
 
+// Cột DATE → 'YYYY-MM-DD' (pool timezone 'Z': mysql2 trả Date lúc 00:00Z)
+function sqlDateKey(value) {
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  return String(value).slice(0, 10);
+}
+
+// Gắn shift_employee_names (ai đứng ca lúc giao dịch của dòng diễn ra) cho CÁC
+// DÒNG TRÊN TRANG. Trước đây là subquery tương quan trong SELECT, chạy cho MỌI
+// dòng order_items của cả tháng TRƯỚC GROUP BY/LIMIT, mỗi lần quét toàn bộ ca
+// của tiệm bằng điều kiện không dùng được index — đo được ~30 giây/lần mở báo
+// cáo với 3 tiệm × 2 năm dữ liệu. Giờ: 1 truy vấn, giới hạn theo ngày + nhóm
+// trên trang. `fromSql` phải có alias u_store (tài khoản của đơn) như truy vấn chính.
+// Cận dưới check_in > eventAt − 1 ngày không đổi kết quả (cùng ngày local và vào
+// ca trước giao dịch ⇒ cách nhau < 24h) nhưng cho phép dùng index (store_id, check_in).
+async function attachShiftEmployeeNames(rows, {
+  fromSql, whereSql, whereParams, eventAt, dateExpr, groupExpr, rowGroupKey, timezoneOffset,
+}) {
+  if (!rows.length) return;
+  // GROUP BY p.name theo collation _ci (không phân biệt hoa/thường, dấu, khoảng
+  // trắng cuối) — khóa ghép phía JS phải chuẩn hóa tương tự mới khớp
+  const norm = (v) => String(v).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trimEnd();
+  const dates = [...new Set(rows.map((r) => sqlDateKey(r.date)))];
+  const groups = [...new Set(rows.map(rowGroupKey))];
+  const found = await query(`
+    SELECT DISTINCT DATE_FORMAT(${dateExpr}, '%Y-%m-%d') AS d, ${groupExpr} AS g,
+      COALESCE(e2.name, u2.name) AS name
+    ${fromSql}
+    JOIN timesheets t2 ON t2.store_id = u_store.store_id
+      AND t2.check_in <= ${eventAt}
+      AND t2.check_in > DATE_SUB(${eventAt}, INTERVAL 1 DAY)
+      AND ${eventAt} <= COALESCE(t2.check_out, NOW())
+      AND ${localDateSql('t2.check_in', timezoneOffset)} = ${dateExpr}
+    LEFT JOIN employees e2 ON t2.employee_id = e2.id
+    LEFT JOIN users u2 ON t2.user_id = u2.id
+    ${whereSql}
+      AND ${dateExpr} IN (?)
+      AND ${groupExpr} IN (?)
+  `, [...whereParams, dates, groups]);
+  const byKey = new Map();
+  for (const f of found) {
+    if (!f.name) continue;
+    const key = `${f.d}|${norm(f.g)}`;
+    if (!byKey.has(key)) byKey.set(key, new Set());
+    byKey.get(key).add(f.name);
+  }
+  for (const r of rows) {
+    const names = byKey.get(`${sqlDateKey(r.date)}|${norm(rowGroupKey(r))}`);
+    r.shift_employee_names = names ? [...names].sort((a, b) => a.localeCompare(b, 'vi')).join(', ') : null;
+  }
+}
+
 function isoToMysqlUtc(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return null;
@@ -1162,47 +1213,21 @@ router.get('/revenue-by-product-daily', authorize('admin', 'employer'), blockEmp
     const monthRange = getUtcRangeFromQuery(req, monthYearValidation.month, monthYearValidation.year);
     const offset = (paginationValidation.page - 1) * paginationValidation.limit;
 
-    // group_concat_max_len được set cho mọi connection ở db.js pool hook
-    let querySql = `
-      SELECT 
-        ${orderDateExpr} as date,
-        p.id as product_id,
-        p.name as product_name,
-        p.unit as product_unit,
-        SUM(oi.quantity) as total_quantity,
-        SUM(
-          oi.unit_price * oi.quantity * 
-          CASE 
-            WHEN o.total_amount > 0 THEN o.final_amount / o.total_amount
-            ELSE 1
-          END
-        ) as total_revenue,
-        COUNT(DISTINCT oi.order_id) as total_orders,
-        GROUP_CONCAT(DISTINCT u.name ORDER BY u.name SEPARATOR ', ') as employee_names,
-        GROUP_CONCAT(DISTINCT (
-          SELECT GROUP_CONCAT(DISTINCT COALESCE(e2.name, u2.name) ORDER BY COALESCE(e2.name, u2.name) SEPARATOR ', ')
-          FROM timesheets t2
-          LEFT JOIN employees e2 ON t2.employee_id = e2.id
-          LEFT JOIN users u2 ON t2.user_id = u2.id
-          WHERE t2.store_id = u_store.store_id
-            AND o.updated_at >= t2.check_in
-            AND o.updated_at <= COALESCE(t2.check_out, NOW())
-            AND ${localDateSql('t2.check_in', timezoneOffset)} = ${orderDateExpr}
-        ) SEPARATOR ', ') as shift_employee_names
+    const fromSql = `
       FROM order_items oi
       JOIN products p ON oi.product_id = p.id
       JOIN orders o ON oi.order_id = o.id
       LEFT JOIN users u ON o.assigned_to = u.id
       LEFT JOIN users u_store ON COALESCE(o.assigned_to, o.created_by) = u_store.id
+    `;
+    let whereSql = `
       WHERE o.status = 'completed'
         AND o.updated_at >= ?
         AND o.updated_at < ?
     `;
-    // Subquery ở SELECT list thay cho LEFT JOIN timesheets trực tiếp — JOIN cũ
-    // nhân bản dòng order_items khi có ≥2 ca chồng nhau (nhiều nhân viên đứng
-    // ca cùng lúc, tính năng chủ đích của app), làm SUM(quantity)/SUM(revenue)
-    // bị NHÂN ĐÔI/BA theo số ca chồng — sai số tiền hiển thị trên báo cáo.
-    // Subquery tự gói gọn phép nhân bản bên trong nó, không lọt ra ngoài SUM chính.
+    // Tên người đứng ca KHÔNG join thẳng timesheets vào đây — ≥2 ca chồng nhau
+    // (nhiều nhân viên cùng ca, tính năng chủ đích) sẽ nhân bản dòng order_items
+    // và làm SUM(quantity)/SUM(revenue) bị nhân đôi/ba. Gắn riêng sau phân trang.
     const params = [monthRange.startAt, monthRange.endAt];
 
     const storeId = await resolveStoreIdForAdmin(req);
@@ -1211,19 +1236,19 @@ router.get('/revenue-by-product-daily', authorize('admin', 'employer'), blockEmp
     if (req.user.role === 'employer') {
       if (storeId) {
         // Employer with store_id: filter by store_id OR by user's orders (for legacy orders without store_id)
-        querySql += ` AND (
+        whereSql += ` AND (
           o.store_id = ?
           OR (o.store_id IS NULL AND (o.assigned_to = ? OR o.created_by = ?))
         )`;
         params.push(storeId, req.user.id, req.user.id);
       } else {
         // Employer without store_id: filter by their own orders
-        querySql += ' AND (o.assigned_to = ? OR o.created_by = ?)';
+        whereSql += ' AND (o.assigned_to = ? OR o.created_by = ?)';
         params.push(req.user.id, req.user.id);
       }
     } else if (req.user.role === 'admin' && storeId) {
       // Admin filtering by specific store
-      querySql += ` AND (
+      whereSql += ` AND (
         o.store_id = ?
         OR (
           o.store_id IS NULL AND (
@@ -1235,29 +1260,45 @@ router.get('/revenue-by-product-daily', authorize('admin', 'employer'), blockEmp
       params.push(storeId, storeId, storeId);
     } else if (req.user.role === 'admin') {
       const { sql, params: p } = adminStoresOnlyFilter('o');
-      querySql += sql;
+      whereSql += sql;
       params.push(...p(req.user.id));
     }
 
-
-    querySql += ` GROUP BY ${orderDateExpr}, p.id, p.name, p.unit ORDER BY date DESC, total_revenue DESC`;
-    
-    // Get total count (remove GROUP BY/ORDER BY so COUNT returns one row with correct total)
-    // Regex neo vào "FROM order_items" (bảng gốc của query) chứ không phải
-    // "FROM" bất kỳ — SELECT list giờ có subquery riêng chứa "FROM timesheets
-    // t2" xuất hiện TRƯỚC FROM order_items; neo mơ hồ sẽ cắt SQL sai vị trí.
-    const countSql = querySql
-      .replace(/SELECT[\s\S]*?FROM order_items/, `SELECT COUNT(DISTINCT CONCAT(${orderDateExpr}, "-", p.id)) as total FROM order_items`)
-      .replace(/\s*ORDER BY[\s\S]*$/, '')
-      .replace(/\s*GROUP BY[\s\S]*$/i, '');
-    const countResult = await queryOne(countSql, params);
+    // group_concat_max_len được set cho mọi connection ở db.js pool hook
+    const [countResult, data] = await Promise.all([
+      queryOne(`
+        SELECT COUNT(DISTINCT CONCAT(${orderDateExpr}, "-", p.id)) as total
+        ${fromSql} ${whereSql}
+      `, params),
+      query(`
+        SELECT
+          ${orderDateExpr} as date,
+          p.id as product_id,
+          p.name as product_name,
+          p.unit as product_unit,
+          SUM(oi.quantity) as total_quantity,
+          SUM(
+            oi.unit_price * oi.quantity *
+            CASE
+              WHEN o.total_amount > 0 THEN o.final_amount / o.total_amount
+              ELSE 1
+            END
+          ) as total_revenue,
+          COUNT(DISTINCT oi.order_id) as total_orders,
+          GROUP_CONCAT(DISTINCT u.name ORDER BY u.name SEPARATOR ', ') as employee_names
+        ${fromSql} ${whereSql}
+        GROUP BY ${orderDateExpr}, p.id, p.name, p.unit
+        ORDER BY date DESC, total_revenue DESC
+        LIMIT ? OFFSET ?
+      `, [...params, paginationValidation.limit, offset]),
+    ]);
     const total = countResult?.total || 0;
 
-    // Add pagination
-    querySql += ` LIMIT ? OFFSET ?`;
-    params.push(paginationValidation.limit, offset);
-
-    const data = await query(querySql, params);
+    await attachShiftEmployeeNames(data, {
+      fromSql, whereSql, whereParams: params, timezoneOffset,
+      eventAt: 'o.updated_at', dateExpr: orderDateExpr,
+      groupExpr: 'p.id', rowGroupKey: (r) => r.product_id,
+    });
 
     res.json({
       data,
@@ -1301,42 +1342,19 @@ router.get('/revenue-by-category-daily', authorize('admin', 'employer'), blockEm
     const monthRange = getUtcRangeFromQuery(req, monthYearValidation.month, monthYearValidation.year);
     const offset = (paginationValidation.page - 1) * paginationValidation.limit;
 
-    // group_concat_max_len được set cho mọi connection ở db.js pool hook
-    let querySql = `
-      SELECT 
-        ${orderDateExpr} as date,
-        p.name as category,
-        SUM(oi.quantity) as total_quantity,
-        SUM(
-          oi.unit_price * oi.quantity * 
-          CASE 
-            WHEN o.total_amount > 0 THEN o.final_amount / o.total_amount
-            ELSE 1
-          END
-        ) as total_revenue,
-        COUNT(DISTINCT oi.order_id) as total_orders,
-        GROUP_CONCAT(DISTINCT u.name ORDER BY u.name SEPARATOR ', ') as employee_names,
-        GROUP_CONCAT(DISTINCT (
-          SELECT GROUP_CONCAT(DISTINCT COALESCE(e2.name, u2.name) ORDER BY COALESCE(e2.name, u2.name) SEPARATOR ', ')
-          FROM timesheets t2
-          LEFT JOIN employees e2 ON t2.employee_id = e2.id
-          LEFT JOIN users u2 ON t2.user_id = u2.id
-          WHERE t2.store_id = u_store.store_id
-            AND o.updated_at >= t2.check_in
-            AND o.updated_at <= COALESCE(t2.check_out, NOW())
-            AND ${localDateSql('t2.check_in', timezoneOffset)} = ${orderDateExpr}
-        ) SEPARATOR ', ') as shift_employee_names
+    const fromSql = `
       FROM order_items oi
       JOIN products p ON oi.product_id = p.id
       JOIN orders o ON oi.order_id = o.id
       LEFT JOIN users u ON o.assigned_to = u.id
       LEFT JOIN users u_store ON COALESCE(o.assigned_to, o.created_by) = u_store.id
+    `;
+    let whereSql = `
       WHERE o.status = 'completed'
         AND o.updated_at >= ?
         AND o.updated_at < ?
     `;
-    // Subquery thay LEFT JOIN timesheets trực tiếp — xem comment ở
-    // revenue-by-product-daily (cùng lỗi nhân bản dòng khi ≥2 ca chồng nhau)
+    // Tên người đứng ca gắn riêng sau phân trang — xem revenue-by-product-daily
     const params = [monthRange.startAt, monthRange.endAt];
 
     const storeId = await resolveStoreIdForAdmin(req);
@@ -1345,19 +1363,19 @@ router.get('/revenue-by-category-daily', authorize('admin', 'employer'), blockEm
     if (req.user.role === 'employer') {
       if (storeId) {
         // Employer with store_id: filter by store_id OR by user's orders (for legacy orders without store_id)
-        querySql += ` AND (
+        whereSql += ` AND (
           o.store_id = ?
           OR (o.store_id IS NULL AND (o.assigned_to = ? OR o.created_by = ?))
         )`;
         params.push(storeId, req.user.id, req.user.id);
       } else {
         // Employer without store_id: filter by their own orders
-        querySql += ' AND (o.assigned_to = ? OR o.created_by = ?)';
+        whereSql += ' AND (o.assigned_to = ? OR o.created_by = ?)';
         params.push(req.user.id, req.user.id);
       }
     } else if (req.user.role === 'admin' && storeId) {
       // Admin filtering by specific store
-      querySql += ` AND (
+      whereSql += ` AND (
         o.store_id = ?
         OR (
           o.store_id IS NULL AND (
@@ -1369,24 +1387,43 @@ router.get('/revenue-by-category-daily', authorize('admin', 'employer'), blockEm
       params.push(storeId, storeId, storeId);
     } else if (req.user.role === 'admin') {
       const { sql, params: p } = adminStoresOnlyFilter('o');
-      querySql += sql;
+      whereSql += sql;
       params.push(...p(req.user.id));
     }
 
-    querySql += ` GROUP BY ${orderDateExpr}, p.name ORDER BY date DESC, total_revenue DESC`;
-    
-    // Neo vào "FROM order_items" — xem comment ở revenue-by-product-daily
-    const countSql = querySql
-      .replace(/SELECT[\s\S]*?FROM order_items/, `SELECT COUNT(DISTINCT CONCAT(${orderDateExpr}, "-", p.name)) as total FROM order_items`)
-      .replace(/\s*ORDER BY[\s\S]*$/, '')
-      .replace(/\s*GROUP BY[\s\S]*$/i, '');
-    const countResult = await queryOne(countSql, params);
+    // group_concat_max_len được set cho mọi connection ở db.js pool hook
+    const [countResult, data] = await Promise.all([
+      queryOne(`
+        SELECT COUNT(DISTINCT CONCAT(${orderDateExpr}, "-", p.name)) as total
+        ${fromSql} ${whereSql}
+      `, params),
+      query(`
+        SELECT
+          ${orderDateExpr} as date,
+          p.name as category,
+          SUM(oi.quantity) as total_quantity,
+          SUM(
+            oi.unit_price * oi.quantity *
+            CASE
+              WHEN o.total_amount > 0 THEN o.final_amount / o.total_amount
+              ELSE 1
+            END
+          ) as total_revenue,
+          COUNT(DISTINCT oi.order_id) as total_orders,
+          GROUP_CONCAT(DISTINCT u.name ORDER BY u.name SEPARATOR ', ') as employee_names
+        ${fromSql} ${whereSql}
+        GROUP BY ${orderDateExpr}, p.name
+        ORDER BY date DESC, total_revenue DESC
+        LIMIT ? OFFSET ?
+      `, [...params, paginationValidation.limit, offset]),
+    ]);
     const total = countResult?.total || 0;
 
-    querySql += ` LIMIT ? OFFSET ?`;
-    params.push(paginationValidation.limit, offset);
-
-    const data = await query(querySql, params);
+    await attachShiftEmployeeNames(data, {
+      fromSql, whereSql, whereParams: params, timezoneOffset,
+      eventAt: 'o.updated_at', dateExpr: orderDateExpr,
+      groupExpr: 'p.name', rowGroupKey: (r) => r.category,
+    });
 
     res.json({
       data,
@@ -1535,58 +1572,35 @@ router.get('/revenue-by-payment-daily', authorize('admin'), async (req, res) => 
     const monthRange = getUtcRangeFromQuery(req, monthYearValidation.month, monthYearValidation.year);
     const offset = (paginationValidation.page - 1) * paginationValidation.limit;
 
-    // group_concat_max_len được set cho mọi connection ở db.js pool hook
-    // Group by payment method (cash or transfer)
-    let querySql = `
-      SELECT 
-        ${orderDateExpr} as date,
-        COALESCE(
-          CASE 
-            WHEN p.payment_method = 'cash' THEN 'Tiền mặt'
-            WHEN p.payment_method = 'transfer' THEN 'Chuyển khoản'
-            ELSE 'Tiền mặt'
-          END,
-          'Tiền mặt'
-        ) as payment_method,
-        SUM(p.amount) as total_revenue,
-        COUNT(DISTINCT p.order_id) as total_orders,
-        GROUP_CONCAT(DISTINCT u.name ORDER BY u.name SEPARATOR ', ') as employee_names,
-        GROUP_CONCAT(DISTINCT (
-          SELECT GROUP_CONCAT(DISTINCT COALESCE(e2.name, u2.name) ORDER BY COALESCE(e2.name, u2.name) SEPARATOR ', ')
-          FROM timesheets t2
-          LEFT JOIN employees e2 ON t2.employee_id = e2.id
-          LEFT JOIN users u2 ON t2.user_id = u2.id
-          WHERE t2.store_id = u_store.store_id
-            AND p.paid_at >= t2.check_in
-            AND p.paid_at <= COALESCE(t2.check_out, NOW())
-            AND ${localDateSql('t2.check_in', timezoneOffset)} = ${orderDateExpr}
-        ) SEPARATOR ', ') as shift_employee_names
+    const fromSql = `
       FROM order_payments p
       JOIN orders o ON p.order_id = o.id
       LEFT JOIN users u ON o.assigned_to = u.id
       LEFT JOIN users u_store ON COALESCE(o.assigned_to, o.created_by) = u_store.id
+    `;
+    let whereSql = `
       WHERE p.payment_method IN ('cash', 'transfer')
         AND p.paid_at >= ?
         AND p.paid_at < ?
     `;
     const params = [monthRange.startAt, monthRange.endAt];
-    
+
     const storeId = await resolveStoreIdForAdmin(req);
-    
+
     // Build store filter based on role
     if (req.user.role === 'employer') {
       if (storeId) {
-        querySql += ` AND (
+        whereSql += ` AND (
           o.store_id = ?
           OR (o.store_id IS NULL AND (o.assigned_to = ? OR o.created_by = ?))
         )`;
         params.push(storeId, req.user.id, req.user.id);
       } else {
-        querySql += ' AND (o.assigned_to = ? OR o.created_by = ?)';
+        whereSql += ' AND (o.assigned_to = ? OR o.created_by = ?)';
         params.push(req.user.id, req.user.id);
       }
     } else if (req.user.role === 'admin' && storeId) {
-      querySql += ` AND (
+      whereSql += ` AND (
         o.store_id = ?
         OR (
           o.store_id IS NULL AND (
@@ -1598,24 +1612,44 @@ router.get('/revenue-by-payment-daily', authorize('admin'), async (req, res) => 
       params.push(storeId, storeId, storeId);
     } else if (req.user.role === 'admin') {
       const { sql, params: p } = adminStoresOnlyFilter('o');
-      querySql += sql;
+      whereSql += sql;
       params.push(...p(req.user.id));
     }
 
-    querySql += ` GROUP BY ${orderDateExpr}, p.payment_method ORDER BY date DESC, payment_method`;
-    
-    // Neo vào "FROM order_payments" — xem comment ở revenue-by-product-daily
-    const countSql = querySql
-      .replace(/SELECT[\s\S]*?FROM order_payments/, `SELECT COUNT(DISTINCT ${orderDateExpr}) as total FROM order_payments`)
-      .replace(/\s*ORDER BY[\s\S]*$/, '')
-      .replace(/\s*GROUP BY[\s\S]*$/i, '');
-    const countResult = await queryOne(countSql, params);
+    // group_concat_max_len được set cho mọi connection ở db.js pool hook
+    // Group by payment method (cash or transfer)
+    const [countResult, data] = await Promise.all([
+      // Mỗi dòng = (ngày, phương thức) — đếm theo cặp, không chỉ theo ngày
+      // (trước đây total/totalPages chỉ bằng nửa số dòng thật)
+      queryOne(`SELECT COUNT(DISTINCT CONCAT(${orderDateExpr}, "-", p.payment_method)) as total ${fromSql} ${whereSql}`, params),
+      query(`
+        SELECT
+          ${orderDateExpr} as date,
+          COALESCE(
+            CASE
+              WHEN p.payment_method = 'cash' THEN 'Tiền mặt'
+              WHEN p.payment_method = 'transfer' THEN 'Chuyển khoản'
+              ELSE 'Tiền mặt'
+            END,
+            'Tiền mặt'
+          ) as payment_method,
+          SUM(p.amount) as total_revenue,
+          COUNT(DISTINCT p.order_id) as total_orders,
+          GROUP_CONCAT(DISTINCT u.name ORDER BY u.name SEPARATOR ', ') as employee_names
+        ${fromSql} ${whereSql}
+        GROUP BY ${orderDateExpr}, p.payment_method
+        ORDER BY date DESC, payment_method
+        LIMIT ? OFFSET ?
+      `, [...params, paginationValidation.limit, offset]),
+    ]);
     const total = countResult?.total || 0;
 
-    querySql += ` LIMIT ? OFFSET ?`;
-    params.push(paginationValidation.limit, offset);
-
-    const data = await query(querySql, params);
+    await attachShiftEmployeeNames(data, {
+      fromSql, whereSql, whereParams: params, timezoneOffset,
+      eventAt: 'p.paid_at', dateExpr: orderDateExpr,
+      groupExpr: 'p.payment_method',
+      rowGroupKey: (r) => (r.payment_method === 'Chuyển khoản' ? 'transfer' : 'cash'),
+    });
 
     res.json({
       data,
@@ -1756,6 +1790,701 @@ router.get('/revenue-by-shift-daily', authorize('admin', 'employer'), blockEmplo
   } catch (error) {
     console.error('Get revenue by shift daily error:', error);
     console.error('User role:', req.user?.role, 'Store ID:', req.user?.store_id);
+    res.status(500).json({ error: 'Lỗi máy chủ. Vui lòng thử lại.' });
+  }
+});
+
+// ─── Dòng tiền két theo ngày (một cửa hàng) ────────────────────────────────
+// Kể lại TUẦN TỰ THEO GIỜ mọi sự kiện của tiệm trong ngày: ai check-in/out,
+// quỹ đầu ca, từng khoản thu tiền mặt / nhập / rút / chi, chốt két, bàn giao
+// két giữa người với người — kèm "tồn két" sau mỗi dòng. Mục đích: khi nhiều
+// người cùng đứng một ca, nhìn vào là biết tiền đang nằm trong két của ai.
+//
+// Luật két (khớp với code ghi sổ):
+// - Ca mở CŨ NHẤT của tiệm giữ két: tiền mặt khách trả vào két của ca đó
+//   (orderPaymentService.findOpenTimesheet), người vào thêm không có két.
+// - Tồn két dự kiến = quỹ đầu ca + thu tiền mặt + nhập thêm − rút/chi
+//   (cashDrawerService.getDrawerSummaryTx); "bù thiếu" không nằm trong số dự
+//   kiến — nó được bỏ vào két SAU khi đếm.
+// - Chốt két (closing_count) không cộng/trừ, chỉ ghi số đếm thực tế.
+const TIMELINE_KIND_PRIORITY = {
+  carry_over: 0,
+  check_in: 1,
+  opening_float: 2,
+  money: 3,
+  closing_count: 4,
+  shortage_reimbursement: 5,
+  check_out: 6,
+  handover_in: 7,
+};
+
+// Một cơ sở thời gian cho MỌI mốc (ca làm và sổ két): bản Compat bù dữ liệu
+// check_in cũ lưu theo giờ VN (nằm ở tương lai); mốc hợp lệ không bị đụng
+const toMillis = parseTimesheetDateTimeMsCompat;
+const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
+// Thời điểm két của ca THỰC SỰ đóng: giờ ra có thể nhập lùi (bù giờ quên bấm)
+// nhưng ca vẫn là "ca mở" — vẫn nhận tiền mặt vào két (findOpenTimesheet xét
+// check_out IS NULL theo thời gian thực) — cho tới lúc chốt két. Xác định "ai
+// giữ két" phải theo mốc này, không theo check_out đã nhập.
+const SHIFT_CLOSED_AT_SQL = `(SELECT MAX(c.occurred_at) FROM cash_drawer_transactions c
+  WHERE c.timesheet_id = t.id AND c.type = 'closing_count')`;
+
+// Cột ca làm dùng chung cho timeline (cả truy vấn chính lẫn nạp bổ sung)
+const TIMELINE_SHIFT_COLUMNS = `
+  t.id, t.user_id, t.employee_id, t.check_in, t.check_out, t.auto_closed,
+  t.regular_hours, t.overtime_hours, t.expected_cash_amount, t.actual_cash_amount,
+  t.cash_difference, t.note,
+  COALESCE(e.name, u.name) AS employee_name,
+  ${SHIFT_CLOSED_AT_SQL} AS closed_at
+`;
+
+// Mốc hết giữ két của ca (null = còn mở): muộn hơn giữa giờ ra và lúc chốt két
+const shiftEffectiveEndMs = (s) => {
+  if (!s.check_out) return null;
+  const outMs = toMillis(s.check_out);
+  const closedMs = s.closed_at ? toMillis(s.closed_at) : null;
+  return closedMs !== null && closedMs > outMs ? closedMs : outMs;
+};
+
+// Ca mở cũ nhất (người giữ két) theo cùng thứ tự (check_in, id) với
+// findOpenTimesheet / hasOlderOpenShiftTx. `shifts`: các ca cùng tiệm.
+function olderOpenShiftAtTime(shifts, target, atMs) {
+  const tIn = toMillis(target.check_in);
+  return shifts
+    .filter((o) => {
+      if (o.id === target.id) return false;
+      const oIn = toMillis(o.check_in);
+      const oEnd = shiftEffectiveEndMs(o);
+      const older = oIn < tIn || (oIn === tIn && o.id < target.id);
+      return older && oIn <= atMs && (oEnd === null || oEnd > atMs);
+    })
+    .sort((a, b) => toMillis(a.check_in) - toMillis(b.check_in) || a.id - b.id)[0];
+}
+
+router.get('/cash-drawer-timeline', authorize('admin', 'employer'), blockEmployeeLogin, async (req, res) => {
+  try {
+    if (req.user.role === 'root') {
+      return res.json({ data: null });
+    }
+
+    const dateStr = String(req.query.date || '').trim();
+    const dayUtcMs = Date.parse(`${dateStr}T00:00:00Z`);
+    // Round-trip: Date.parse cuộn ngày không tồn tại (2026-02-30 → 02/03) —
+    // trả dữ liệu ngày khác dưới nhãn ngày đã hỏi
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr) || Number.isNaN(dayUtcMs)
+      || new Date(dayUtcMs).toISOString().slice(0, 10) !== dateStr) {
+      return res.status(400).json({ error: 'Ngày không hợp lệ (định dạng YYYY-MM-DD).' });
+    }
+
+    // Két là của TỪNG cửa hàng — gộp nhiều tiệm vào một dòng thời gian thì số
+    // tồn két vô nghĩa, nên bắt buộc chọn đúng một cửa hàng
+    const storeId = await resolveStoreIdForAdmin(req);
+    if (!storeId) {
+      return res.status(400).json({ error: 'Vui lòng chọn một cửa hàng để xem dòng tiền két.' });
+    }
+
+    const offset = getTimezoneOffsetMinutes(req);
+    const dayStartMs = dayUtcMs + offset * 60 * 1000;
+    const dayEndMs = dayStartMs + 24 * 60 * 60 * 1000;
+    const startAt = formatDateTimeUTC(new Date(dayStartMs));
+    const endAt = formatDateTimeUTC(new Date(dayEndMs));
+
+    // 4 truy vấn độc lập → chạy song song (1 round-trip thay vì 3 nối tiếp)
+    const [store, shifts, transactions, payments] = await Promise.all([
+      queryOne('SELECT id, name FROM stores WHERE id = ?', [storeId]),
+      // Ca làm việc giao với ngày này (kể cả ca mở từ hôm trước / đang mở)
+      query(`
+        SELECT ${TIMELINE_SHIFT_COLUMNS}
+        FROM timesheets t
+        JOIN users u ON t.user_id = u.id
+        LEFT JOIN employees e ON t.employee_id = e.id
+        WHERE t.store_id = ?
+          AND t.check_in < ?
+          AND (t.check_out IS NULL OR t.check_out >= ?)
+        ORDER BY t.check_in ASC, t.id ASC
+      `, [storeId, endAt, startAt]),
+      query(`
+        SELECT cdt.id, cdt.timesheet_id, cdt.type, cdt.amount, cdt.reason, cdt.occurred_at,
+          cdt.order_id, cdt.related_timesheet_id,
+          o.code AS order_code, oe.name AS order_employee_name
+        FROM cash_drawer_transactions cdt
+        LEFT JOIN orders o ON cdt.order_id = o.id
+        LEFT JOIN employees oe ON o.employee_id = oe.id
+        WHERE cdt.store_id = ? AND cdt.occurred_at >= ? AND cdt.occurred_at < ?
+        ORDER BY cdt.occurred_at ASC, cdt.id ASC
+      `, [storeId, startAt, endAt]),
+      // Chuyển khoản (không vào két) + tiền mặt KHÔNG vào két nào (thu lúc không
+      // có ca mở) — để dòng tiền trong ngày đầy đủ và lộ ra tiền mặt "trôi nổi"
+      query(`
+        SELECT p.id, p.amount, p.payment_method, p.payment_type, p.paid_at,
+          o.code AS order_code, oe.name AS order_employee_name,
+          EXISTS (SELECT 1 FROM cash_drawer_transactions c WHERE c.order_payment_id = p.id) AS in_drawer
+        FROM order_payments p
+        JOIN orders o ON p.order_id = o.id
+        LEFT JOIN employees oe ON o.employee_id = oe.id
+        WHERE COALESCE(p.store_id, o.store_id) = ?
+          AND p.paid_at >= ? AND p.paid_at < ?
+        ORDER BY p.paid_at ASC, p.id ASC
+      `, [storeId, startAt, endAt]),
+    ]);
+
+    const shiftById = new Map(shifts.map((s) => [s.id, s]));
+    const shiftCheckInMs = (s) => toMillis(s.check_in);
+    const shiftCheckOutMs = (s) => (s.check_out ? toMillis(s.check_out) : null);
+
+    // 2 truy vấn phụ độc lập (chỉ cần shifts + transactions) → chạy song song:
+    // - ca có giao dịch két trong ngày nhưng không nằm trong danh sách trên
+    //   (dữ liệu lệch mốc giờ) — nạp thêm để không mất tên người giữ két
+    // - tồn két dự kiến đầu ngày của két mở từ hôm trước (cùng công thức
+    //   getDrawerSummaryTx: bù thiếu và chốt két không cộng/trừ)
+    const drawerIds = [...new Set(transactions.map((t) => t.timesheet_id))];
+    const missingIds = drawerIds.filter((id) => !shiftById.has(id));
+    const earlyShiftIds = shifts.filter((s) => shiftCheckInMs(s) < dayStartMs).map((s) => s.id);
+    const carryIds = [...new Set([...drawerIds, ...earlyShiftIds])];
+    const [extra, carryRows] = await Promise.all([
+      missingIds.length
+        ? query(`
+            SELECT ${TIMELINE_SHIFT_COLUMNS}
+            FROM timesheets t
+            JOIN users u ON t.user_id = u.id
+            LEFT JOIN employees e ON t.employee_id = e.id
+            WHERE t.id IN (?)
+          `, [missingIds])
+        : [],
+      carryIds.length
+        ? query(`
+            SELECT timesheet_id, COALESCE(SUM(CASE
+              WHEN type IN ('opening_float', 'cash_payment', 'cash_in') THEN amount
+              WHEN type = 'cash_out' THEN -amount
+              ELSE 0 END), 0) AS balance
+            FROM cash_drawer_transactions
+            WHERE timesheet_id IN (?) AND occurred_at < ?
+            GROUP BY timesheet_id
+          `, [carryIds, startAt])
+        : [],
+    ]);
+    for (const s of extra) {
+      shifts.push(s);
+      shiftById.set(s.id, s);
+    }
+    const carry = new Map(carryRows.map((r) => [r.timesheet_id, round2(r.balance)]));
+
+    const nameOf = (id) => shiftById.get(id)?.employee_name || (id ? `Ca #${id}` : '');
+
+    // Người giữ két tính MỘT lần cho mỗi ca lúc check-in (dùng cho cả dòng
+    // check-in lẫn bảng "Người đứng ca")
+    const holderAtCheckIn = new Map();
+    const holderOf = (s) => {
+      if (!holderAtCheckIn.has(s.id)) {
+        holderAtCheckIn.set(s.id, olderOpenShiftAtTime(shifts, s, shiftCheckInMs(s)) || null);
+      }
+      return holderAtCheckIn.get(s.id);
+    };
+    const openShiftsAt = (atMs, excludeId) => shifts
+      .filter((o) => {
+        if (o.id === excludeId || shiftCheckInMs(o) > atMs) return false;
+        const end = shiftEffectiveEndMs(o);
+        return end === null || end > atMs;
+      })
+      .sort((a, b) => shiftCheckInMs(a) - shiftCheckInMs(b) || a.id - b.id);
+
+    // Bàn giao: dòng opening_float có related_timesheet_id (dữ liệu trước khi
+    // có cột đã được backfill từ reason lúc khởi tạo DB — db.js/initDatabase.js)
+    const handoverFrom = new Map(); // tx.id -> ca giao
+    const handoverTo = new Map();   // ca giao -> ca nhận
+    const closingByTimesheet = new Map();
+    for (const tx of transactions) {
+      if (tx.type === 'closing_count') closingByTimesheet.set(tx.timesheet_id, tx);
+      if (tx.type === 'opening_float' && tx.related_timesheet_id) {
+        handoverFrom.set(tx.id, tx.related_timesheet_id);
+        handoverTo.set(tx.related_timesheet_id, tx.timesheet_id);
+      }
+    }
+    // Giờ địa phương HH:mm (để ghi chú giờ ra đã nhập tay)
+    const localHHmm = (ms) => new Date(ms - offset * 60 * 1000).toISOString().slice(11, 16);
+
+    const events = [];
+    const pushEvent = (ev) => events.push(ev);
+
+    for (const [tsId, balance] of carry.entries()) {
+      pushEvent({
+        kind: 'carry_over', at_ms: dayStartMs, id: 0,
+        drawer_timesheet_id: tsId,
+        label: 'Tồn két đầu ngày (ca mở từ hôm trước)',
+        carry_balance: balance,
+      });
+    }
+
+    for (const s of shifts) {
+      const inMs = shiftCheckInMs(s);
+      if (inMs >= dayStartMs && inMs < dayEndMs) {
+        const holder = holderOf(s);
+        pushEvent({
+          kind: 'check_in', at_ms: inMs, id: s.id,
+          person_timesheet_id: s.id,
+          label: holder
+            ? `${s.employee_name} check-in — vào THÊM ca, két do ${holder.employee_name} giữ`
+            : `${s.employee_name} check-in — mở ca & giữ két`,
+        });
+      }
+      const outMs = shiftCheckOutMs(s);
+      if (outMs !== null && outMs >= dayStartMs && outMs < dayEndMs) {
+        const hours = round2((Number(s.regular_hours) || 0) + (Number(s.overtime_hours) || 0));
+        // Xét tại lúc két THỰC SỰ đóng (giờ ra có thể nhập lùi — xem shiftEffectiveEndMs)
+        const endMs = shiftEffectiveEndMs(s);
+        const wasHolder = !olderOpenShiftAtTime(shifts, s, endMs);
+        const remaining = openShiftsAt(endMs, s.id);
+        // Ca tự đóng: mốc giờ là lúc HỆ THỐNG đóng (sweep chạy mỗi giờ / khi có
+        // người mở app), không phải 0h — ghi đúng sự thật, không ghi "nửa đêm"
+        let detail = Number(s.auto_closed) === 1
+          ? 'Quên check-out — hệ thống tự đóng ca (ca đã qua nửa đêm), giờ công = 0'
+          : `Làm ${hours}h`;
+        if (wasHolder && remaining.length && !handoverTo.has(s.id) && Number(s.auto_closed) !== 1) {
+          detail += ` · Không bàn giao két — tiền thu sau đây vào két của ${remaining[0].employee_name} (bắt đầu từ 0)`;
+        }
+        // timesheets.check_out lấy TRƯỚC transaction chốt két và có thể nhập
+        // lùi (bù giờ ra quên bấm) — xếp dòng check-out ngay SAU dòng chốt két
+        // của chính ca đó để thứ tự "chốt két → check-out → bàn giao" không bị
+        // đảo; giờ ra thật đã nhập ghi vào chú thích nếu khác đáng kể
+        const closing = closingByTimesheet.get(s.id);
+        const closingMs = closing ? toMillis(closing.occurred_at) : null;
+        const sortMs = closingMs !== null && closingMs > outMs ? closingMs : outMs;
+        if (sortMs - outMs > 60 * 1000) {
+          detail += ` · Giờ ra đã nhập: ${localHHmm(outMs)}`;
+        }
+        pushEvent({
+          kind: 'check_out', at_ms: sortMs, id: s.id,
+          person_timesheet_id: s.id,
+          label: `${s.employee_name} check-out`,
+          detail,
+          warning: Number(s.auto_closed) === 1,
+        });
+      }
+    }
+
+    for (const tx of transactions) {
+      const amount = round2(tx.amount);
+      const base = {
+        at_ms: toMillis(tx.occurred_at), id: tx.id, tx_type: tx.type,
+        drawer_timesheet_id: tx.timesheet_id, amount,
+      };
+      const orderLabel = tx.order_code ? `#${tx.order_code}` : (tx.order_id ? `#${tx.order_id}` : '');
+      switch (tx.type) {
+        case 'opening_float': {
+          const fromId = handoverFrom.get(tx.id);
+          pushEvent(fromId
+            ? { ...base, kind: 'handover_in', label: `${nameOf(tx.timesheet_id)} nhận bàn giao két từ ${nameOf(fromId)}`, from_timesheet_id: fromId }
+            : { ...base, kind: 'opening_float', label: 'Quỹ đầu ca' });
+          break;
+        }
+        case 'cash_payment':
+          pushEvent({
+            ...base, kind: 'money',
+            label: `Thu tiền mặt đơn ${orderLabel}`.trim(),
+            detail: tx.order_employee_name ? `Đơn do ${tx.order_employee_name} tạo` : null,
+          });
+          break;
+        case 'cash_in':
+          pushEvent({ ...base, kind: 'money', label: 'Nhập thêm vào két', detail: tx.reason && tx.reason !== 'Cash added to drawer' ? tx.reason : null });
+          break;
+        case 'cash_out':
+          pushEvent(tx.reason === 'Rút tiền khi check-out'
+            ? { ...base, kind: 'money', label: 'Rút tiền khi check-out' }
+            : { ...base, kind: 'money', label: 'Chi / trừ khỏi két', detail: tx.reason || null });
+          break;
+        case 'shortage_reimbursement': {
+          // Tạo cùng transaction với dòng chốt két — xếp ngay SAU dòng chốt để
+          // số "chênh lệch" ở dòng chốt không bị cộng lẫn tiền bù
+          const closing = closingByTimesheet.get(tx.timesheet_id);
+          pushEvent({
+            ...base, kind: 'shortage_reimbursement',
+            at_ms: closing ? toMillis(closing.occurred_at) : base.at_ms,
+            label: 'Nhân viên bù tiền thiếu vào két',
+          });
+          break;
+        }
+        case 'closing_count': {
+          const shift = shiftById.get(tx.timesheet_id);
+          const auto = Number(shift?.auto_closed) === 1;
+          const toId = handoverTo.get(tx.timesheet_id);
+          pushEvent({
+            ...base, kind: 'closing_count', auto,
+            label: auto
+              ? 'Chốt két tự động — KHÔNG ai đếm két'
+              : `Chốt két — đếm thực tế ${new Intl.NumberFormat('vi-VN').format(amount)} đ`,
+            handed_to_timesheet_id: toId || null,
+            detail: toId ? `Bàn giao két cho ${nameOf(toId)}` : null,
+            warning: auto,
+          });
+          break;
+        }
+        default:
+          break;
+      }
+    }
+
+    let transferTotal = 0;
+    let cashOutsideTotal = 0;
+    for (const p of payments) {
+      const amount = round2(p.amount);
+      const orderLabel = p.order_code ? `#${p.order_code}` : '';
+      if (p.payment_method === 'transfer') {
+        transferTotal += amount;
+        pushEvent({
+          kind: 'money', tx_type: 'transfer', at_ms: toMillis(p.paid_at), id: 1e9 + p.id,
+          amount, drawer_timesheet_id: null,
+          label: `Khách chuyển khoản đơn ${orderLabel}`.trim(),
+          detail: `Không vào két${p.order_employee_name ? ` · Đơn do ${p.order_employee_name} tạo` : ''}`,
+        });
+      } else if (p.payment_method === 'cash' && !Number(p.in_drawer)) {
+        cashOutsideTotal += amount;
+        const paidMs = toMillis(p.paid_at);
+        // Chỉ khẳng định "không ai đứng ca" khi đúng là vậy — có ca mở mà vẫn
+        // không có dòng két thì là dữ liệu trước khi có sổ két (hoặc ghi lệch)
+        const nobodyOnShift = openShiftsAt(paidMs, null).length === 0;
+        pushEvent({
+          kind: 'money', tx_type: 'cash_outside', at_ms: paidMs, id: 1e9 + p.id,
+          amount, drawer_timesheet_id: null,
+          label: `Thu tiền mặt đơn ${orderLabel} — KHÔNG vào két nào`.trim(),
+          detail: nobodyOnShift
+            ? 'Lúc thu không có ca nào đang mở tại tiệm — tiền mặt này không được theo dõi trong két'
+            : 'Không có dòng ghi vào két cho khoản thu này (có thể là dữ liệu trước khi có sổ két)',
+          warning: true,
+        });
+      }
+    }
+
+    events.sort((a, b) => a.at_ms - b.at_ms
+      || TIMELINE_KIND_PRIORITY[a.kind] - TIMELINE_KIND_PRIORITY[b.kind]
+      || a.id - b.id);
+
+    // Chạy tồn két theo TỪNG két (mỗi ca giữ két là một két riêng)
+    const drawers = new Map();
+    const getDrawer = (tsId) => {
+      if (!drawers.has(tsId)) {
+        const s = shiftById.get(tsId);
+        drawers.set(tsId, {
+          timesheet_id: tsId,
+          employee_name: nameOf(tsId),
+          // Một người có thể có 2 két trong ngày (ca hôm trước quên check-out +
+          // ca hôm nay) — kèm giờ vào ca để FE phân biệt
+          check_in: s ? new Date(shiftCheckInMs(s)).toISOString() : null,
+          carried_in: 0,
+          opening_float: 0,
+          received_handover: 0,
+          received_from: null,
+          cash_payment: 0,
+          cash_in: 0,
+          cash_out: 0,
+          shortage_reimbursement: 0,
+          balance: 0,
+          expected_at_close: null,
+          counted: null,
+          difference: null,
+          closed: false,
+          auto_closed: Number(s?.auto_closed) === 1,
+          handed_to: null,
+          is_open: s ? s.check_out === null : false,
+        });
+      }
+      return drawers.get(tsId);
+    };
+
+    const output = events.map((ev) => {
+      const out = {
+        at: new Date(ev.at_ms).toISOString(),
+        kind: ev.kind,
+        tx_type: ev.tx_type || null,
+        label: ev.label,
+        detail: ev.detail || null,
+        warning: Boolean(ev.warning),
+        drawer_timesheet_id: ev.drawer_timesheet_id || null,
+        drawer_name: ev.drawer_timesheet_id ? nameOf(ev.drawer_timesheet_id) : null,
+        person_timesheet_id: ev.person_timesheet_id || null,
+        amount_in: null,
+        amount_out: null,
+        balance_after: null,
+      };
+      if (!ev.drawer_timesheet_id) {
+        if (ev.tx_type === 'transfer' || ev.tx_type === 'cash_outside') out.amount_in = ev.amount;
+        return out;
+      }
+      const d = getDrawer(ev.drawer_timesheet_id);
+      switch (ev.kind) {
+        case 'carry_over':
+          d.carried_in = ev.carry_balance;
+          d.balance = ev.carry_balance;
+          break;
+        case 'opening_float':
+          d.opening_float = round2(d.opening_float + ev.amount);
+          d.balance = round2(d.balance + ev.amount);
+          out.amount_in = ev.amount;
+          break;
+        case 'handover_in':
+          d.received_handover = round2(d.received_handover + ev.amount);
+          d.received_from = nameOf(ev.from_timesheet_id);
+          d.balance = round2(d.balance + ev.amount);
+          out.amount_in = ev.amount;
+          break;
+        case 'money':
+          if (ev.tx_type === 'cash_out') {
+            d.cash_out = round2(d.cash_out + ev.amount);
+            d.balance = round2(d.balance - ev.amount);
+            out.amount_out = ev.amount;
+          } else {
+            if (ev.tx_type === 'cash_payment') d.cash_payment = round2(d.cash_payment + ev.amount);
+            if (ev.tx_type === 'cash_in') d.cash_in = round2(d.cash_in + ev.amount);
+            d.balance = round2(d.balance + ev.amount);
+            out.amount_in = ev.amount;
+          }
+          break;
+        case 'closing_count': {
+          const s = shiftById.get(ev.drawer_timesheet_id);
+          d.expected_at_close = d.balance;
+          d.closed = true;
+          if (ev.auto) {
+            d.counted = null;
+            d.difference = null;
+          } else {
+            d.counted = ev.amount;
+            d.difference = s?.cash_difference != null
+              ? round2(s.cash_difference)
+              : round2(ev.amount - d.balance);
+            // Sau khi đếm, tồn két = số tiền vật lý đếm được
+            d.balance = ev.amount;
+          }
+          d.handed_to = ev.handed_to_timesheet_id ? nameOf(ev.handed_to_timesheet_id) : null;
+          out.expected = d.expected_at_close;
+          out.counted = d.counted;
+          out.difference = d.difference;
+          break;
+        }
+        case 'shortage_reimbursement':
+          d.shortage_reimbursement = round2(d.shortage_reimbursement + ev.amount);
+          d.balance = round2(d.balance + ev.amount);
+          out.amount_in = ev.amount;
+          break;
+        default:
+          break;
+      }
+      out.balance_after = d.balance;
+      return out;
+    });
+
+    const drawerList = [...drawers.values()].map((d) => ({
+      ...d,
+      status: d.is_open ? 'open' : d.auto_closed ? 'auto_closed' : d.handed_to ? 'handed_over' : d.closed ? 'closed' : 'unknown',
+    }));
+
+    const people = shifts
+      .slice()
+      .sort((a, b) => shiftCheckInMs(a) - shiftCheckInMs(b) || a.id - b.id)
+      .map((s) => {
+        const holderAtIn = holderOf(s);
+        return {
+          timesheet_id: s.id,
+          employee_name: s.employee_name,
+          check_in: new Date(shiftCheckInMs(s)).toISOString(),
+          check_out: s.check_out ? new Date(shiftCheckOutMs(s)).toISOString() : null,
+          is_open: s.check_out === null,
+          auto_closed: Number(s.auto_closed) === 1,
+          hours: round2((Number(s.regular_hours) || 0) + (Number(s.overtime_hours) || 0)),
+          role: holderAtIn ? 'joined' : 'opened',
+          joined_drawer_of: holderAtIn ? holderAtIn.employee_name : null,
+        };
+      });
+
+    const cashIntoDrawers = drawerList.reduce((sum, d) => sum + d.cash_payment, 0);
+
+    res.json({
+      data: {
+        date: dateStr,
+        store_id: storeId,
+        store_name: store?.name || null,
+        people,
+        drawers: drawerList,
+        events: output,
+        totals: {
+          cash_payment_into_drawers: round2(cashIntoDrawers),
+          transfer: round2(transferTotal),
+          cash_outside_drawer: round2(cashOutsideTotal),
+        },
+      },
+    });
+  } catch (error) {
+    console.error('Get cash drawer timeline error:', error);
+    res.status(500).json({ error: 'Lỗi máy chủ. Vui lòng thử lại.' });
+  }
+});
+
+// ─── Phiếu "Báo cáo ca làm việc" của MỘT ca ─────────────────────────────────
+// Két: cộng từ cash_drawer_transactions của đúng ca này (cùng nguồn với
+// getDrawerSummaryTx lúc chốt két). Doanh thu: order_payments.timesheet_id —
+// khoản thanh toán được ghi cho ca đang GIỮ KÉT lúc thu (findOpenTimesheet),
+// nên ca phụ (vào thêm) = 0 và 2 người chung ca không bị đếm trùng.
+router.get('/shift-detail/:id', authorize('admin', 'employer'), blockEmployeeLogin, async (req, res) => {
+  try {
+    if (req.user.role === 'root') {
+      return res.status(403).json({ error: 'Root admin không xem báo cáo ca của cửa hàng' });
+    }
+    const idValidation = validateId(req.params.id);
+    if (!idValidation.valid) {
+      return res.status(400).json({ error: 'Mã ca không hợp lệ' });
+    }
+
+    const shift = await queryOne(`
+      SELECT t.*, COALESCE(e.name, u.name) AS employee_name,
+        s.name AS store_name, s.admin_id AS store_admin_id
+      FROM timesheets t
+      JOIN users u ON t.user_id = u.id
+      LEFT JOIN employees e ON t.employee_id = e.id
+      LEFT JOIN stores s ON t.store_id = s.id
+      WHERE t.id = ?
+    `, [idValidation.value]);
+
+    // 404 cho cả "không tồn tại" lẫn "không có quyền" — không lộ ca của tiệm khác
+    let allowed = false;
+    if (shift) {
+      if (req.user.role === 'admin') {
+        allowed = shift.store_admin_id === req.user.id;
+      } else if (req.user.role === 'employer') {
+        const ownStoreId = await resolveCurrentStoreId(req.user);
+        allowed = Boolean(ownStoreId) && shift.store_id === ownStoreId;
+      }
+    }
+    if (!allowed) {
+      return res.status(404).json({ error: 'Không tìm thấy ca làm việc' });
+    }
+
+    const [txRows, handedOutRow, paymentRow, otherShifts] = await Promise.all([
+      query(`
+        SELECT cdt.type, cdt.amount, cdt.reason, cdt.related_timesheet_id,
+          COALESCE(fe.name, fu.name) AS from_name
+        FROM cash_drawer_transactions cdt
+        LEFT JOIN timesheets ft ON cdt.related_timesheet_id = ft.id
+        LEFT JOIN employees fe ON ft.employee_id = fe.id
+        LEFT JOIN users fu ON ft.user_id = fu.id
+        WHERE cdt.timesheet_id = ?
+      `, [shift.id]),
+      // Ca này đã bàn giao két cho ai (dòng nhận của ca kia trỏ về ca này)
+      queryOne(`
+        SELECT cdt.amount, COALESCE(te.name, tu.name) AS to_name
+        FROM cash_drawer_transactions cdt
+        JOIN timesheets tt ON cdt.timesheet_id = tt.id
+        JOIN users tu ON tt.user_id = tu.id
+        LEFT JOIN employees te ON tt.employee_id = te.id
+        WHERE cdt.related_timesheet_id = ? AND cdt.type = 'opening_float'
+        LIMIT 1
+      `, [shift.id]),
+      queryOne(`
+        SELECT
+          COALESCE(SUM(p.amount), 0) AS total,
+          COALESCE(SUM(CASE WHEN p.payment_method = 'cash' THEN p.amount ELSE 0 END), 0) AS cash,
+          COALESCE(SUM(CASE WHEN p.payment_method = 'transfer' THEN p.amount ELSE 0 END), 0) AS transfer,
+          COALESCE(SUM(CASE WHEN p.payment_type = 'debt_payment' THEN p.amount ELSE 0 END), 0) AS debt_collected,
+          COUNT(DISTINCT p.order_id) AS order_count
+        FROM order_payments p
+        WHERE p.timesheet_id = ?
+      `, [shift.id]),
+      // Ca khác cùng tiệm ĐANG MỞ lúc ca này vào ca — để biết ca này giữ két hay
+      // vào thêm. "Đang mở" theo lúc két thực sự chốt (giờ ra có thể nhập lùi)
+      query(`
+        SELECT t.id, t.check_in, t.check_out, ${SHIFT_CLOSED_AT_SQL} AS closed_at,
+          COALESCE(e.name, u.name) AS employee_name
+        FROM timesheets t
+        JOIN users u ON t.user_id = u.id
+        LEFT JOIN employees e ON t.employee_id = e.id
+        WHERE t.store_id = ? AND t.id != ?
+          AND t.check_in <= ?
+          AND (t.check_out IS NULL OR GREATEST(t.check_out, COALESCE(${SHIFT_CLOSED_AT_SQL}, t.check_out)) > ?)
+      `, [shift.store_id, shift.id, shift.check_in, shift.check_in]),
+    ]);
+
+    const drawer = {
+      opening_float: 0, received_handover: 0, received_from: null,
+      cash_payment: 0, cash_in: 0, cash_out: 0, withdrawn_at_checkout: 0,
+      shortage_reimbursement: 0,
+    };
+    for (const tx of txRows) {
+      const amount = round2(tx.amount);
+      switch (tx.type) {
+        case 'opening_float':
+          if (tx.related_timesheet_id) {
+            drawer.received_handover = round2(drawer.received_handover + amount);
+            drawer.received_from = tx.from_name || `Ca #${tx.related_timesheet_id}`;
+          } else {
+            drawer.opening_float = round2(drawer.opening_float + amount);
+          }
+          break;
+        case 'cash_payment': drawer.cash_payment = round2(drawer.cash_payment + amount); break;
+        case 'cash_in': drawer.cash_in = round2(drawer.cash_in + amount); break;
+        case 'cash_out':
+          if (tx.reason === 'Rút tiền khi check-out') {
+            drawer.withdrawn_at_checkout = round2(drawer.withdrawn_at_checkout + amount);
+          } else {
+            drawer.cash_out = round2(drawer.cash_out + amount);
+          }
+          break;
+        case 'shortage_reimbursement': drawer.shortage_reimbursement = round2(drawer.shortage_reimbursement + amount); break;
+        // closing_count: số đếm lấy từ timesheets.actual_cash_amount (bên dưới)
+        default: break;
+      }
+    }
+
+    const isOpen = shift.check_out === null;
+    const autoClosed = Number(shift.auto_closed) === 1;
+    // Cùng công thức getDrawerSummaryTx (bù thiếu KHÔNG nằm trong số dự kiến)
+    const liveExpected = round2(drawer.opening_float + drawer.received_handover + drawer.cash_payment
+      + drawer.cash_in - drawer.cash_out - drawer.withdrawn_at_checkout);
+    const counted = !isOpen && !autoClosed && shift.actual_cash_amount != null
+      ? round2(shift.actual_cash_amount)
+      : null;
+    const expected = counted != null ? round2(shift.expected_cash_amount) : liveExpected;
+
+    const checkInMs = toMillis(shift.check_in);
+    const holderAtCheckIn = olderOpenShiftAtTime(otherShifts, shift, checkInMs);
+
+    res.json({
+      data: {
+        shift: {
+          id: shift.id,
+          store_name: shift.store_name,
+          employee_name: shift.employee_name,
+          check_in: new Date(checkInMs).toISOString(),
+          check_out: shift.check_out ? new Date(toMillis(shift.check_out)).toISOString() : null,
+          is_open: isOpen,
+          auto_closed: autoClosed,
+          regular_hours: round2(shift.regular_hours),
+          overtime_hours: round2(shift.overtime_hours),
+          note: shift.note || null,
+          role: holderAtCheckIn ? 'joined' : 'opened',
+          joined_drawer_of: holderAtCheckIn ? holderAtCheckIn.employee_name : null,
+        },
+        drawer: {
+          ...drawer,
+          // Mọi ca khi đóng đều ghi 1 dòng closing_count (kể cả ca vào thêm) —
+          // không tính dòng đó, nếu không ca vào thêm luôn hiện như có giữ két
+          has_activity: txRows.some((tx) => tx.type !== 'closing_count'),
+          expected,
+          counted,
+          difference: counted != null ? round2(shift.cash_difference) : null,
+          handed_to: handedOutRow ? handedOutRow.to_name : null,
+          handed_amount: handedOutRow ? round2(handedOutRow.amount) : null,
+        },
+        revenue: {
+          total: round2(paymentRow?.total),
+          cash: round2(paymentRow?.cash),
+          transfer: round2(paymentRow?.transfer),
+          debt_collected: round2(paymentRow?.debt_collected),
+          order_count: Number(paymentRow?.order_count || 0),
+          // Số ghi lúc kết ca (window theo giờ) — FE báo nếu lệch với số theo két
+          recorded_at_close: isOpen ? null : round2(shift.revenue_amount),
+        },
+      },
+    });
+  } catch (error) {
+    console.error('Get shift detail error:', error);
     res.status(500).json({ error: 'Lỗi máy chủ. Vui lòng thử lại.' });
   }
 });

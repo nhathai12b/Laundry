@@ -1,4 +1,4 @@
-﻿import { useEffect, useState } from 'react';
+﻿import { useEffect, useRef, useState } from 'react';
 import PageSkeleton from '../components/PageSkeleton';
 import { showToast } from '../utils/toast';
 import api from '../utils/api';
@@ -15,8 +15,19 @@ import {
   getLocalYearRangeUtc,
 } from '../utils/dateTime';
 
+// Tải đơn theo trang — trước đây trang này tải TOÀN BỘ lịch sử đơn kèm items
+// (đo được 45 MB/tiệm với 2 năm dữ liệu, trình duyệt phải vẽ hàng chục nghìn thẻ)
+const ORDERS_PAGE_SIZE = 100;
+
 function Orders() {
   const [orders, setOrders] = useState([]);
+  const [hasMoreOrders, setHasMoreOrders] = useState(false);
+  const [loadingMoreOrders, setLoadingMoreOrders] = useState(false);
+  // Số tổng (đơn / SP / tiền) của MỌI đơn khớp bộ lọc — cho dòng tổng của bảng admin
+  const [ordersSummary, setOrdersSummary] = useState(null);
+  const ordersRequestRef = useRef(0);
+  // Số dòng đã lấy từ server (offset cho trang kế) — khác orders.length khi lọc phía client
+  const ordersServerCountRef = useRef(0);
   const [products, setProducts] = useState([]);
   const [allProducts, setAllProducts] = useState([]);
   const savedFilters = getSavedFilters();
@@ -76,7 +87,7 @@ function Orders() {
 
   // Load orders when filters/date change
   useEffect(() => {
-    loadOrders();
+    loadOrders(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filters, viewMode, selectedDate, selectedMonth, selectedYear, selectedStoreId]);
 
@@ -96,48 +107,96 @@ function Orders() {
     }
   }, [selectedStoreId, selectedMonth, selectedYear]);
 
-  const loadOrders = async () => {
+  const buildOrderParams = () => {
+    const params = new URLSearchParams();
+    if (filters.status) params.append('status', filters.status);
+    if (filters.customer_phone) params.append('customer_phone', filters.customer_phone);
+    if (filters.my_orders) params.append('my_orders', 'true');
+    if (isAdmin() && selectedStoreId !== 'all') {
+      params.append('store_id', selectedStoreId);
+    }
+
+    // Admin view mode filters
+    if (isAdmin() && viewMode === 'day') {
+      const range = getLocalDateRangeUtc(selectedDate);
+      params.append('start_at', range.start_at);
+      params.append('end_at', range.end_at);
+    } else if (isAdmin() && viewMode === 'month') {
+      const range = getLocalMonthRangeUtc(selectedYear, selectedMonth);
+      params.append('start_at', range.start_at);
+      params.append('end_at', range.end_at);
+    } else if (isAdmin() && viewMode === 'year') {
+      const range = getLocalYearRangeUtc(selectedYear);
+      params.append('start_at', range.start_at);
+      params.append('end_at', range.end_at);
+    }
+    return params;
+  };
+
+  // Filter by date if day mode (additional client-side filter for safety)
+  const filterForView = (rows) => (isAdmin() && viewMode === 'day'
+    ? rows.filter((order) => formatLocalDateKey(order.created_at) === selectedDate)
+    : rows);
+
+  // reset=true (đổi bộ lọc) → về trang đầu. Refresh sau thao tác (hoàn thành,
+  // ghi nợ...) → giữ số dòng đang xem, không bắt người dùng bấm "Xem thêm" lại
+  const loadOrders = async (reset = false) => {
+    const requestId = ++ordersRequestRef.current;
     try {
       // Không bật spinner khi refresh — giữ dữ liệu cũ trên màn hình (lần đầu đã có useState(true))
-      const params = new URLSearchParams();
-      if (filters.status) params.append('status', filters.status);
-      if (filters.customer_phone) params.append('customer_phone', filters.customer_phone);
-      if (filters.my_orders) params.append('my_orders', 'true');
-      if (isAdmin() && selectedStoreId !== 'all') {
-        params.append('store_id', selectedStoreId);
-      }
+      const params = buildOrderParams();
+      const limit = reset
+        ? ORDERS_PAGE_SIZE
+        : Math.min(500, Math.max(ORDERS_PAGE_SIZE, ordersServerCountRef.current));
+      const pageParams = new URLSearchParams(params);
+      pageParams.append('limit', String(limit));
+      const summaryParams = new URLSearchParams(params);
+      summaryParams.append('summary', 'true');
 
-      // Admin view mode filters
-      if (isAdmin() && viewMode === 'day') {
-        const range = getLocalDateRangeUtc(selectedDate);
-        params.append('start_at', range.start_at);
-        params.append('end_at', range.end_at);
-      } else if (isAdmin() && viewMode === 'month') {
-        const range = getLocalMonthRangeUtc(selectedYear, selectedMonth);
-        params.append('start_at', range.start_at);
-        params.append('end_at', range.end_at);
-      } else if (isAdmin() && viewMode === 'year') {
-        const range = getLocalYearRangeUtc(selectedYear);
-        params.append('start_at', range.start_at);
-        params.append('end_at', range.end_at);
-      }
+      const [response, summaryRes] = await Promise.all([
+        api.get(`/orders?${pageParams.toString()}`),
+        isAdmin() ? api.get(`/orders?${summaryParams.toString()}`).catch(() => null) : Promise.resolve(null),
+      ]);
+      // Bộ lọc đã đổi trong lúc chờ — bỏ kết quả cũ
+      if (requestId !== ordersRequestRef.current) return;
 
-      const response = await api.get(`/orders?${params.toString()}`);
-      let allOrders = response.data.data || [];
-      
-      // Filter by date if day mode (additional client-side filter for safety)
-      if (isAdmin() && viewMode === 'day') {
-        allOrders = allOrders.filter(order => {
-          const orderDate = formatLocalDateKey(order.created_at);
-          return orderDate === selectedDate;
-        });
-      }
-
-      setOrders(allOrders);
+      const rows = response.data.data || [];
+      ordersServerCountRef.current = rows.length;
+      setHasMoreOrders(Boolean(response.data.pagination?.has_more));
+      setOrdersSummary(summaryRes?.data?.summary || null);
+      setOrders(filterForView(rows));
     } catch (error) {
+      if (requestId !== ordersRequestRef.current) return;
       console.error('Error loading orders:', error);
     } finally {
-      setLoading(false);
+      if (requestId === ordersRequestRef.current) setLoading(false);
+    }
+  };
+
+  const loadMoreOrders = async () => {
+    const requestId = ordersRequestRef.current;
+    setLoadingMoreOrders(true);
+    try {
+      const params = buildOrderParams();
+      params.append('limit', String(ORDERS_PAGE_SIZE));
+      params.append('offset', String(ordersServerCountRef.current));
+      const response = await api.get(`/orders?${params.toString()}`);
+      if (requestId !== ordersRequestRef.current) return;
+
+      const rows = response.data.data || [];
+      ordersServerCountRef.current += rows.length;
+      setHasMoreOrders(Boolean(response.data.pagination?.has_more));
+      // Đơn mới tạo trong lúc xem đẩy danh sách xuống — trang kế có thể lặp lại
+      // dòng cuối của trang trước, bỏ trùng theo id
+      setOrders((cur) => {
+        const seen = new Set(cur.map((o) => o.id));
+        return [...cur, ...filterForView(rows).filter((o) => !seen.has(o.id))];
+      });
+    } catch (error) {
+      console.error('Error loading more orders:', error);
+      showToast('Không tải thêm được đơn hàng. Vui lòng thử lại.');
+    } finally {
+      setLoadingMoreOrders(false);
     }
   };
 
@@ -769,12 +828,18 @@ function Orders() {
               {orders.length > 0 && (
                 <tfoot className="bg-gray-50 font-semibold">
                   <tr>
-                    <td colSpan="6" className="px-4 py-3 text-gray-800">Tổng cộng</td>
+                    <td colSpan="6" className="px-4 py-3 text-gray-800">
+                      Tổng cộng{ordersSummary ? ` (${ordersSummary.order_count} đơn)` : ''}
+                    </td>
                     <td className="px-4 py-3 text-right text-gray-800">
-                      {orders.reduce((sum, o) => sum + (o.items?.length || 0), 0)}
+                      {ordersSummary
+                        ? ordersSummary.item_count
+                        : orders.reduce((sum, o) => sum + (o.items?.length || 0), 0)}
                     </td>
                     <td className="px-4 py-3 text-right text-green-600">
-                      {new Intl.NumberFormat('vi-VN').format(orders.reduce((sum, o) => sum + (parseFloat(o.total_amount) || 0), 0))} đ
+                      {new Intl.NumberFormat('vi-VN').format(ordersSummary
+                        ? ordersSummary.total_amount
+                        : orders.reduce((sum, o) => sum + (parseFloat(o.total_amount) || 0), 0))} đ
                     </td>
                     {isRoot() && <td className="px-4 py-3"></td>}
                   </tr>
@@ -889,6 +954,18 @@ function Orders() {
               </div>
             ))
           )}
+        </div>
+      )}
+
+      {hasMoreOrders && (
+        <div className="flex justify-center">
+          <button
+            onClick={loadMoreOrders}
+            disabled={loadingMoreOrders}
+            className="px-6 py-2 bg-white border border-gray-300 rounded-lg text-sm font-medium text-gray-700 shadow-sm hover:bg-gray-50 disabled:opacity-50"
+          >
+            {loadingMoreOrders ? 'Đang tải...' : 'Xem thêm đơn cũ hơn'}
+          </button>
         </div>
       )}
 

@@ -1803,7 +1803,9 @@ function Timesheets() {
                   const isDrawerHolder = storeOpenShifts.length > 0 && storeOpenShifts[0]?.id === closingShift.id;
                   const othersOnShift = storeOpenShifts.filter((s) => s.id !== closingShift.id);
                   if (!isDrawerHolder || othersOnShift.length === 0) return null;
-                  const handoverAmount = parseFloat(revenueAmount) || 0;
+                  // = tiền đếm (sau khi rút) + tiền nhân viên bù thiếu bỏ vào két —
+                  // cùng công thức backend dùng để ghi quỹ cho người nhận
+                  const handoverAmount = (parseFloat(revenueAmount) || 0) + (parseFloat(cashShortagePaidAmount) || 0);
                   return (
                     <div className="bg-indigo-50 border border-indigo-200 rounded-lg p-2.5 sm:p-3 space-y-2">
                       <label className="block text-xs sm:text-sm font-medium text-indigo-900">
@@ -1823,7 +1825,7 @@ function Timesheets() {
                       </select>
                       <p className="text-[11px] text-indigo-800">
                         {handoverToId
-                          ? <>Tiền mặt thực đếm <strong>{formatMoney(handoverAmount)}</strong> sẽ trở thành quỹ đầu ca của người nhận — họ không cần nhập lại.</>
+                          ? <><strong>{formatMoney(handoverAmount)}</strong> (tiền đếm{(parseFloat(cashShortagePaidAmount) || 0) > 0 ? ' + tiền bù thiếu' : ''}) sẽ trở thành quỹ đầu ca của người nhận — họ không cần nhập lại.</>
                           : 'Không bàn giao: két của người còn lại bắt đầu từ 0 — tiền còn trong két phải được mang đi hoặc kết sổ riêng.'}
                       </p>
                     </div>

@@ -181,29 +181,61 @@ async function getCashDrawerSummary(startAt, endAt, storeId, adminId) {
   const params = [startAt, endAt];
   appendScopeParam(params, storeId, adminId);
 
-  // Chỉ cộng expected của ca ĐÃ ĐẾM két (actual IS NOT NULL) — ca tự đóng lúc
-  // nửa đêm (quên check-out) có actual/cash_difference NULL: nếu vẫn cộng
-  // expected thì "dự kiến > thực đếm" trong khi "chênh lệch = 0", nhìn như
-  // thiếu tiền. Trả thêm số ca chưa đối soát / đang mở để báo cáo nói rõ.
-  const row = await queryOne(`
-    SELECT
-      COALESCE(SUM(CASE WHEN t.actual_cash_amount IS NOT NULL THEN t.expected_cash_amount ELSE 0 END), 0) AS expected_cash_amount,
-      COALESCE(SUM(t.actual_cash_amount), 0) AS actual_cash_amount,
-      COALESCE(SUM(t.cash_difference), 0) AS cash_difference,
-      COALESCE(SUM(CASE WHEN t.check_out IS NOT NULL AND t.actual_cash_amount IS NULL THEN 1 ELSE 0 END), 0) AS unreconciled_shifts,
-      COALESCE(SUM(CASE WHEN t.check_out IS NULL THEN 1 ELSE 0 END), 0) AS open_shifts
+  // Mỗi ca kèm "ca nhận bàn giao đã được đếm két chưa" (qua related_timesheet_id)
+  const rows = await query(`
+    SELECT t.id, t.check_out, t.expected_cash_amount, t.actual_cash_amount,
+      t.cash_difference, t.cash_shortage_paid_amount,
+      -- NULL khi: không bàn giao cho ai, HOẶC ca nhận chưa được đếm két
+      (SELECT r.actual_cash_amount
+         FROM cash_drawer_transactions h
+         JOIN timesheets r ON h.timesheet_id = r.id
+        WHERE h.related_timesheet_id = t.id AND h.type = 'opening_float'
+        LIMIT 1) AS receiver_actual
     FROM timesheets t
     WHERE t.check_in >= ?
       AND t.check_in < ?
       ${storeFilter('t', storeId, adminId)}
   `, params);
 
+  // Định nghĩa (bất biến: expected − actual = −(cash_difference) − bù thiếu của ca đã chuyển két):
+  // - actual: tiền ĐẾM ĐƯỢC ở các két CUỐI (két không chuyển tiếp cho ai đã đếm).
+  //   Ca A bàn giao cho B mà B đã chốt → tiền của A nằm trong số đếm của B,
+  //   KHÔNG cộng A lần nữa (tránh 530k + 560k = 1.090k ảo). B chưa đếm (đang
+  //   mở / quên check-out) → giữ số của A, nếu không tiền đó biến mất khỏi báo cáo.
+  // - expected: tiền LẼ RA có trong các két cuối nếu không ai thiếu/thừa — két
+  //   nhận chỉ biết số A đếm (+ tiền bù), nên cộng bù phần A thiếu chưa bù.
+  // - cash_difference: tổng thiếu/thừa của TỪNG người khi đếm (không bỏ ai).
+  // - Ca đã đóng nhưng không ai đếm (tự đóng) → unreconciled, không vào tổng.
+  let expected = 0;
+  let actual = 0;
+  let difference = 0;
+  let reimbursed = 0;
+  let unreconciled = 0;
+  let open = 0;
+  for (const r of rows) {
+    if (r.check_out === null) { open += 1; continue; }
+    if (r.actual_cash_amount === null) { unreconciled += 1; continue; }
+    const diff = toNumber(r.cash_difference);
+    const paid = toNumber(r.cash_shortage_paid_amount);
+    difference += diff;
+    reimbursed += paid;
+    const passedOnToCountedDrawer = r.receiver_actual !== null;
+    if (passedOnToCountedDrawer) {
+      expected -= diff + paid;
+    } else {
+      expected += toNumber(r.expected_cash_amount);
+      actual += toNumber(r.actual_cash_amount);
+    }
+  }
+
+  const round = (n) => Math.round(n * 100) / 100;
   return {
-    expected_cash_amount: toNumber(row?.expected_cash_amount),
-    actual_cash_amount: toNumber(row?.actual_cash_amount),
-    cash_difference: toNumber(row?.cash_difference),
-    unreconciled_shifts: Number(row?.unreconciled_shifts || 0),
-    open_shifts: Number(row?.open_shifts || 0),
+    expected_cash_amount: round(expected),
+    actual_cash_amount: round(actual),
+    cash_difference: round(difference),
+    shortage_reimbursed: round(reimbursed),
+    unreconciled_shifts: unreconciled,
+    open_shifts: open,
   };
 }
 

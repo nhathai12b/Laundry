@@ -6,6 +6,8 @@ import dotenv from 'dotenv';
 // Import bcrypt directly instead of utils/helpers.js: helpers pulls in database/db.js,
 // whose auto-init would run CONCURRENTLY with this script's own initialization
 import bcrypt from 'bcryptjs';
+// migrations.js chỉ chứa hằng số SQL, không import db.js → không kích hoạt auto-init
+import { BACKFILL_HANDOVER_LINK_SQL } from '../database/migrations.js';
 
 dotenv.config();
 
@@ -483,6 +485,7 @@ async function ensureCashDrawerTables(connection) {
         employee_id INT NULL,
         order_id INT NULL,
         order_payment_id INT NULL,
+        related_timesheet_id INT NULL,
         type ENUM('opening_float', 'cash_payment', 'cash_in', 'cash_out', 'shortage_reimbursement', 'closing_count') NOT NULL,
         direction ENUM('in', 'out', 'neutral') NOT NULL,
         amount DECIMAL(10, 2) NOT NULL,
@@ -498,9 +501,34 @@ async function ensureCashDrawerTables(connection) {
         INDEX idx_cash_drawer_timesheet_id (timesheet_id),
         INDEX idx_cash_drawer_store_id (store_id),
         INDEX idx_cash_drawer_occurred_at (occurred_at),
-        INDEX idx_cash_drawer_type (type)
+        INDEX idx_cash_drawer_type (type),
+        INDEX idx_cash_drawer_related_ts (related_timesheet_id)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
+
+    // DB đang chạy (bảng có từ trước): CREATE IF NOT EXISTS ở trên là no-op —
+    // phải tự thêm cột/index. Thiếu cột này thì MỌI lần ghi sổ két (quỹ đầu
+    // ca, thu tiền mặt, chốt két...) lỗi ER_BAD_FIELD_ERROR → check-out 500.
+    const [colCheck] = await connection.query(
+      `SELECT COUNT(*) AS count FROM information_schema.columns
+       WHERE table_schema = ? AND table_name = 'cash_drawer_transactions' AND column_name = 'related_timesheet_id'`,
+      [DB_NAME]
+    );
+    if (!colCheck?.[0]?.count) {
+      await connection.query('ALTER TABLE cash_drawer_transactions ADD COLUMN related_timesheet_id INT NULL AFTER order_payment_id');
+      console.log('✓ Added column cash_drawer_transactions.related_timesheet_id');
+    }
+    const [idxCheck] = await connection.query(
+      `SELECT COUNT(*) AS count FROM information_schema.statistics
+       WHERE table_schema = ? AND table_name = 'cash_drawer_transactions' AND index_name = 'idx_cash_drawer_related_ts'`,
+      [DB_NAME]
+    );
+    if (!idxCheck?.[0]?.count) {
+      await connection.query('CREATE INDEX idx_cash_drawer_related_ts ON cash_drawer_transactions(related_timesheet_id)');
+      console.log('✓ Created index idx_cash_drawer_related_ts');
+    }
+    // Dòng "nhận bàn giao két" ghi TRƯỚC khi có cột: điền lại từ reason
+    await connection.query(BACKFILL_HANDOVER_LINK_SQL);
     console.log('✓ Cash drawer tables ready');
   } catch (error) {
     console.error('Error ensuring cash drawer tables:', error.message);
@@ -937,7 +965,16 @@ async function ensureIndexes(connection) {
     { name: 'idx_timesheets_user_id', table: 'timesheets', columns: 'user_id' },
     { name: 'idx_timesheets_check_in', table: 'timesheets', columns: 'check_in' },
     { name: 'idx_audit_logs_user_id', table: 'audit_logs', columns: 'user_id' },
-    { name: 'idx_audit_logs_entity', table: 'audit_logs', columns: 'entity, entity_id' }
+    { name: 'idx_audit_logs_entity', table: 'audit_logs', columns: 'entity, entity_id' },
+    // Cùng danh sách index hiệu năng với db.js — `npm run init-db` (CI) phải tạo
+    // đủ, không phụ thuộc DB_AUTO_INIT của server
+    { name: 'idx_timesheets_user_checkout', table: 'timesheets', columns: 'user_id, check_out' },
+    { name: 'idx_timesheets_store_checkin', table: 'timesheets', columns: 'store_id, check_in' },
+    { name: 'idx_orders_store_created', table: 'orders', columns: 'store_id, created_at' },
+    { name: 'idx_orders_status_updated', table: 'orders', columns: 'status, updated_at' },
+    { name: 'idx_orders_store_customer', table: 'orders', columns: 'store_id, customer_id' },
+    { name: 'idx_order_payments_paid_at', table: 'order_payments', columns: 'paid_at' },
+    { name: 'idx_cash_drawer_store_occurred', table: 'cash_drawer_transactions', columns: 'store_id, occurred_at' }
   ];
 
   for (const idx of indexStatements) {

@@ -239,6 +239,7 @@ CREATE TABLE IF NOT EXISTS cash_drawer_transactions (
     employee_id INT NULL,
     order_id INT NULL,
     order_payment_id INT NULL,
+    related_timesheet_id INT NULL,
     type ENUM('opening_float', 'cash_payment', 'cash_in', 'cash_out', 'shortage_reimbursement', 'closing_count') NOT NULL,
     direction ENUM('in', 'out', 'neutral') NOT NULL,
     amount DECIMAL(10, 2) NOT NULL,
@@ -254,7 +255,8 @@ CREATE TABLE IF NOT EXISTS cash_drawer_transactions (
     INDEX idx_cash_drawer_timesheet_id (timesheet_id),
     INDEX idx_cash_drawer_store_id (store_id),
     INDEX idx_cash_drawer_occurred_at (occurred_at),
-    INDEX idx_cash_drawer_type (type)
+    INDEX idx_cash_drawer_type (type),
+    INDEX idx_cash_drawer_related_ts (related_timesheet_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Audit logs table
@@ -352,6 +354,9 @@ CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
 CREATE INDEX IF NOT EXISTS idx_orders_assigned_to ON orders(assigned_to);
 CREATE INDEX IF NOT EXISTS idx_orders_customer_id ON orders(customer_id);
 CREATE INDEX IF NOT EXISTS idx_orders_created_at ON orders(created_at);
+CREATE INDEX IF NOT EXISTS idx_orders_status_updated ON orders(status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_orders_store_customer ON orders(store_id, customer_id);
+CREATE INDEX IF NOT EXISTS idx_timesheets_store_checkin ON timesheets(store_id, check_in);
 CREATE INDEX IF NOT EXISTS idx_timesheets_user_id ON timesheets(user_id);
 CREATE INDEX IF NOT EXISTS idx_timesheets_check_in ON timesheets(check_in);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_user_id ON audit_logs(user_id);

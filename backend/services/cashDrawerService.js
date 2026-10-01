@@ -40,9 +40,9 @@ async function insertCashDrawerTransactionTx(db, payload) {
   const result = await db.execute(`
     INSERT INTO cash_drawer_transactions (
       store_id, timesheet_id, user_id, employee_id, order_id, order_payment_id,
-      type, direction, amount, reason, occurred_at
+      related_timesheet_id, type, direction, amount, reason, occurred_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `, [
     payload.store_id || null,
     payload.timesheet_id,
@@ -50,6 +50,7 @@ async function insertCashDrawerTransactionTx(db, payload) {
     payload.employee_id || null,
     payload.order_id || null,
     payload.order_payment_id || null,
+    payload.related_timesheet_id || null,
     type,
     direction,
     amount,
@@ -240,6 +241,9 @@ export async function recordDrawerHandoverTx(db, fromTimesheet, toTimesheet, amo
     timesheet_id: toTimesheet.id,
     user_id: actor?.id || null,
     employee_id: toTimesheet.employee_id || null,
+    // Liên kết có cấu trúc tới ca GIAO — báo cáo "Dòng tiền két" dựa vào cột
+    // này để vẽ "A bàn giao → B" (không phải parse chuỗi reason)
+    related_timesheet_id: fromTimesheet.id,
     reason: `Nhận bàn giao két từ ca #${fromTimesheet.id}${fromTimesheet.employee_name ? ` (${fromTimesheet.employee_name})` : ''}`,
   });
   await db.execute(

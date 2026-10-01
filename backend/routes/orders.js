@@ -68,30 +68,22 @@ export async function userCanAccessOrder(order, user) {
 // Get all orders
 router.get('/', async (req, res) => {
   try {
-    const { status, assigned_to, customer_phone, my_orders, date, store_id, debt_only, start_at, end_at } = req.query;
-    let querySql = `
-      SELECT o.*, 
-        c.name as customer_name, 
-        c.phone as customer_phone,
-        u.name as assigned_to_name,
-        creator.name as created_by_name
-      FROM orders o
-      LEFT JOIN customers c ON o.customer_id = c.id
-      LEFT JOIN users u ON o.assigned_to = u.id
-      LEFT JOIN users creator ON o.created_by = creator.id
-      WHERE 1=1
-    `;
+    const {
+      status, assigned_to, customer_phone, my_orders, date, store_id, debt_only, active_only, pending_only,
+      summary, customer_ids, start_at, end_at,
+    } = req.query;
+    let whereSql = ' WHERE 1=1';
     const params = [];
 
     // For employer, filter by the account's store (users.store_id in token)
     if (req.user.role === 'employer') {
       const currentStoreId = await resolveCurrentStoreId(req.user);
       if (currentStoreId) {
-        querySql += ' AND o.store_id = ?';
+        whereSql += ' AND o.store_id = ?';
         params.push(currentStoreId);
       } else {
         // Fallback: filter by user id if no store_id
-        querySql += ' AND (o.assigned_to = ? OR o.created_by = ?)';
+        whereSql += ' AND (o.assigned_to = ? OR o.created_by = ?)';
         params.push(req.user.id, req.user.id);
       }
     }
@@ -102,7 +94,7 @@ router.get('/', async (req, res) => {
       if (store_id && store_id !== 'all') {
         // Filter by specific store (must belong to admin)
         // Prefer o.store_id (stores.id). Fallback to legacy matching if o.store_id is NULL.
-        querySql += ` AND (
+        whereSql += ` AND (
           (o.store_id = ? AND EXISTS (SELECT 1 FROM stores WHERE id = ? AND admin_id = ?))
           OR (
             o.store_id IS NULL AND (
@@ -121,7 +113,7 @@ router.get('/', async (req, res) => {
       } else {
         // Show all stores owned by admin
         // Prefer o.store_id (stores.id). Fallback to legacy matching if o.store_id is NULL.
-        querySql += ` AND (
+        whereSql += ` AND (
           (o.store_id IS NOT NULL AND o.store_id IN (SELECT id FROM stores WHERE admin_id = ?))
           OR (
             o.store_id IS NULL AND (
@@ -138,22 +130,22 @@ router.get('/', async (req, res) => {
     }
 
     if (my_orders === 'true' && req.user.role === 'employer') {
-      querySql += ' AND o.assigned_to = ?';
+      whereSql += ' AND o.assigned_to = ?';
       params.push(req.user.id);
     }
 
     if (status) {
-      querySql += ' AND o.status = ?';
+      whereSql += ' AND o.status = ?';
       params.push(status);
     }
 
     if (assigned_to) {
-      querySql += ' AND o.assigned_to = ?';
+      whereSql += ' AND o.assigned_to = ?';
       params.push(assigned_to);
     }
 
     if (customer_phone) {
-      querySql += ' AND c.phone LIKE ?';
+      whereSql += ' AND c.phone LIKE ?';
       params.push(`%${customer_phone}%`);
     }
 
@@ -163,33 +155,107 @@ router.get('/', async (req, res) => {
       if (!startAt || !endAt) {
         return res.status(400).json({ error: 'Invalid date range' });
       }
-      querySql += ' AND o.created_at >= ? AND o.created_at < ?';
+      whereSql += ' AND o.created_at >= ? AND o.created_at < ?';
       params.push(startAt, endAt);
     } else if (date) {
-      querySql += ' AND DATE(o.created_at) = ?';
+      whereSql += ' AND DATE(o.created_at) = ?';
       params.push(date);
     }
 
+    // Đơn đang xử lý (chưa xong/chưa hủy) — Dashboard chỉ cần đếm nhóm này
+    if (active_only === '1' || active_only === 'true') {
+      whereSql += " AND o.status IN ('created', 'washing', 'drying', 'waiting_pickup')";
+    }
+
+    // Trang "Tồn kho": mọi đơn CHƯA hoàn thành — kể cả đã hủy (trang giữ đơn hủy
+    // hiển thị "Đã hủy"). Lọc ở DB thay vì tải toàn bộ lịch sử rồi lọc ở trình duyệt
+    if (pending_only === '1' || pending_only === 'true') {
+      whereSql += " AND o.status <> 'completed'";
+    }
+
     if (debt_only === '1' || debt_only === 'true') {
-      querySql += " AND o.status = 'completed' AND (COALESCE(o.debt_amount, 0) > 0 OR o.payment_status IN ('debt', 'partial') OR COALESCE(o.is_debt, 0) = 1)";
+      whereSql += " AND o.status = 'completed' AND (COALESCE(o.debt_amount, 0) > 0 OR o.payment_status IN ('debt', 'partial') OR COALESCE(o.is_debt, 0) = 1)";
     } else {
-      querySql += " AND NOT (o.status = 'completed' AND (COALESCE(o.debt_amount, 0) > 0 OR o.payment_status IN ('debt', 'partial') OR COALESCE(o.is_debt, 0) = 1))";
+      whereSql += " AND NOT (o.status = 'completed' AND (COALESCE(o.debt_amount, 0) > 0 OR o.payment_status IN ('debt', 'partial') OR COALESCE(o.is_debt, 0) = 1))";
     }
 
     // Filter by date range (for month view)
     const { start_date, end_date } = req.query;
     if (!start_at && !end_at && start_date && end_date) {
-      querySql += ' AND DATE(o.created_at) >= ? AND DATE(o.created_at) <= ?';
+      whereSql += ' AND DATE(o.created_at) >= ? AND DATE(o.created_at) <= ?';
       params.push(start_date, end_date);
     }
 
-    querySql += ' ORDER BY o.created_at DESC';
+    const baseFrom = ' FROM orders o LEFT JOIN customers c ON o.customer_id = c.id';
 
-    const orders = await query(querySql, params);
+    // summary=true: chỉ trả số đếm/tổng tiền theo đúng bộ lọc (Dashboard, dòng
+    // tổng của trang Đơn hàng). Trước đây các nơi này tải TOÀN BỘ danh sách đơn
+    // kèm items chỉ để đếm/cộng — đo được 45 MB/tiệm, 134 MB/chuỗi 3 tiệm với 2 năm dữ liệu
+    if (summary === '1' || summary === 'true') {
+      const row = await queryOne(`
+        SELECT COUNT(*) AS order_count,
+          COALESCE(SUM(o.total_amount), 0) AS total_amount,
+          COALESCE(SUM(COALESCE(o.final_amount, o.total_amount)), 0) AS final_amount,
+          COALESCE(SUM((SELECT COUNT(*) FROM order_items oi WHERE oi.order_id = o.id)), 0) AS item_count
+        ${baseFrom}${whereSql}
+      `, params);
+      return res.json({
+        summary: {
+          order_count: Number(row?.order_count || 0),
+          item_count: Number(row?.item_count || 0),
+          total_amount: Number.parseFloat(row?.total_amount || 0) || 0,
+          final_amount: Number.parseFloat(row?.final_amount || 0) || 0,
+        },
+      });
+    }
+
+    // customer_ids=true: chỉ trả customer_id của các đơn khớp bộ lọc (trang Khách
+    // hàng lọc theo ngày/tháng/năm) — trước đây tải nguyên danh sách đơn kèm items
+    // của cả kỳ chỉ để lấy customer_id
+    if (customer_ids === '1' || customer_ids === 'true') {
+      const rows = await query(
+        `SELECT DISTINCT o.customer_id ${baseFrom}${whereSql} AND o.customer_id IS NOT NULL`,
+        params
+      );
+      return res.json({ customer_ids: rows.map((r) => r.customer_id) });
+    }
+
+    // Phân trang TÙY CHỌN: không gửi limit = trả hết như cũ (Home, trang ca làm
+    // lọc theo 1 ngày và cần đủ danh sách). Lấy dư 1 dòng để biết còn trang sau.
+    // o.id phụ cho created_at trùng giây — thứ tự ổn định giữa các trang
+    let pageSql = '';
+    let pageLimit = null;
+    let pageOffset = 0;
+    const rawLimit = Number.parseInt(req.query.limit, 10);
+    if (Number.isInteger(rawLimit) && rawLimit > 0) {
+      pageLimit = Math.min(rawLimit, 500);
+      const rawOffset = Number.parseInt(req.query.offset, 10);
+      pageOffset = Number.isInteger(rawOffset) && rawOffset > 0 ? rawOffset : 0;
+      pageSql = ` LIMIT ${pageLimit + 1} OFFSET ${pageOffset}`;
+    }
+
+    const orders = await query(`
+      SELECT o.*,
+        c.name as customer_name,
+        c.phone as customer_phone,
+        u.name as assigned_to_name,
+        creator.name as created_by_name
+      ${baseFrom}
+      LEFT JOIN users u ON o.assigned_to = u.id
+      LEFT JOIN users creator ON o.created_by = creator.id
+      ${whereSql}
+      ORDER BY o.created_at DESC, o.id DESC${pageSql}
+    `, params);
+    let hasMore = false;
+    if (pageLimit !== null && orders.length > pageLimit) {
+      hasMore = true;
+      orders.length = pageLimit;
+    }
+    const pagination = pageLimit !== null ? { limit: pageLimit, offset: pageOffset, has_more: hasMore } : undefined;
 
     // Batch query order items to avoid N+1 problem
     if (orders.length === 0) {
-      return res.json({ data: [] });
+      return res.json({ data: [], pagination });
     }
 
     const orderIds = orders.map(o => o.id);
@@ -217,7 +283,7 @@ router.get('/', async (req, res) => {
       items: itemsByOrder[order.id] || []
     }));
 
-    res.json({ data: ordersWithItems });
+    res.json({ data: ordersWithItems, pagination });
   } catch (error) {
     console.error('Get orders error:', error);
     res.status(500).json({ error: 'Server error' });

@@ -1,13 +1,15 @@
-﻿import { useEffect, useState } from 'react';
+﻿import { useEffect, useRef, useState } from 'react';
 import { showToast } from '../../utils/toast';
 import api from '../../utils/api';
 import { isAdmin, isRoot } from '../../utils/auth';
 import { getSavedFilters, saveFilters } from '../../utils/filterStorage';
-import { formatLocalDateKeyDisplay, getLocalMonthRangeUtc, isTodayLocalDateKey } from '../../utils/dateTime';
+import { formatLocalDateKey, formatLocalDateKeyDisplay, getLocalMonthRangeUtc, isTodayLocalDateKey } from '../../utils/dateTime';
+import CashDrawerTimeline from '../../components/CashDrawerTimeline';
+import ShiftReportPanel from '../../components/ShiftReportPanel';
 
 function Reports() {
   const savedFilters = getSavedFilters();
-  const validReportTypes = ['product', 'category', 'shift', 'daily'];
+  const validReportTypes = ['product', 'category', 'shift', 'daily', 'cashflow'];
   
   // Initialize reportType - check if there's a saved one in localStorage, otherwise default to 'product'
   const getInitialReportType = () => {
@@ -37,6 +39,15 @@ function Reports() {
     totalPages: 0
   });
   const [pageSize, setPageSize] = useState(20);
+  // Báo cáo "Dòng tiền két" xem theo NGÀY (không theo tháng) và cho 1 cửa hàng
+  const [selectedDate, setSelectedDate] = useState(() => formatLocalDateKey(new Date()));
+  const [timeline, setTimeline] = useState(null);
+  const [timelineMessage, setTimelineMessage] = useState('');
+  // Số thứ tự request báo cáo: đổi loại/bộ lọc nhanh làm các request chồng
+  // nhau — chỉ response của lần gọi MỚI NHẤT được ghi vào state
+  const requestSeqRef = useRef(0);
+  // Ca đang mở phiếu "Báo cáo ca làm việc" (bấm vào dòng ca / thẻ két)
+  const [detailShiftId, setDetailShiftId] = useState(null);
 
   // Ensure reportType is always valid
   useEffect(() => {
@@ -58,7 +69,12 @@ function Reports() {
       loadData();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reportType, selectedMonth, selectedYear, pagination.page, pageSize, selectedStoreId]);
+  }, [reportType, selectedMonth, selectedYear, pagination.page, pageSize, selectedStoreId, selectedDate]);
+
+  // Đổi loại báo cáo / bộ lọc → đóng khung ca đang xem (ca đó có thể không còn trong bảng mới)
+  useEffect(() => {
+    setDetailShiftId(null);
+  }, [reportType, selectedStoreId, selectedDate, selectedMonth, selectedYear]);
 
   // Save filters whenever they change
   useEffect(() => {
@@ -76,7 +92,42 @@ function Reports() {
     }
   };
 
+  const loadTimeline = async (isLatest) => {
+    // Két là của TỪNG cửa hàng — gộp nhiều tiệm vào một dòng thời gian thì số
+    // tồn két vô nghĩa, backend cũng trả 400 nếu thiếu store_id
+    if (isAdmin() && selectedStoreId === 'all') {
+      setTimeline(null);
+      setTimelineMessage('Chọn một cửa hàng ở ô "Lọc theo cửa hàng" để xem dòng tiền két.');
+      setLoading(false);
+      return;
+    }
+    try {
+      setLoading(true);
+      setTimelineMessage('');
+      const params = new URLSearchParams();
+      params.append('date', selectedDate);
+      params.append('timezone_offset_minutes', String(new Date().getTimezoneOffset()));
+      if (isAdmin()) params.append('store_id', selectedStoreId);
+      const response = await api.get(`/reports/cash-drawer-timeline?${params.toString()}`);
+      if (!isLatest()) return;
+      setTimeline(response.data.data || null);
+    } catch (error) {
+      if (!isLatest()) return;
+      console.error('Error loading cash drawer timeline:', error);
+      setTimeline(null);
+      setTimelineMessage(error.response?.data?.error || 'Không thể tải dòng tiền két');
+    } finally {
+      if (isLatest()) setLoading(false);
+    }
+  };
+
   const loadData = async () => {
+    const requestId = ++requestSeqRef.current;
+    const isLatest = () => requestId === requestSeqRef.current;
+    if (reportType === 'cashflow') {
+      await loadTimeline(isLatest);
+      return;
+    }
     try {
       setLoading(true);
       const params = new URLSearchParams();
@@ -118,7 +169,10 @@ function Reports() {
       }
 
       const response = await api.get(`${endpoint}?${params.toString()}`);
-      
+      // Response của loại báo cáo/bộ lọc cũ — bỏ, nếu không dòng dạng khác
+      // (vd. theo sản phẩm) bị vẽ vào bảng của loại mới
+      if (!isLatest()) return;
+
       // Handle daily revenue report (no pagination)
       if (reportType === 'daily') {
         setData(response.data.data || []);
@@ -140,6 +194,7 @@ function Reports() {
         });
       }
     } catch (error) {
+      if (!isLatest()) return;
       console.error('Error loading report data:', error);
       const errorMessage = error.response?.data?.error || error.message || 'Không thể tải dữ liệu báo cáo';
       showToast(`Lỗi: ${errorMessage}`);
@@ -151,7 +206,7 @@ function Reports() {
         totalPages: 0
       });
     } finally {
-      setLoading(false);
+      if (isLatest()) setLoading(false);
     }
   };
 
@@ -169,7 +224,8 @@ function Reports() {
       product: 'Doanh thu theo mặt hàng',
       category: 'Doanh thu theo danh mục',
       shift: 'Doanh thu theo ca',
-      daily: 'Doanh thu từng ngày trong tháng'
+      daily: 'Doanh thu từng ngày trong tháng',
+      cashflow: 'Dòng tiền két theo ngày'
     };
     return titles[reportType] || 'Báo cáo';
   };
@@ -333,7 +389,14 @@ function Reports() {
         );
       case 'shift':
         return (
-          <tr key={`${item.date}-${item.shift_id}-${index}`} className="hover:bg-blue-50 transition-colors duration-200 cursor-pointer">
+          <tr
+            key={`${item.date}-${item.shift_id}-${index}`}
+            onClick={() => setDetailShiftId(item.shift_id)}
+            title="Bấm để xem báo cáo ca"
+            className={`transition-colors duration-200 cursor-pointer ${
+              item.shift_id === detailShiftId ? 'bg-blue-100' : 'hover:bg-blue-50'
+            }`}
+          >
             <td className="px-4 py-3 text-sm text-gray-800 font-medium">
               {formatLocalDateKeyDisplay(item.date)}
             </td>
@@ -519,7 +582,22 @@ function Reports() {
           >
             Doanh thu từng ngày
           </button>
-            
+          <button
+            onClick={() => {
+              setReportType('cashflow');
+              try {
+                localStorage.setItem('laundry66_reportType', 'cashflow');
+              } catch (e) {}
+            }}
+            className={`px-5 py-2.5 rounded-xl font-medium transition-all duration-300 ${
+              reportType === 'cashflow'
+                ? 'bg-gradient-to-r from-blue-600 to-blue-700 text-white shadow-lg transform scale-105'
+                : 'bg-gray-100 text-gray-700 hover:bg-gray-200 hover:shadow-md'
+            }`}
+          >
+            Dòng tiền két
+          </button>
+
             {/* Store Filter - inline with report type buttons */}
             {isAdmin() && stores.length > 0 && (
               <div className="ml-auto">
@@ -543,6 +621,26 @@ function Reports() {
             )}
           </div>
 
+          {reportType === 'cashflow' ? (
+            <div className="flex gap-3 items-center flex-wrap">
+              <label className="text-sm font-medium text-gray-700">Ngày:</label>
+              <input
+                type="date"
+                value={selectedDate}
+                max={formatLocalDateKey(new Date())}
+                onChange={(e) => e.target.value && setSelectedDate(e.target.value)}
+                className="px-3 py-2 border rounded-lg"
+              />
+              <button
+                type="button"
+                onClick={() => loadTimeline()}
+                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+              >
+                Làm mới
+              </button>
+            </div>
+          ) : (
+          <>
           {/* Month/Year Selector */}
           <div className="flex gap-3 items-center">
           <label className="text-sm font-medium text-gray-700">Tháng:</label>
@@ -581,15 +679,29 @@ function Reports() {
               <span>Xuất Excel</span>
             </button>
           </div>
+          </>
+          )}
         </div>
       </div>
 
-      {/* Report Table */}
-      <div className="bg-white rounded-xl shadow-lg border border-gray-200 overflow-hidden">
+      {/* Report Table — khi đang xem 1 ca: bảng bên trái, phiếu ca bên phải
+          (màn hình hẹp hơn xl thì phiếu nằm TRÊN bảng để không bị khuất).
+          Grid minmax(0,1fr) thay cho flex: bảng rộng (báo cáo theo ca 9 cột)
+          với flex vẫn đẩy bề rộng tối thiểu lên cả trang → phiếu bị tràn, cắt mất
+          cột số tiền bên phải. minmax(0,…) buộc bảng cuộn ngang trong khung của nó */}
+      <div className={detailShiftId ? 'grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_24rem] gap-4 items-start' : ''}>
+      {detailShiftId && (
+        <div className="min-w-0 xl:order-last">
+          <ShiftReportPanel timesheetId={detailShiftId} onClose={() => setDetailShiftId(null)} />
+        </div>
+      )}
+      <div className={`bg-white rounded-xl shadow-lg border border-gray-200 overflow-hidden ${detailShiftId ? 'min-w-0' : ''}`}>
         <div className="bg-gradient-to-r from-blue-500 to-indigo-600 p-6">
           <h2 className="text-xl font-bold text-white">{getReportTitle()}</h2>
           <p className="text-sm text-blue-100 mt-1">
-            Tháng {selectedMonth}/{selectedYear}
+            {reportType === 'cashflow'
+              ? `${formatLocalDateKeyDisplay(selectedDate, { weekday: 'long', day: '2-digit', month: '2-digit', year: 'numeric' })}${timeline?.store_name ? ` · ${timeline.store_name}` : ''}`
+              : `Tháng ${selectedMonth}/${selectedYear}`}
           </p>
           {reportType === 'daily' && dailySummary && (
             <div className="mt-4 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
@@ -648,6 +760,20 @@ function Reports() {
             <div className="inline-block animate-spin rounded-full h-10 w-10 border-b-2 border-blue-600 mb-4"></div>
             <div className="text-gray-500">Đang tải...</div>
           </div>
+        ) : reportType === 'cashflow' ? (
+          timelineMessage ? (
+            <div className="p-12 text-center text-gray-600">
+              <div className="text-4xl mb-4">🏪</div>
+              <div>{timelineMessage}</div>
+            </div>
+          ) : (
+            <CashDrawerTimeline
+              timeline={timeline}
+              selectedDate={selectedDate}
+              onOpenShift={setDetailShiftId}
+              selectedShiftId={detailShiftId}
+            />
+          )
         ) : data.length === 0 ? (
           <div className="p-12 text-center text-gray-500">
             <div className="text-4xl mb-4">📊</div>
@@ -765,6 +891,7 @@ function Reports() {
             )}
           </>
         )}
+      </div>
       </div>
     </div>
   );

@@ -128,6 +128,14 @@ router.get('/', async (req, res) => {
       params.push(`%${search}%`, `%${search}%`);
     }
 
+    // summary=true: chỉ đếm (thẻ "Tổng khách hàng" trên Dashboard) — trước đây
+    // tải cả danh sách khách chỉ để lấy .length
+    if (req.query.summary === '1' || req.query.summary === 'true') {
+      const countSql = querySql.replace(/^\s*SELECT (DISTINCT )?c\.\*/, 'SELECT COUNT(DISTINCT c.id) AS count');
+      const row = await queryOne(countSql, params);
+      return res.json({ summary: { count: Number(row?.count || 0) } });
+    }
+
     querySql += ' ORDER BY c.total_spent DESC, c.created_at DESC';
     
     // LIMIT chỉ áp khi client yêu cầu (autocomplete gửi limit=10, max 50).

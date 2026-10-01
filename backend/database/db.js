@@ -4,6 +4,7 @@ import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import dotenv from 'dotenv';
+import { BACKFILL_HANDOVER_LINK_SQL } from './migrations.js';
 
 dotenv.config();
 
@@ -176,6 +177,9 @@ async function initializeDatabase() {
         // Cột generated cho unique index chống gửi Zalo trùng: row 'sent' = 1,
         // row 'failed' = NULL (không ràng buộc, cho phép thử lại)
         { table: 'order_notifications', column: 'sent_flag', ddl: "TINYINT AS (IF(status = 'sent', 1, NULL)) STORED" },
+        // Dòng "nhận bàn giao két" (opening_float) trỏ về ca GIAO — cho báo cáo
+        // dòng tiền két vẽ đúng chuỗi A → B khi nhiều người chung một ca
+        { table: 'cash_drawer_transactions', column: 'related_timesheet_id', ddl: 'INT NULL' },
       ];
       for (const col of ensureColumns) {
         try {
@@ -191,6 +195,16 @@ async function initializeDatabase() {
           if (error.code !== 'ER_NO_SUCH_TABLE') {
             console.warn(`Warning ensuring column ${col.table}.${col.column}: ${error.message}`);
           }
+        }
+      }
+
+      // Dòng "nhận bàn giao két" ghi TRƯỚC khi có cột related_timesheet_id
+      // (câu lệnh dùng chung với scripts/initDatabase.js — database/migrations.js)
+      try {
+        await connection.query(BACKFILL_HANDOVER_LINK_SQL);
+      } catch (error) {
+        if (error.code !== 'ER_NO_SUCH_TABLE' && error.code !== 'ER_BAD_FIELD_ERROR') {
+          console.warn(`Warning backfilling cash_drawer_transactions.related_timesheet_id: ${error.message}`);
         }
       }
 
@@ -230,6 +244,17 @@ async function initializeDatabase() {
         { name: 'idx_orders_store_created', table: 'orders', columns: 'store_id, created_at' },
         { name: 'idx_order_payments_paid_at', table: 'order_payments', columns: 'paid_at' },
         { name: 'idx_cash_drawer_store_occurred', table: 'cash_drawer_transactions', columns: 'store_id, occurred_at' },
+        // Báo cáo theo sản phẩm/nhóm/ca lọc "đơn hoàn thành trong kỳ" (status +
+        // updated_at): chỉ có idx_orders_status thì đọc MỌI đơn completed rồi mới lọc ngày
+        { name: 'idx_orders_status_updated', table: 'orders', columns: 'status, updated_at' },
+        // Danh sách / số khách của 1 tiệm (customers JOIN orders theo store_id) —
+        // đọc thẳng trên index, không phải mở từng dòng đơn
+        { name: 'idx_orders_store_customer', table: 'orders', columns: 'store_id, customer_id' },
+        // Ca của 1 tiệm theo thời gian (dòng tiền két, tên người đứng ca, check-in)
+        { name: 'idx_timesheets_store_checkin', table: 'timesheets', columns: 'store_id, check_in' },
+        // Tra "ca này đã bàn giao cho ai" (báo cáo ngày, phiếu ca) — không có
+        // index thì mỗi lần tra quét toàn bộ sổ két
+        { name: 'idx_cash_drawer_related_ts', table: 'cash_drawer_transactions', columns: 'related_timesheet_id' },
         // UNIQUE: chặn 2 ca mở cùng lúc cho cùng 1 nhân viên (hoặc cùng 1 slot
         // vô danh) tại 1 tiệm — race double check-in từ 2 thiết bị. Dùng
         // employee_slot_key (đã quy đổi NULL→-1) thay vì employee_id thẳng.

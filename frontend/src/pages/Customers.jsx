@@ -84,11 +84,12 @@ function Customers() {
           ordersParams.append('store_id', selectedStoreId);
         }
 
+        // Chỉ cần customer_id của đơn trong kỳ — không tải cả danh sách đơn kèm items
+        ordersParams.append('customer_ids', 'true');
         const ordersResponse = await api.get(`/orders?${ordersParams.toString()}`);
-        const orders = ordersResponse.data.data || [];
-        
+
         // Get unique customer IDs from orders
-        const customerIds = new Set(orders.map(o => o.customer_id).filter(Boolean));
+        const customerIds = new Set(ordersResponse.data.customer_ids || []);
         
         // Filter customers
         const filteredCustomers = allCustomersData.filter(c => customerIds.has(c.id));

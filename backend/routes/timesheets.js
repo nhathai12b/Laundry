@@ -1020,16 +1020,19 @@ router.post('/check-out', async (req, res) => {
 
       let handoverResult = null;
       if (handoverRecipient) {
-        // actualCashValue = tiền mặt còn trong két SAU khi đã rút (withdrawn ghi
-        // cash_out ở trên) — chính là số tiền vật lý người nhận cầm tiếp.
+        // Số tiền vật lý người nhận cầm tiếp = tiền đếm được SAU khi đã rút
+        // (withdrawn ghi cash_out ở trên) + tiền nhân viên bù thiếu bỏ vào két
+        // (shortage_reimbursement là dòng "in" của két). Thiếu phần bù thì ca
+        // nhận bị ghi "thừa két" ảo đúng bằng số tiền đó lúc họ check-out.
         // = 0 thì không có gì để giao, chỉ ghi nhận đã bàn giao (không tạo dòng két)
-        if (actualCashValue > 0) {
-          await recordDrawerHandoverTx(db, updatedTimesheet, handoverRecipient, actualCashValue, req.user);
+        const handoverAmount = Math.round((actualCashValue + shortagePaidValue) * 100) / 100;
+        if (handoverAmount > 0) {
+          await recordDrawerHandoverTx(db, updatedTimesheet, handoverRecipient, handoverAmount, req.user);
         }
         handoverResult = {
           to_timesheet_id: handoverRecipient.id,
           employee_name: handoverRecipient.employee_name,
-          amount: actualCashValue,
+          amount: handoverAmount,
         };
       }
 

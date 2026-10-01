@@ -1,9 +1,9 @@
-﻿import { useEffect, useState } from 'react';
+﻿import { useEffect, useRef, useState } from 'react';
 import PageSkeleton from '../components/PageSkeleton';
 import { Link } from 'react-router-dom';
 import api from '../utils/api';
 import { isAdmin, isRoot, isMobileScreen } from '../utils/auth';
-import { format, startOfMonth, endOfMonth, startOfYear, endOfYear } from 'date-fns';
+import { format } from 'date-fns';
 import { getSavedFilters, saveFilters } from '../utils/filterStorage';
 import { getLocalDateRangeUtc, getLocalMonthRangeUtc, getLocalYearRangeUtc } from '../utils/dateTime';
 import SetupChecklist from '../components/SetupChecklist';
@@ -23,6 +23,7 @@ function Dashboard() {
   const [selectedStoreId, setSelectedStoreId] = useState(() => getSavedFilters().selectedStoreId);
   // Xem theo ngày / tháng / năm
   const [periodView, setPeriodView] = useState('day');
+  const requestSeqRef = useRef(0);
 
   // Root admin statistics
   const [rootStats, setRootStats] = useState({
@@ -90,147 +91,84 @@ function Dashboard() {
   };
 
   const loadData = async () => {
+    // Đổi kỳ/cửa hàng nhanh làm các lượt tải chồng nhau — chỉ lượt MỚI NHẤT ghi state
+    const requestId = ++requestSeqRef.current;
     try {
       // Không bật spinner khi refresh — giữ số liệu cũ trên màn hình (lần đầu đã có useState(true))
       const now = new Date();
-      let startDate, endDate, period, range;
+      let period, range;
       if (periodView === 'day') {
-        startDate = endDate = format(now, 'yyyy-MM-dd');
         period = 'day';
-        range = getLocalDateRangeUtc(startDate);
+        range = getLocalDateRangeUtc(format(now, 'yyyy-MM-dd'));
       } else if (periodView === 'month') {
-        startDate = format(startOfMonth(now), 'yyyy-MM-dd');
-        endDate = format(endOfMonth(now), 'yyyy-MM-dd');
         period = 'month';
         range = getLocalMonthRangeUtc(now.getFullYear(), now.getMonth() + 1);
       } else {
-        startDate = format(startOfYear(now), 'yyyy-MM-dd');
-        endDate = format(endOfYear(now), 'yyyy-MM-dd');
         period = 'year';
         range = getLocalYearRangeUtc(now.getFullYear());
       }
 
-      // Get revenue and orders count for the period
-      let todayRevenue = 0;
-      let todayOrders = 0;
-      try {
+      const storeFilter = isAdmin() && selectedStoreId && selectedStoreId !== 'all' ? selectedStoreId : null;
+      const withStore = (params) => {
+        if (storeFilter) params.append('store_id', storeFilter);
+        return params.toString();
+      };
+      const revenueQuery = (storeId) => {
         const params = new URLSearchParams();
         params.append('period', period);
         params.append('start_at', range.start_at);
         params.append('end_at', range.end_at);
         params.append('timezone_offset_minutes', String(new Date().getTimezoneOffset()));
-        if (isAdmin() && selectedStoreId && selectedStoreId !== 'all') {
-          params.append('store_id', selectedStoreId);
-        }
-        const revenueRes = await api.get(`/reports/revenue?${params.toString()}`);
-        const revenueData = revenueRes.data.data || [];
-        todayRevenue = revenueData.reduce((s, r) => s + (parseFloat(r.total_revenue) || 0), 0);
-        todayOrders = revenueData.reduce((s, r) => s + (r.total_orders || 0), 0);
-      } catch (error) {
-        console.error('Error loading revenue:', error);
-      }
-      
-      // Get active orders count (unchanged - current pending)
-      let activeOrders = 0;
-      try {
-        const params = new URLSearchParams();
-        params.append('limit', '100');
-        if (isAdmin() && selectedStoreId && selectedStoreId !== 'all') {
-          params.append('store_id', selectedStoreId);
-        }
-        const ordersRes = await api.get(`/orders?${params.toString()}`);
-        const orders = ordersRes.data.data || [];
-        activeOrders = orders.filter(
-          (o) => !['completed', 'cancelled'].includes(o.status)
-        ).length;
-      } catch (error) {
-        console.error('Error loading orders:', error);
-      }
+        if (storeId) params.append('store_id', storeId);
+        return params.toString();
+      };
+      const sumRevenue = (rows) => ({
+        revenue: rows.reduce((s, r) => s + (parseFloat(r.total_revenue) || 0), 0),
+        orders: rows.reduce((s, r) => s + (r.total_orders || 0), 0),
+      });
 
-      // Get total amount of debt orders (tổng tiền đang ghi nợ)
-      let debtOrders = 0;
-      try {
-        const params = new URLSearchParams();
-        params.append('debt_only', 'true');
-        if (isAdmin() && selectedStoreId && selectedStoreId !== 'all') {
-          params.append('store_id', selectedStoreId);
+      // Doanh thu theo từng cửa hàng (chỉ khi xem tất cả cửa hàng)
+      const loadStoreRevenues = async () => {
+        if (!isAdmin() || selectedStoreId !== 'all') return [];
+        let storesList = stores;
+        if (storesList.length === 0) {
+          const storesRes = await api.get('/stores');
+          storesList = storesRes.data.data || [];
         }
-        const debtRes = await api.get(`/orders?${params.toString()}`);
-        const debtList = debtRes.data.data || [];
-        debtOrders = debtList.reduce((s, o) => s + (Number.isFinite(parseFloat(o.final_amount)) ? parseFloat(o.final_amount) : (parseFloat(o.total_amount) || 0)), 0);
-      } catch (error) {
-        console.error('Error loading debt orders:', error);
-      }
-      
-      // Get customers count
-      let totalCustomers = 0;
-      try {
-        const params = new URLSearchParams();
-        if (isAdmin() && selectedStoreId && selectedStoreId !== 'all') {
-          params.append('store_id', selectedStoreId);
-        }
-        const customersRes = await api.get(`/customers?${params.toString()}`);
-        totalCustomers = customersRes.data.data?.length || 0;
-      } catch (error) {
-        console.error('Error loading customers:', error);
-      }
+        // Show all stores, even if revenue is 0 (lỗi 1 tiệm → hiện 0, không chặn tiệm khác)
+        return Promise.all(storesList.map((store) => api.get(`/reports/revenue?${revenueQuery(store.id)}`)
+          .then((res) => ({ store_id: store.id, store_name: store.name, ...sumRevenue(res.data.data || []) }))
+          .catch((error) => {
+            console.error(`Error loading revenue for store ${store.id} (${store.name}):`, error);
+            return { store_id: store.id, store_name: store.name, revenue: 0, orders: 0 };
+          })));
+      };
 
-      // Get revenue by store (only when viewing all stores)
-      let storeRevenues = [];
-      if (isAdmin() && selectedStoreId === 'all') {
-        try {
-          // Get stores list if not already loaded
-          let storesList = stores;
-          if (storesList.length === 0) {
-            const storesRes = await api.get('/stores');
-            storesList = storesRes.data.data || [];
-          }
-          
-          // Get revenue for each store separately (same period as overview)
-          for (const store of storesList) {
-            try {
-              const storeParams = new URLSearchParams();
-              storeParams.append('period', period);
-              storeParams.append('start_at', range.start_at);
-              storeParams.append('end_at', range.end_at);
-              storeParams.append('timezone_offset_minutes', String(new Date().getTimezoneOffset()));
-              storeParams.append('store_id', store.id);
-              const url = `/reports/revenue?${storeParams.toString()}`;
-              // Debug log removed for security
-              const storeRevenueRes = await api.get(url);
-              const storeRevenueRows = storeRevenueRes.data.data || [];
-              const storeRevenue = storeRevenueRows.reduce((s, r) => s + (parseFloat(r.total_revenue) || 0), 0);
-              const storeOrdersCount = storeRevenueRows.reduce((s, r) => s + (r.total_orders || 0), 0);
-              
-              // Debug log removed for security
-              
-              // Show all stores, even if revenue is 0
-              storeRevenues.push({
-                store_id: store.id,
-                store_name: store.name,
-                revenue: storeRevenue,
-                orders: storeOrdersCount,
-              });
-            } catch (error) {
-              console.error(`Error loading revenue for store ${store.id} (${store.name}):`, error);
-              // Still add store with 0 revenue if error
-              storeRevenues.push({
-                store_id: store.id,
-                store_name: store.name,
-                revenue: 0,
-                orders: 0,
-              });
-            }
-          }
-          // Debug log removed for security
-        } catch (error) {
-          console.error('Error loading revenue by store:', error);
-        }
-      }
+      // Các khối độc lập — gọi SONG SONG (trước đây tuần tự, thời gian chờ cộng dồn).
+      // Đơn đang xử lý / tổng nợ / số khách: chỉ lấy số tổng hợp (summary), trước
+      // đây tải toàn bộ danh sách đơn + khách chỉ để đếm/cộng
+      const [revenue, activeOrders, debtOrders, totalCustomers, storeRevenues] = await Promise.all([
+        api.get(`/reports/revenue?${revenueQuery(storeFilter)}`)
+          .then((res) => sumRevenue(res.data.data || []))
+          .catch((error) => { console.error('Error loading revenue:', error); return { revenue: 0, orders: 0 }; }),
+        api.get(`/orders?${withStore(new URLSearchParams({ active_only: 'true', summary: 'true' }))}`)
+          .then((res) => res.data.summary?.order_count || 0)
+          .catch((error) => { console.error('Error loading orders:', error); return 0; }),
+        // Tổng tiền đang ghi nợ
+        api.get(`/orders?${withStore(new URLSearchParams({ debt_only: 'true', summary: 'true' }))}`)
+          .then((res) => res.data.summary?.final_amount || 0)
+          .catch((error) => { console.error('Error loading debt orders:', error); return 0; }),
+        api.get(`/customers?${withStore(new URLSearchParams({ summary: 'true' }))}`)
+          .then((res) => res.data.summary?.count || 0)
+          .catch((error) => { console.error('Error loading customers:', error); return 0; }),
+        loadStoreRevenues()
+          .catch((error) => { console.error('Error loading revenue by store:', error); return []; }),
+      ]);
+      if (requestId !== requestSeqRef.current) return;
 
       setStats({
-        todayRevenue,
-        todayOrders,
+        todayRevenue: revenue.revenue,
+        todayOrders: revenue.orders,
         totalCustomers,
         activeOrders,
         debtOrders,
@@ -239,7 +177,7 @@ function Dashboard() {
     } catch (error) {
       console.error('Error loading dashboard:', error);
     } finally {
-      setLoading(false);
+      if (requestId === requestSeqRef.current) setLoading(false);
     }
   };
 

@@ -19,11 +19,13 @@ export async function resolveCurrentEmployeeId(actor, queryFn = queryOne) {
   if (!actor || actor.role !== 'employer') return null;
   if (actor.employee_login) return actor.employee_id || null;
 
-  const rows = await queryFn(
-    'SELECT employee_id FROM timesheets WHERE user_id = ? AND check_out IS NULL LIMIT 2',
+  // Một truy vấn aggregate — queryFn là queryOne (chỉ trả dòng ĐẦU), nên đếm
+  // ở SQL thay vì lấy danh sách rồi đếm ở JS (bản trước làm vậy: luôn thấy
+  // "1 ca" dù có 2 ca mở → hoa hồng gán nhầm cho người mở ca trước)
+  const row = await queryFn(
+    'SELECT COUNT(*) AS open_count, MIN(employee_id) AS employee_id FROM timesheets WHERE user_id = ? AND check_out IS NULL',
     [actor.id]
   );
-  const openShifts = Array.isArray(rows) ? rows : (rows ? [rows] : []);
-  if (openShifts.length !== 1) return null;
-  return openShifts[0]?.employee_id || null;
+  if (Number(row?.open_count) !== 1) return null;
+  return row.employee_id || null;
 }

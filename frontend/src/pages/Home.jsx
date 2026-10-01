@@ -240,11 +240,13 @@ function Home() {
     };
   }, [searchTimeout]);
 
-  const loadOrders = async () => {
+  // `date` mặc định = ngày đang chọn; sau khi tạo đơn truyền thẳng "hôm nay"
+  // (closure còn giữ selectedDate cũ nếu vừa nhảy ngày)
+  const loadOrders = async (date = selectedDate) => {
     try {
       // Không bật spinner khi refresh — giữ dữ liệu cũ trên màn hình (lần đầu đã có useState(true))
       const params = new URLSearchParams();
-      const range = getLocalDateRangeUtc(selectedDate);
+      const range = getLocalDateRangeUtc(date);
       params.append('start_at', range.start_at);
       params.append('end_at', range.end_at);
       
@@ -257,7 +259,7 @@ function Home() {
         if (!order.created_at) return false;
         try {
           const orderDate = formatLocalDateKey(order.created_at);
-          return orderDate === selectedDate;
+          return orderDate === date;
         } catch (e) {
           return false;
         }
@@ -281,39 +283,36 @@ function Home() {
     }
   };
 
-  const loadStats = async () => {
+  const loadStats = async (date = selectedDate) => {
     try {
-      // Use reports API to get revenue by completion date (updated_at)
-      try {
-        const range = getLocalDateRangeUtc(selectedDate);
-        const revenueRes = await api.get(`/reports/revenue?period=day&start_at=${encodeURIComponent(range.start_at)}&end_at=${encodeURIComponent(range.end_at)}&timezone_offset_minutes=${new Date().getTimezoneOffset()}`);
-        const todayRevenueData = revenueRes.data.data?.[0];
-        const todayRevenue = parseFloat(todayRevenueData?.total_revenue) || 0;
-        
-        // Get orders count for the selected date (by created_at for display)
-        const response = await api.get(`/orders?start_at=${encodeURIComponent(range.start_at)}&end_at=${encodeURIComponent(range.end_at)}`);
-        const dayOrders = response.data.data || [];
-        
-        setStats({
-          todayRevenue: todayRevenue, // Revenue calculated by completion date (updated_at)
-          todayOrders: dayOrders.length || 0,
-          totalAmount: dayOrders.reduce((sum, o) => sum + (parseFloat(o.total_amount) || 0), 0) || 0,
-        });
-      } catch (revenueError) {
-        console.error('Error loading revenue from reports:', revenueError);
-        // Fallback to old method
-        const range = getLocalDateRangeUtc(selectedDate);
-        const response = await api.get(`/orders?start_at=${encodeURIComponent(range.start_at)}&end_at=${encodeURIComponent(range.end_at)}`);
-        const dayOrders = response.data.data || [];
-        const completedOrders = dayOrders.filter(o => o.status === 'completed');
-        const totalRevenue = completedOrders.reduce((sum, o) => sum + (parseFloat(o.final_amount ?? o.total_amount) || 0), 0);
-        
-        setStats({
-          todayRevenue: totalRevenue || 0,
-          todayOrders: dayOrders.length || 0,
-          totalAmount: dayOrders.reduce((sum, o) => sum + (parseFloat(o.total_amount) || 0), 0) || 0,
-        });
+      const range = getLocalDateRangeUtc(date);
+      const rangeQuery = `start_at=${encodeURIComponent(range.start_at)}&end_at=${encodeURIComponent(range.end_at)}`;
+      // Doanh thu (theo lúc thu tiền) + số đơn/tổng tiền (theo ngày tạo) gọi SONG
+      // SONG; số đơn chỉ cần số tổng hợp (summary=true) — trước đây gọi tuần tự
+      // và tải lại nguyên danh sách đơn trong ngày lần 2 (loadOrders đã tải) chỉ để đếm
+      const [revenueResult, summaryRes] = await Promise.all([
+        api.get(`/reports/revenue?period=day&${rangeQuery}&timezone_offset_minutes=${new Date().getTimezoneOffset()}`)
+          .catch((error) => ({ error })),
+        api.get(`/orders?${rangeQuery}&summary=true`),
+      ]);
+
+      let todayRevenue;
+      if (revenueResult.error) {
+        console.error('Error loading revenue from reports:', revenueResult.error);
+        // Fallback to old method: cộng các đơn hoàn thành trong ngày
+        const response = await api.get(`/orders?${rangeQuery}`);
+        const completedOrders = (response.data.data || []).filter(o => o.status === 'completed');
+        todayRevenue = completedOrders.reduce((sum, o) => sum + (parseFloat(o.final_amount ?? o.total_amount) || 0), 0);
+      } else {
+        todayRevenue = parseFloat(revenueResult.data.data?.[0]?.total_revenue) || 0;
       }
+
+      const summary = summaryRes.data.summary || {};
+      setStats({
+        todayRevenue: todayRevenue || 0, // Revenue calculated by payment time
+        todayOrders: summary.order_count || 0,
+        totalAmount: summary.total_amount || 0,
+      });
     } catch (error) {
       console.error('Error loading stats:', error);
     }
@@ -788,42 +787,9 @@ function Home() {
         setSelectedYear(todayYear);
       }
       
-      // Force reload orders with today's date (don't wait for useEffect)
-      try {
-        const params = new URLSearchParams();
-        const range = getLocalDateRangeUtc(today);
-        params.append('start_at', range.start_at);
-        params.append('end_at', range.end_at);
-        const response = await api.get(`/orders?${params.toString()}`);
-        const allOrders = response.data.data || [];
-        const filteredOrders = allOrders.filter(order => {
-          const orderDate = formatLocalDateKey(order.created_at);
-          return orderDate === today;
-        });
-        setOrders(filteredOrders);
-      } catch (error) {
-        console.error('Error reloading orders:', error);
-      }
-      
-      // Reload stats - use reports API to get revenue by completion date
-      try {
-        const range = getLocalDateRangeUtc(today);
-        const revenueRes = await api.get(`/reports/revenue?period=day&start_at=${encodeURIComponent(range.start_at)}&end_at=${encodeURIComponent(range.end_at)}&timezone_offset_minutes=${new Date().getTimezoneOffset()}`);
-        const todayRevenueData = revenueRes.data.data?.[0];
-        const todayRevenue = parseFloat(todayRevenueData?.total_revenue) || 0;
-        
-        const statsResponse = await api.get(`/orders?start_at=${encodeURIComponent(range.start_at)}&end_at=${encodeURIComponent(range.end_at)}`);
-        const dayOrders = statsResponse.data.data || [];
-        
-        setStats({
-          todayRevenue: todayRevenue, // Revenue calculated by completion date (updated_at)
-          todayOrders: dayOrders.length || 0,
-          totalAmount: dayOrders.reduce((sum, o) => sum + (parseFloat(o.total_amount) || 0), 0) || 0,
-        });
-      } catch (error) {
-        console.error('Error reloading stats:', error);
-      }
-      
+      // Force reload orders + stats with today's date (don't wait for useEffect)
+      await Promise.all([loadOrders(today), loadStats(today)]);
+
       // KHÔNG reload lại bằng setTimeout: closure loadOrders ở đây giữ
       // selectedDate CŨ (trước khi nhảy về hôm nay) — 1.5s sau nó âm thầm
       // thay danh sách hôm nay bằng đơn của ngày cũ. Force-reload phía trên

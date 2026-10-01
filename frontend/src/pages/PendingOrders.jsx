@@ -24,7 +24,9 @@ function PendingOrders() {
       // Không bật spinner khi refresh — giữ dữ liệu cũ trên màn hình (lần đầu đã có useState(true))
       const params = new URLSearchParams();
       params.append('my_orders', 'true');
-      // Không filter theo status, sẽ filter ở client-side
+      // Lọc "chưa hoàn thành" ở server — trước đây tải TOÀN BỘ lịch sử đơn của
+      // tiệm rồi mới lọc ở đây (hàng chục MB khi tiệm chạy vài năm)
+      params.append('pending_only', 'true');
 
       const response = await api.get(`/orders?${params.toString()}`);
       const allOrders = response.data.data || [];
